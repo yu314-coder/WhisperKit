@@ -11,7 +11,7 @@ struct TranscriptDetailView: View {
     @State private var editingSpeakerForSegment: SavedSegment?
     @State private var speakerDraft: String = ""
     @State private var showExportPicker = false
-    @State private var pendingShareURL: URL?
+    @State private var pendingShare: ShareItem?
     @State private var renamingTitle = false
     @State private var titleDraft: String = ""
 
@@ -31,8 +31,8 @@ struct TranscriptDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
         .onAppear(perform: loadAudio)
-        .sheet(item: $pendingShareURL) { url in
-            ShareSheet(activityItems: [url])
+        .sheet(item: $pendingShare) { item in
+            ShareSheet(activityItems: [item.url])
         }
         .confirmationDialog("Export Transcript", isPresented: $showExportPicker, titleVisibility: .visible) {
             ForEach(ExportFormat.allCases) { fmt in
@@ -258,7 +258,7 @@ struct TranscriptDetailView: View {
     private func exportAs(_ fmt: ExportFormat) {
         do {
             let url = try TranscriptExporter.write(transcript, as: fmt)
-            pendingShareURL = url
+            pendingShare = ShareItem(url: url)
         } catch {
             print("Export error: \(error)")
         }
@@ -282,7 +282,9 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-// Allow URL to be used directly with .sheet(item:)
-extension URL: Identifiable {
-    public var id: String { absoluteString }
+/// Wraps an export URL for `.sheet(item:)`. Conforming `URL` itself to
+/// `Identifiable` would break if Foundation ever adds that conformance.
+struct ShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
 }

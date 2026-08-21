@@ -30,7 +30,10 @@ enum AudioConverter {
         }
 
         // Reader: pull samples out as 16 kHz mono 16-bit PCM
-        let assetReader = try AVAssetReader(asset: asset)
+        // These AVFoundation objects are not Sendable, but every touch below
+        // happens on the single serial queue driving requestMediaDataWhenReady,
+        // so the capture is safe.
+        nonisolated(unsafe) let assetReader = try AVAssetReader(asset: asset)
         let pcmSettings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatLinearPCM),
             AVSampleRateKey: 16000,
@@ -40,7 +43,7 @@ enum AudioConverter {
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMIsNonInterleaved: false
         ]
-        let readerOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: pcmSettings)
+        nonisolated(unsafe) let readerOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: pcmSettings)
         guard assetReader.canAdd(readerOutput) else {
             throw NSError(domain: "AudioConverter", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "Reader rejected output settings."])
@@ -51,8 +54,8 @@ enum AudioConverter {
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("whisper_in_\(UUID().uuidString).wav")
         try? FileManager.default.removeItem(at: outputURL)
-        let assetWriter = try AVAssetWriter(outputURL: outputURL, fileType: .wav)
-        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: pcmSettings)
+        nonisolated(unsafe) let assetWriter = try AVAssetWriter(outputURL: outputURL, fileType: .wav)
+        nonisolated(unsafe) let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: pcmSettings)
         writerInput.expectsMediaDataInRealTime = false
         guard assetWriter.canAdd(writerInput) else {
             throw NSError(domain: "AudioConverter", code: 3,
