@@ -15,8 +15,34 @@ struct TranscriptDetailView: View {
     @State private var renamingTitle = false
     @State private var titleDraft: String = ""
 
-    var sortedSegments: [SavedSegment] {
-        transcript.segments.sorted { $0.startTime < $1.startTime }
+    /// Sorted once on appear rather than recomputed on every access. Segment
+    /// start times never change after transcription, so the order is stable;
+    /// `revision` is bumped when a speaker label is edited so the list still
+    /// refreshes for the one field that *can* change.
+    @State private var sortedSegments: [SavedSegment] = []
+    @State private var revision: Int = 0
+
+    /// The segment under the playhead. Held as state and only written when it
+    /// actually changes, so 10 Hz playback ticks don't invalidate the list.
+    @State private var activeSegmentID: UUID?
+
+    /// Binary search — the list can run to thousands of segments on a long
+    /// recording, and this used to be a linear scan performed once per row.
+    private func segmentID(at time: Double) -> UUID? {
+        var low = 0
+        var high = sortedSegments.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            let seg = sortedSegments[mid]
+            if time < seg.startTime {
+                high = mid - 1
+            } else if time >= seg.endTime {
+                low = mid + 1
+            } else {
+                return seg.id
+            }
+        }
+        return nil
     }
 
     var body: some View {
@@ -30,7 +56,35 @@ struct TranscriptDetailView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
-        .onAppear(perform: loadAudio)
+        .onAppear {
+            sortedSegments = transcript.segments.sorted { $0.startTime < $1.startTime }
+            loadAudio()
+        }
+        // Recompute the highlight only when the playhead crosses a boundary.
+        .onReceive(player.$currentTime) { t in
+            let id = segmentID(at: t)
+            if id != activeSegmentID { activeSegmentID = id }
+        }
+        // One alert for the whole screen. It used to be attached to every row,
+        // which put N alert modifiers in the view tree.
+        .alert("Speaker name", isPresented: Binding(
+            get: { editingSpeakerForSegment != nil },
+            set: { if !$0 { editingSpeakerForSegment = nil } }
+        )) {
+            TextField("Speaker", text: $speakerDraft)
+            Button("Save") {
+                let trimmed = speakerDraft.trimmingCharacters(in: .whitespaces)
+                editingSpeakerForSegment?.speaker = trimmed.isEmpty ? nil : trimmed
+                editingSpeakerForSegment = nil
+                revision &+= 1
+            }
+            Button("Clear", role: .destructive) {
+                editingSpeakerForSegment?.speaker = nil
+                editingSpeakerForSegment = nil
+                revision &+= 1
+            }
+            Button("Cancel", role: .cancel) { editingSpeakerForSegment = nil }
+        }
         .sheet(item: $pendingShare) { item in
             ShareSheet(activityItems: [item.url])
         }
@@ -83,93 +137,17 @@ struct TranscriptDetailView: View {
     // MARK: - Segment list
 
     private var segmentList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(sortedSegments) { seg in
-                        segmentRow(seg)
-                            .id(seg.id)
-                    }
-                }
-                .padding()
+        SegmentListView(
+            segments: sortedSegments,
+            activeID: activeSegmentID,
+            revision: revision,
+            onSeek: { player.seek(to: $0) },
+            onEditSpeaker: { seg in
+                speakerDraft = seg.speaker ?? ""
+                editingSpeakerForSegment = seg
             }
-            .onChange(of: activeSegmentID) { _, newID in
-                guard let id = newID else { return }
-                withAnimation(.easeOut(duration: 0.25)) {
-                    proxy.scrollTo(id, anchor: .center)
-                }
-            }
-        }
-    }
-
-    private var activeSegmentID: UUID? {
-        sortedSegments.first(where: { player.currentTime >= $0.startTime && player.currentTime < $0.endTime })?.id
-    }
-
-    @ViewBuilder
-    private func segmentRow(_ seg: SavedSegment) -> some View {
-        let isActive = (seg.id == activeSegmentID)
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(TranscriptExporter.formatTimestamp(seg.startTime))
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(isActive ? .accentColor : .secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule().fill(isActive ? Color.accentColor.opacity(0.18) : Color.gray.opacity(0.12))
-                    )
-
-                Button {
-                    speakerDraft = seg.speaker ?? ""
-                    editingSpeakerForSegment = seg
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "person.fill")
-                            .font(.caption2)
-                        Text(seg.speaker?.isEmpty == false ? seg.speaker! : "Add speaker")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .foregroundColor(seg.speaker?.isEmpty == false ? .blue : .secondary)
-                }
-                .buttonStyle(.plain)
-
-                Spacer()
-            }
-
-            Text(seg.text)
-                .font(.body)
-                .foregroundColor(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isActive ? Color.accentColor.opacity(0.08) : Color(.tertiarySystemGroupedBackground))
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isActive ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture {
-            player.seek(to: seg.startTime)
-        }
-        .alert("Speaker name",
-               isPresented: Binding(
-                get: { editingSpeakerForSegment?.id == seg.id },
-                set: { if !$0 { editingSpeakerForSegment = nil } }
-               )) {
-            TextField("Speaker", text: $speakerDraft)
-            Button("Save") {
-                let trimmed = speakerDraft.trimmingCharacters(in: .whitespaces)
-                seg.speaker = trimmed.isEmpty ? nil : trimmed
-            }
-            Button("Clear", role: .destructive) {
-                seg.speaker = nil
-            }
-            Button("Cancel", role: .cancel) {}
-        }
+        .equatable()
     }
 
     // MARK: - Player bar
@@ -287,4 +265,91 @@ struct ShareSheet: UIViewControllerRepresentable {
 struct ShareItem: Identifiable {
     let id = UUID()
     let url: URL
+}
+
+// MARK: - Segment list
+
+/// Extracted and `Equatable` so that playback ticks — which republish the
+/// player's `currentTime` several times a second — cannot invalidate the whole
+/// segment list. SwiftUI re-renders it only when the highlighted segment, the
+/// segment count, or the speaker revision actually changes.
+private struct SegmentListView: View, Equatable {
+    let segments: [SavedSegment]
+    let activeID: UUID?
+    let revision: Int
+    let onSeek: (Double) -> Void
+    let onEditSpeaker: (SavedSegment) -> Void
+
+    static func == (a: SegmentListView, b: SegmentListView) -> Bool {
+        a.activeID == b.activeID
+            && a.revision == b.revision
+            && a.segments.count == b.segments.count
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(segments) { seg in
+                        row(seg, isActive: seg.id == activeID)
+                            .id(seg.id)
+                    }
+                }
+                .padding()
+            }
+            .onChange(of: activeID) { _, newID in
+                guard let id = newID else { return }
+                withAnimation(.easeOut(duration: 0.25)) {
+                    proxy.scrollTo(id, anchor: .center)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ seg: SavedSegment, isActive: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(TranscriptExporter.formatTimestamp(seg.startTime))
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(isActive ? .accentColor : .secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule().fill(isActive ? Color.accentColor.opacity(0.18) : Color.gray.opacity(0.12))
+                    )
+
+                Button {
+                    onEditSpeaker(seg)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "person.fill")
+                            .font(.caption2)
+                        Text(seg.speaker?.isEmpty == false ? seg.speaker! : "Add speaker")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundColor(seg.speaker?.isEmpty == false ? .blue : .secondary)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+            }
+
+            Text(seg.text)
+                .font(.body)
+                .foregroundColor(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isActive ? Color.accentColor.opacity(0.08) : Color(.tertiarySystemGroupedBackground))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isActive ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { onSeek(seg.startTime) }
+    }
 }

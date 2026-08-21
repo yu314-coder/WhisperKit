@@ -14,12 +14,13 @@ struct ContentView: View {
     // MARK: - State Properties
     @Environment(\.modelContext) private var modelContext
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    /// Sampling model. Isolated from ContentView's own state so its 1 Hz tick
+    /// redraws only the meter, not the whole screen.
+    @State private var monitor = SystemMonitor()
     // Previous tick counters for instantaneous CPU & task time deltas.
     // Without this baseline the sampler returns the cumulative since-boot
     // average, which is nearly constant — making the chart look frozen.
-    @State private var lastHostCPUTicks: (user: UInt64, system: UInt64, nice: UInt64, idle: UInt64) = (0, 0, 0, 0)
-    @State private var lastTaskTimeSeconds: Double = 0
-    @State private var lastSampleAt: Date? = nil
     @State private var showLibrary: Bool = false
     @State private var showModelPicker: Bool = false
     @State private var showLanguagePicker: Bool = false
@@ -49,7 +50,6 @@ struct ContentView: View {
     @State private var transcriptionProgress: Double = 0.0
     @State private var currentSegment: Int = 0
     @State private var totalSegments: Int = 0
-    @State private var systemStatsHistory: [SystemStatsSnapshot] = []
     @State private var showCopySuccess = false
     
     // TQDM-style progress tracking
@@ -62,8 +62,6 @@ struct ContentView: View {
     @State private var whisperKit: WhisperKit?
     
     // Real-time monitoring
-    @State private var monitoringTimer: Timer?
-    @State private var metalDevice: MTLDevice?
     
     // Background handling
     @Environment(\.scenePhase) private var scenePhase
@@ -79,19 +77,6 @@ struct ContentView: View {
     @State private var isRecording = false
     @State private var recordingURL: URL?
     @State private var recordingStartTime: Date?
-    @State private var recordingElapsed: TimeInterval = 0
-    @State private var recordingTimer: Timer?
-    
-    // MARK: - Enhanced System Stats
-    struct SystemStatsSnapshot: Identifiable {
-        let id = UUID()
-        let timestamp: Date
-        let cpuUsage: Double
-        let memoryUsage: Double
-        let memoryPercent: Double
-        let gpuUsage: Double
-        let networkIO: Double
-    }
     
     // MARK: - Transcript Result Metadata
 
@@ -172,14 +157,19 @@ struct ContentView: View {
         .onAppear {
             checkModelStatus()
             createDebugFiles()
-            initializeGPUMonitoring()
+            monitor.initializeGPUMonitoring()
+            monitor.onSample = {
+                if isProcessing && scenePhase == .background {
+                    updateLiveActivity()
+                }
+            }
             setupBackgroundAudio()
             requestNotificationPermissions()
             registerBackgroundTasks()
             cleanupStaleActivities()
         }
         .onDisappear {
-            stopSystemMonitoring()
+            monitor.stopSystemMonitoring()
             endLiveActivity()
 
             // Clean up all activities when view disappears
@@ -511,7 +501,7 @@ struct ContentView: View {
             // Live CPU / Memory / Neural-Engine sparklines run for ALL phases
             // (download, model warm-up, audio convert, transcription) so the
             // user can see the app actually working.
-            paperPerfMonitor
+            PaperPerfMonitor(monitor: monitor)
                 .padding(.top, 12)
         }
     }
@@ -528,207 +518,8 @@ struct ContentView: View {
     static let perfMem    = Color(red: 0.470, green: 0.380, blue: 0.220) // umber
     static let perfNPU    = Color(red: 0.180, green: 0.380, blue: 0.580) // deep ink-blue
 
-    var paperPerfMonitor: some View {
-        let latest = systemStatsHistory.last
-        let elapsed = max(0, systemStatsHistory.count - 1)
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 6) {
-                Rectangle()
-                    .fill(Self.paperInk.opacity(0.20))
-                    .frame(width: 18, height: 1)
-                Text("Live performance")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(2)
-                    .foregroundColor(Self.paperMute)
-                Spacer()
-                Text("\(elapsed)s")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundColor(Self.paperMute.opacity(0.75))
-            }
-
-            paperPerfChannel(
-                label: "Processor",
-                accent: Self.perfCPU,
-                value: latest?.cpuUsage ?? 0,
-                samples: systemStatsHistory.map { $0.cpuUsage },
-                primaryUnit: "%",
-                secondary: nil
-            )
-
-            Divider().background(Self.paperRule)
-
-            paperPerfChannel(
-                label: "Memory",
-                accent: Self.perfMem,
-                value: latest?.memoryPercent ?? 0,
-                samples: systemStatsHistory.map { $0.memoryPercent },
-                primaryUnit: "%",
-                secondary: String(format: "%.0f MB", latest?.memoryUsage ?? 0)
-            )
-
-            Divider().background(Self.paperRule)
-
-            paperPerfChannel(
-                label: "Neural Engine",
-                accent: Self.perfNPU,
-                value: latest?.gpuUsage ?? 0,
-                samples: systemStatsHistory.map { $0.gpuUsage },
-                primaryUnit: "%",
-                secondary: nil
-            )
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.white.opacity(0.62))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Self.paperRule, lineWidth: 0.5)
-        )
-        .shadow(color: Self.paperInk.opacity(0.04), radius: 8, y: 2)
-    }
-
-    func paperPerfChannel(
-        label: String,
-        accent: Color,
-        value: Double,
-        samples: [Double],
-        primaryUnit: String,
-        secondary: String?
-    ) -> some View {
-        let peak = samples.max() ?? 0
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                // Channel dot
-                Circle()
-                    .fill(accent)
-                    .frame(width: 7, height: 7)
-
-                Text(label.uppercased())
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(1.5)
-                    .foregroundColor(Self.paperMute)
-
-                Spacer()
-
-                // Peak chip
-                if samples.count > 1 {
-                    HStack(spacing: 3) {
-                        Text("peak")
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
-                            .foregroundColor(Self.paperMute.opacity(0.75))
-                        Text(String(format: "%.0f%@", peak, primaryUnit))
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundColor(accent.opacity(0.85))
-                    }
-                }
-            }
-
-            HStack(alignment: .firstTextBaseline, spacing: 0) {
-                // Hero value
-                Text(String(format: "%.0f", value))
-                    .font(.system(size: 28, weight: .semibold, design: .serif))
-                    .foregroundColor(Self.paperInk)
-                    .monospacedDigit()
-                Text(primaryUnit)
-                    .font(.system(size: 14, weight: .medium, design: .serif))
-                    .foregroundColor(Self.paperInk.opacity(0.55))
-                    .padding(.leading, 1)
-                if let s = secondary {
-                    Text("· \(s)")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(Self.paperMute.opacity(0.85))
-                        .padding(.leading, 6)
-                }
-                Spacer()
-            }
-
-            // Sparkline with peak rule
-            GeometryReader { geo in
-                paperSparklineSmooth(samples: samples, accent: accent, in: geo.size)
-            }
-            .frame(height: 34)
-        }
-    }
-
-    @ViewBuilder
-    func paperSparklineSmooth(samples: [Double], accent: Color, in size: CGSize) -> some View {
-        let h = size.height
-        let w = size.width
-        if samples.count < 2 {
-            // Empty baseline — dotted hairline so the chart has visual presence
-            Path { p in
-                p.move(to: CGPoint(x: 0, y: h - 1))
-                p.addLine(to: CGPoint(x: w, y: h - 1))
-            }
-            .stroke(Self.paperRule, style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
-        } else {
-            // Scale to a generous max so a 100% trace doesn't kiss the ceiling
-            let maxVal = max(samples.max() ?? 100, 1) * 1.1
-            let stepX = w / CGFloat(samples.count - 1)
-            let points: [CGPoint] = samples.enumerated().map { (i, v) in
-                let x = CGFloat(i) * stepX
-                let y = h - CGFloat(v / maxVal) * (h - 2)
-                return CGPoint(x: x, y: y)
-            }
-            ZStack {
-                // Gradient fill below curve
-                paperSmoothPath(points: points, closeAtY: h)
-                    .fill(
-                        LinearGradient(
-                            colors: [accent.opacity(0.22), accent.opacity(0.02)],
-                            startPoint: .top, endPoint: .bottom
-                        )
-                    )
-
-                // Smooth curve stroke
-                paperSmoothPath(points: points, closeAtY: nil)
-                    .stroke(accent, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
-
-                // Latest point indicator
-                if let last = points.last {
-                    Circle()
-                        .fill(accent)
-                        .frame(width: 5, height: 5)
-                        .position(last)
-                    Circle()
-                        .stroke(accent.opacity(0.35), lineWidth: 4)
-                        .frame(width: 12, height: 12)
-                        .position(last)
-                }
-            }
-        }
-    }
 
     // Catmull-Rom-ish smooth path through points (with optional fill close)
-    private func paperSmoothPath(points: [CGPoint], closeAtY: CGFloat?) -> Path {
-        var path = Path()
-        guard let first = points.first else { return path }
-
-        if let baseY = closeAtY {
-            path.move(to: CGPoint(x: first.x, y: baseY))
-            path.addLine(to: first)
-        } else {
-            path.move(to: first)
-        }
-
-        for i in 1..<points.count {
-            let p0 = points[i - 1]
-            let p1 = points[i]
-            let midX = (p0.x + p1.x) / 2
-            let control1 = CGPoint(x: midX, y: p0.y)
-            let control2 = CGPoint(x: midX, y: p1.y)
-            path.addCurve(to: p1, control1: control1, control2: control2)
-        }
-
-        if let baseY = closeAtY, let last = points.last {
-            path.addLine(to: CGPoint(x: last.x, y: baseY))
-            path.closeSubpath()
-        }
-        return path
-    }
 
     var liveTranscriptView: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -754,7 +545,7 @@ struct ContentView: View {
                     .padding(.top, 4)
             }
 
-            paperPerfMonitor
+            PaperPerfMonitor(monitor: monitor)
                 .padding(.top, 6)
         }
     }
@@ -883,10 +674,14 @@ struct ContentView: View {
     }
 
     // Stamp like "MAY 19, 2026"
-    func todayPaperDate() -> String {
+    private static let paperDateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "MMM d, yyyy"
-        return f.string(from: Date()).uppercased()
+        return f
+    }()
+
+    func todayPaperDate() -> String {
+        Self.paperDateFormatter.string(from: Date()).uppercased()
     }
 
     // Bottom control bar — paper aesthetic, hero round record button
@@ -896,9 +691,11 @@ struct ContentView: View {
             if isRecording {
                 HStack(spacing: 6) {
                     Circle().fill(Self.paperAccent).frame(width: 6, height: 6)
-                    Text(formatDuration(recordingElapsed))
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundColor(Self.paperAccent)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(formatDuration(context.date.timeIntervalSince(recordingStartTime ?? context.date)))
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(Self.paperAccent)
+                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -1511,174 +1308,6 @@ struct ContentView: View {
         }
     }
     
-    // MARK: - System Monitoring
-    
-    func initializeGPUMonitoring() {
-        metalDevice = MTLCreateSystemDefaultDevice()
-    }
-    
-    /// Instantaneous host CPU usage by computing the delta between two
-    /// successive `PROCESSOR_CPU_LOAD_INFO` reads. The previous reading is
-    /// cached in `lastHostCPUTicks`; the first call returns 0 and seeds the
-    /// baseline so the next call is correct.
-    func getActualCPUUsage() -> Double {
-        var cpuInfo: processor_info_array_t!
-        var numCpuInfo: mach_msg_type_number_t = 0
-        var numCPUs: uint = 0
-
-        let result = host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &numCPUs, &cpuInfo, &numCpuInfo)
-        guard result == KERN_SUCCESS else { return 0 }
-
-        // Aggregate ticks across all logical CPUs
-        var user: UInt64 = 0, system: UInt64 = 0, nice: UInt64 = 0, idle: UInt64 = 0
-        for i in 0..<Int(numCPUs) {
-            let cpuLoad = cpuInfo.advanced(by: Int(CPU_STATE_MAX) * i)
-            user   += UInt64(cpuLoad[Int(CPU_STATE_USER)])
-            system += UInt64(cpuLoad[Int(CPU_STATE_SYSTEM)])
-            nice   += UInt64(cpuLoad[Int(CPU_STATE_NICE)])
-            idle   += UInt64(cpuLoad[Int(CPU_STATE_IDLE)])
-        }
-
-        // Free the kernel-allocated buffer (otherwise leaks each call)
-        let vmAddr = vm_address_t(bitPattern: cpuInfo)
-        let size   = vm_size_t(Int(numCpuInfo) * MemoryLayout<integer_t>.size)
-        vm_deallocate(mach_task_self_, vmAddr, size)
-
-        let prev = lastHostCPUTicks
-        let dUser   = Int64(user)   - Int64(prev.user)
-        let dSystem = Int64(system) - Int64(prev.system)
-        let dNice   = Int64(nice)   - Int64(prev.nice)
-        let dIdle   = Int64(idle)   - Int64(prev.idle)
-        let dBusy   = dUser + dSystem + dNice
-        let dTotal  = dBusy + dIdle
-
-        // Persist for next call
-        DispatchQueue.main.async {
-            self.lastHostCPUTicks = (user, system, nice, idle)
-        }
-
-        // First call (no baseline yet) — return 0; the next call will report a real %.
-        guard prev.user > 0 || prev.system > 0 else { return 0 }
-        guard dTotal > 0 else { return 0 }
-
-        return min(100.0, max(0.0, Double(dBusy) / Double(dTotal) * 100.0))
-    }
-    
-    func getActualMemoryUsage() -> (usedMB: Double, totalMB: Double, percent: Double) {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-        
-        let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        
-        if kerr == KERN_SUCCESS {
-            let usedMemoryMB = Double(info.resident_size) / 1_048_576
-            let totalMemoryMB = Double(ProcessInfo.processInfo.physicalMemory) / 1_048_576
-            let percent = (usedMemoryMB / totalMemoryMB) * 100.0
-            
-            return (usedMemoryMB, totalMemoryMB, percent)
-        }
-        
-        return (0, 0, 0)
-    }
-    
-    /// Real "app activity" % — total CPU+ANE time this process consumed since
-    /// the previous sample, divided by wall-clock elapsed and normalized to the
-    /// number of logical cores. Spikes hard when WhisperKit hammers the
-    /// Neural Engine because ANE work shows up as task thread time too.
-    func getGPUUsage() -> Double {
-        var infoData = task_thread_times_info()
-        var count = mach_msg_type_number_t(MemoryLayout<task_thread_times_info_data_t>.size / MemoryLayout<natural_t>.size)
-        let kerr = withUnsafeMutablePointer(to: &infoData) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(TASK_THREAD_TIMES_INFO), $0, &count)
-            }
-        }
-        guard kerr == KERN_SUCCESS else { return 0 }
-
-        // total user + system time for live threads, in seconds
-        let userSecs = Double(infoData.user_time.seconds) + Double(infoData.user_time.microseconds) / 1_000_000
-        let sysSecs  = Double(infoData.system_time.seconds) + Double(infoData.system_time.microseconds) / 1_000_000
-        let currentTaskSecs = userSecs + sysSecs
-
-        let now = Date()
-        let prevSecs = lastTaskTimeSeconds
-        let prevAt   = lastSampleAt
-
-        // Update baseline for next call
-        DispatchQueue.main.async {
-            self.lastTaskTimeSeconds = currentTaskSecs
-            self.lastSampleAt = now
-        }
-
-        guard let prevAt, prevSecs > 0 else { return 0 }
-        let wallSecs = now.timeIntervalSince(prevAt)
-        guard wallSecs > 0.05 else { return 0 } // ignore samples too close together
-
-        let deltaTask = max(0, currentTaskSecs - prevSecs)
-        // Normalize per logical core so an app pinning all cores reads ~100%.
-        let cores = max(1.0, Double(ProcessInfo.processInfo.activeProcessorCount))
-        let activity = (deltaTask / (wallSecs * cores)) * 100.0
-        return min(100.0, max(0.0, activity))
-    }
-    
-    func updateSystemStats() {
-        let cpuUsage = getActualCPUUsage()
-        let (memoryMB, _, memoryPercent) = getActualMemoryUsage()
-        let gpuUsage = getGPUUsage()
-
-        let snapshot = SystemStatsSnapshot(
-            timestamp: Date(),
-            cpuUsage: cpuUsage,
-            memoryUsage: memoryMB,
-            memoryPercent: memoryPercent,
-            gpuUsage: gpuUsage,
-            networkIO: 0.0
-        )
-
-        // Use a Task on @MainActor so SwiftUI reliably picks up the @State
-        // mutation. DispatchQueue.main.async sometimes coalesces away during
-        // touch tracking on iPhone, leaving the chart frozen.
-        Task { @MainActor in
-            self.systemStatsHistory.append(snapshot)
-
-            if self.systemStatsHistory.count > 60 {
-                self.systemStatsHistory.removeFirst()
-            }
-
-            if self.isProcessing && self.scenePhase == .background {
-                self.updateLiveActivity()
-            }
-        }
-    }
-
-    func startSystemMonitoring() {
-        stopSystemMonitoring()
-        systemStatsHistory.removeAll()
-
-        // Push one snapshot immediately so the chart isn't blank for the
-        // first second.
-        updateSystemStats()
-
-        // Attach to .common mode so the timer keeps firing while the user is
-        // scrolling / pressing buttons (the default mode pauses during touch
-        // tracking, which makes the chart look frozen on iPhone).
-        let timer = Timer(timeInterval: 1.0, repeats: true) { _ in
-            // Capture nothing problematic — read @State through the wrapper.
-            self.updateSystemStats()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        monitoringTimer = timer
-    }
-    
-    func stopSystemMonitoring() {
-        monitoringTimer?.invalidate()
-        monitoringTimer = nil
-    }
-    
     func getElapsedTime() -> TimeInterval {
         guard let startTime = processStartTime else { return 0 }
         return Date().timeIntervalSince(startTime)
@@ -1747,7 +1376,7 @@ struct ContentView: View {
         Imports Dir: \(getImportsDirectory().path)
         Processor: \(getProcessorInfo())
         Total Memory: \(getTotalMemoryGB()) GB
-        GPU Device: \(metalDevice?.name ?? "Unknown")
+        GPU Device: \(monitor.metalDevice?.name ?? "Unknown")
         """
         
         try? debugInfo.write(to: debugFile, atomically: true, encoding: .utf8)
@@ -1790,7 +1419,7 @@ struct ContentView: View {
         await MainActor.run {
             statusMessage = "Loading model..."
             isProcessing = true
-            startSystemMonitoring()
+            monitor.startSystemMonitoring()
         }
 
         do {
@@ -1806,7 +1435,7 @@ struct ContentView: View {
                 isModelLoaded = true
                 isProcessing = false
                 statusMessage = "Model loaded successfully"
-                stopSystemMonitoring()
+                monitor.stopSystemMonitoring()
                 resetResult()
             }
         } catch {
@@ -1814,7 +1443,7 @@ struct ContentView: View {
                 isModelLoaded = false
                 isProcessing = false
                 statusMessage = "Failed to load model"
-                stopSystemMonitoring()
+                monitor.stopSystemMonitoring()
                 print("Failed to load model: \(error)")
             }
         }
@@ -1825,7 +1454,7 @@ struct ContentView: View {
         isModelLoaded = false
         statusMessage = "Downloading \(selectedModel.displayName)..."
         resetResult()
-        startSystemMonitoring()
+        monitor.startSystemMonitoring()
 
         Task {
             do {
@@ -1844,7 +1473,7 @@ struct ContentView: View {
                     isModelLoaded = true
                     isProcessing = false
                     statusMessage = "Model ready"
-                    stopSystemMonitoring()
+                    monitor.stopSystemMonitoring()
                     resetResult()
                 }
             } catch {
@@ -1853,7 +1482,7 @@ struct ContentView: View {
                     showError("Download failed: \(error.localizedDescription)\n\nCheck your internet connection and try again.")
                     isProcessing = false
                     statusMessage = ""
-                    stopSystemMonitoring()
+                    monitor.stopSystemMonitoring()
                 }
             }
         }
@@ -2030,7 +1659,7 @@ struct ContentView: View {
 
                 isProcessing = false
                 statusMessage = ""
-                stopSystemMonitoring()
+                monitor.stopSystemMonitoring()
                 endBackgroundTask()
                 endLiveActivity()
             }
@@ -2090,16 +1719,8 @@ struct ContentView: View {
                     recordingURL = url
                     isRecording = true
                     recordingStartTime = Date()
-                    recordingElapsed = 0
                     resetResult()
                     streamingTranscript = ""
-
-                    recordingTimer?.invalidate()
-                    recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-                        if let start = recordingStartTime {
-                            recordingElapsed = Date().timeIntervalSince(start)
-                        }
-                    }
                 } catch {
                     showError("Couldn't start recording: \(error.localizedDescription)")
                 }
@@ -2112,8 +1733,7 @@ struct ContentView: View {
         audioRecorder?.stop()
         let recorder = audioRecorder
         audioRecorder = nil
-        recordingTimer?.invalidate()
-        recordingTimer = nil
+        recordingStartTime = nil
         isRecording = false
 
         guard let url = recordingURL else { return }
@@ -2255,7 +1875,7 @@ struct ContentView: View {
             streamingTranscript = ""
             processStartTime = Date()
             lastProgressUpdate = Date()
-            startSystemMonitoring()
+            monitor.startSystemMonitoring()
 
             // Only start Live Activity if in background
             if scenePhase == .background {
@@ -2305,22 +1925,31 @@ struct ContentView: View {
             totalSegments = max(1, Int(ceil(duration / 30.0)))
         }
         
-        var segmentCount = 0
         var lastReportedProgress = 0.0
-        
+        // WhisperKit invokes this callback for every decoded token. Hopping to
+        // the main actor that often — to format a status string and republish a
+        // growing transcript — is what made the UI stutter while transcribing.
+        // Coalesce to 10 Hz; the final state is written after transcribe()
+        // returns, so dropping trailing intermediate frames costs nothing.
+        let throttle = ProgressThrottle(interval: 0.1)
+
         let results = try await whisper.transcribe(
             audioPath: workURL.path,
             decodeOptions: options,
             callback: { progress in
+                guard throttle.shouldPush() else { return nil }
+                let windowId = progress.windowId
+                let text = progress.text
+
                 Task { @MainActor in
                     let currentTime = Date()
-                    
+
                     // Update segment counter
-                    self.currentSegment = progress.windowId + 1  // +1 for 1-based counting
+                    self.currentSegment = windowId + 1  // +1 for 1-based counting
                     
                     // Calculate precise progress
                     if self.totalSegments > 0 {
-                        let rawProgress = Double(progress.windowId + 1) / Double(self.totalSegments)
+                        let rawProgress = Double(windowId + 1) / Double(self.totalSegments)
                         // Clamp between 0 and 0.99 (never show 100% until complete)
                         self.transcriptionProgress = min(0.99, max(0.0, rawProgress))
 
@@ -2331,17 +1960,15 @@ struct ContentView: View {
                     }
                     
                     // Update streaming text
-                    if !progress.text.isEmpty {
-                        self.streamingTranscript = progress.text
+                    if !text.isEmpty {
+                        self.streamingTranscript = text
                     }
-                    
-                    // Calculate segments per second (smooth calculation)
-                    segmentCount += 1
-                    if segmentCount > 1 {
-                        let totalElapsed = currentTime.timeIntervalSince(self.processStartTime ?? currentTime)
-                        if totalElapsed > 0 {
-                            self.segmentsPerSecond = Double(segmentCount) / totalElapsed
-                        }
+
+                    // Segments per second, measured on actual decode windows
+                    // rather than callback count.
+                    let totalElapsed = currentTime.timeIntervalSince(self.processStartTime ?? currentTime)
+                    if totalElapsed > 0 {
+                        self.segmentsPerSecond = Double(self.currentSegment) / totalElapsed
                     }
                     
                     // Update status message
@@ -2418,7 +2045,7 @@ struct ContentView: View {
             isProcessing = false
             statusMessage = ""
             transcriptionProgress = 0.0
-            stopSystemMonitoring()
+            monitor.stopSystemMonitoring()
             endBackgroundTask()
             endLiveActivity()
         }
@@ -2426,6 +2053,31 @@ struct ContentView: View {
 }
 
 
+
+// MARK: - Progress Throttle
+
+/// Coalesces a high-frequency callback down to a fixed rate.
+///
+/// WhisperKit reports progress per decoded token. Forwarding each one to the
+/// main actor meant hundreds of view invalidations a second while a
+/// transcription ran. Accessed only from WhisperKit's serial decode thread, so
+/// the unsynchronised state is safe.
+final class ProgressThrottle: @unchecked Sendable {
+    private let interval: TimeInterval
+    private var lastPush: Date = .distantPast
+
+    init(interval: TimeInterval) {
+        self.interval = interval
+    }
+
+    /// True at most once per `interval`.
+    func shouldPush() -> Bool {
+        let now = Date()
+        guard now.timeIntervalSince(lastPush) >= interval else { return false }
+        lastPush = now
+        return true
+    }
+}
 
 // MARK: - Pressable Button Style
 struct PressableButtonStyle: ButtonStyle {

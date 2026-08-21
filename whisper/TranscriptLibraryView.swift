@@ -8,9 +8,21 @@ struct TranscriptLibraryView: View {
     private var transcripts: [SavedTranscript]
 
     @State private var searchText: String = ""
+    /// Applied on a short delay. Filtering scans every transcript's full body
+    /// text, so running it on each keystroke made typing stutter on a large
+    /// library.
+    @State private var debouncedSearch: String = ""
+
+    /// One shared formatter. Allocating a RelativeDateTimeFormatter is
+    /// expensive and this used to happen once per row, on every render.
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
 
     var filtered: [SavedTranscript] {
-        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = debouncedSearch.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return transcripts }
         let q = trimmed.lowercased()
         return transcripts.filter {
@@ -32,6 +44,11 @@ struct TranscriptLibraryView: View {
             .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.large)
             .searchable(text: $searchText, prompt: "Search transcripts and text")
+            .task(id: searchText) {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled else { return }
+                debouncedSearch = searchText
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Done") { dismiss() }
@@ -105,8 +122,6 @@ struct TranscriptLibraryView: View {
     }
 
     private func relativeDate(_ d: Date) -> String {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .abbreviated
-        return f.localizedString(for: d, relativeTo: Date())
+        Self.relativeFormatter.localizedString(for: d, relativeTo: Date())
     }
 }

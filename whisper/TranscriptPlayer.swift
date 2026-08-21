@@ -76,16 +76,26 @@ final class TranscriptPlayer: ObservableObject {
 
     private func startTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self = self, let p = self.player else { return }
-                self.currentTime = p.currentTime
+        // 10 Hz is indistinguishable from 20 Hz for a scrubber and a text
+        // highlight, at half the publish traffic. Scheduled in .common mode so
+        // the playhead keeps moving while the user scrolls the segment list —
+        // the default mode stalls during touch tracking.
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let p = self.player else { return }
+                // Only publish when the value actually moved, so a paused or
+                // stalled player stops waking every observing view.
+                if abs(p.currentTime - self.currentTime) > 0.001 {
+                    self.currentTime = p.currentTime
+                }
                 if !p.isPlaying {
                     self.isPlaying = false
                     self.stopTimer()
                 }
             }
         }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     private func stopTimer() {
