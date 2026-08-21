@@ -1,0 +1,99 @@
+import Foundation
+import AVFoundation
+import Combine
+
+/// Plays back the audio file attached to a SavedTranscript and publishes
+/// the current playhead time so SwiftUI views can highlight the active segment.
+@MainActor
+final class TranscriptPlayer: ObservableObject {
+    @Published private(set) var isPlaying: Bool = false
+    @Published private(set) var currentTime: Double = 0
+    @Published private(set) var duration: Double = 0
+
+    private var player: AVAudioPlayer?
+    private var timer: Timer?
+
+    func load(audioURL: URL) {
+        stop()
+        do {
+            // Configure session for playback (not record), so we get to use the loudspeaker.
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            try? session.setActive(true)
+
+            let p = try AVAudioPlayer(contentsOf: audioURL)
+            p.prepareToPlay()
+            duration = p.duration
+            player = p
+            currentTime = 0
+        } catch {
+            print("TranscriptPlayer load error: \(error)")
+            player = nil
+            duration = 0
+        }
+    }
+
+    func togglePlayPause() {
+        guard let p = player else { return }
+        if p.isPlaying {
+            pause()
+        } else {
+            play()
+        }
+    }
+
+    func play() {
+        guard let p = player else { return }
+        p.play()
+        isPlaying = true
+        startTimer()
+    }
+
+    func pause() {
+        guard let p = player else { return }
+        p.pause()
+        isPlaying = false
+        stopTimer()
+    }
+
+    func stop() {
+        player?.stop()
+        player = nil
+        isPlaying = false
+        currentTime = 0
+        stopTimer()
+    }
+
+    /// Seek the audio playback to a specific time and begin playing.
+    func seek(to seconds: Double) {
+        guard let p = player else { return }
+        p.currentTime = max(0, min(seconds, p.duration))
+        currentTime = p.currentTime
+        if !p.isPlaying {
+            play()
+        }
+    }
+
+    private func startTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self, let p = self.player else { return }
+                self.currentTime = p.currentTime
+                if !p.isPlaying {
+                    self.isPlaying = false
+                    self.stopTimer()
+                }
+            }
+        }
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    deinit {
+        timer?.invalidate()
+    }
+}

@@ -1,0 +1,127 @@
+import Foundation
+import AVFoundation
+
+/// Converts any input audio (mp3, m4a, mp4, wav, caf, etc.) into a
+/// 16 kHz mono 16-bit Linear PCM WAV that both WhisperKit and
+/// AVAudioFile can read on iOS *and* on "Designed for iPad" / Mac Catalyst.
+///
+/// On Designed-for-iPad-on-Mac, the iOS audio session uses macOS's iOSSupport
+/// AVFoundation, where `ExtAudioFile`'s AAC decoder is broken (returns
+/// `kAudioFileUnsupportedDataFormatError` / 1685348671). AVAssetReader uses
+/// a different decoder pipeline that works on both platforms.
+enum AudioConverter {
+    /// Returns either the original URL (if already a usable 16 kHz mono WAV)
+    /// or a path to a freshly-written converted file in the temp directory.
+    static func convertToWhisperReadableWAV(_ inputURL: URL) async throws -> URL {
+        // Skip conversion if file is already a WAV — assume it's compatible.
+        // If a WAV file still fails downstream we can tighten this check.
+        if inputURL.pathExtension.lowercased() == "wav" {
+            return inputURL
+        }
+
+        let asset = AVURLAsset(url: inputURL)
+        let tracks = try await asset.loadTracks(withMediaType: .audio)
+        guard let audioTrack = tracks.first else {
+            throw NSError(
+                domain: "AudioConverter",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "No audio track found in file."]
+            )
+        }
+
+        // Reader: pull samples out as 16 kHz mono 16-bit PCM
+        let assetReader = try AVAssetReader(asset: asset)
+        let pcmSettings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 16000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        let readerOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: pcmSettings)
+        guard assetReader.canAdd(readerOutput) else {
+            throw NSError(domain: "AudioConverter", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Reader rejected output settings."])
+        }
+        assetReader.add(readerOutput)
+
+        // Writer: write to .wav (WAVE) container
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("whisper_in_\(UUID().uuidString).wav")
+        try? FileManager.default.removeItem(at: outputURL)
+        let assetWriter = try AVAssetWriter(outputURL: outputURL, fileType: .wav)
+        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: pcmSettings)
+        writerInput.expectsMediaDataInRealTime = false
+        guard assetWriter.canAdd(writerInput) else {
+            throw NSError(domain: "AudioConverter", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "Writer rejected input."])
+        }
+        assetWriter.add(writerInput)
+
+        guard assetReader.startReading() else {
+            throw assetReader.error ?? NSError(domain: "AudioConverter", code: 4,
+                                               userInfo: [NSLocalizedDescriptionKey: "Reader could not start."])
+        }
+        guard assetWriter.startWriting() else {
+            throw assetWriter.error ?? NSError(domain: "AudioConverter", code: 5,
+                                               userInfo: [NSLocalizedDescriptionKey: "Writer could not start."])
+        }
+        assetWriter.startSession(atSourceTime: .zero)
+
+        // Drain the reader into the writer.
+        let queue = DispatchQueue(label: "AudioConverter.queue")
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            writerInput.requestMediaDataWhenReady(on: queue) {
+                while writerInput.isReadyForMoreMediaData {
+                    if assetReader.status != .reading {
+                        writerInput.markAsFinished()
+                        if let err = assetReader.error {
+                            continuation.resume(throwing: err)
+                        } else {
+                            assetWriter.finishWriting {
+                                if assetWriter.status == .completed {
+                                    continuation.resume(returning: ())
+                                } else {
+                                    continuation.resume(throwing: assetWriter.error ?? NSError(
+                                        domain: "AudioConverter", code: 6,
+                                        userInfo: [NSLocalizedDescriptionKey: "Writer failed."]))
+                                }
+                            }
+                        }
+                        return
+                    }
+
+                    if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+                        if !writerInput.append(sampleBuffer) {
+                            // Append failed — surface the writer error.
+                            assetReader.cancelReading()
+                            writerInput.markAsFinished()
+                            continuation.resume(throwing: assetWriter.error ?? NSError(
+                                domain: "AudioConverter", code: 7,
+                                userInfo: [NSLocalizedDescriptionKey: "Sample append failed."]))
+                            return
+                        }
+                    } else {
+                        // No more samples — done.
+                        writerInput.markAsFinished()
+                        assetWriter.finishWriting {
+                            if assetWriter.status == .completed {
+                                continuation.resume(returning: ())
+                            } else {
+                                continuation.resume(throwing: assetWriter.error ?? NSError(
+                                    domain: "AudioConverter", code: 8,
+                                    userInfo: [NSLocalizedDescriptionKey: "Writer finished in bad state."]))
+                            }
+                        }
+                        return
+                    }
+                }
+            }
+        }
+
+        return outputURL
+    }
+}
