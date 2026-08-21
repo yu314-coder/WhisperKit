@@ -31,6 +31,9 @@ struct ContentView: View {
     /// `whisperKit` slot.
     @State private var modelPrepTask: Task<Void, Never>?
     @State private var isPreparingModel = false
+    /// Which variant the in-flight preparation is for, so tapping the same
+    /// model again doesn't cancel and restart a download that's already going.
+    @State private var preparingVariant: WhisperModel?
     /// 0...1 while downloading; nil once we're loading into the Neural Engine
     /// (that phase reports no progress).
     @State private var downloadProgress: Double?
@@ -1583,13 +1586,43 @@ struct ContentView: View {
         prepareModel(model)
     }
 
-    /// Downloads the model if needed, then loads it. Cancels any preparation
-    /// already in flight first.
-    func prepareModel(_ model: WhisperModel) {
+    /// Downloads the model if needed, then loads it.
+    ///
+    /// Restarting a preparation that is already running for the same model is
+    /// not free: cancelling mid-download leaves Hugging Face's partial
+    /// `<name>.<sha>.incomplete` temp file behind, and the next attempt then
+    /// fails trying to move a file the cancelled one had already cleaned up.
+    /// That is the "couldn't be moved to whisper-large-v3" error. So a repeat
+    /// request for the model already being prepared is a no-op.
+    func prepareModel(_ model: WhisperModel, force: Bool = false) {
+        if !force, isPreparingModel, preparingVariant == model { return }
         modelPrepTask?.cancel()
         isModelLoaded = false
         whisperKit = nil
+        preparingVariant = model
         modelPrepTask = Task { await performModelPreparation(model) }
+    }
+
+    /// Clears *empty* partial-download placeholders.
+    ///
+    /// Deliberately narrow: a non-empty `.incomplete` file is resume state —
+    /// the downloader measures it and continues with `Range: bytes=N-`, so
+    /// deleting one would throw away real progress on a 646 MB model. Only the
+    /// zero-byte placeholders the downloader writes up front are debris worth
+    /// removing before a retry.
+    func clearEmptyIncompleteDownloads() {
+        let root = getModelsDirectory()
+        guard let e = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        for case let url as URL in e where url.pathExtension == "incomplete" {
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            if size == 0 {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
     }
 
     private func prewarmKey(_ model: WhisperModel) -> String {
@@ -1617,12 +1650,53 @@ struct ContentView: View {
             isPreparingModel = false
             downloadProgress = nil
             isOptimizingModel = false
+            preparingVariant = nil
             monitor.stopSystemMonitoring()
         }
 
-        let modelsDir = getModelsDirectory()
         do {
-            try FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+            try await attemptModelPreparation(model)
+        } catch is CancellationError {
+            // Superseded by another selection — leave state to the newer task.
+        } catch {
+            if Task.isCancelled { return }
+
+            // An interrupted transfer leaves a partial file behind and the next
+            // attempt trips over it. Clear the debris and try once more before
+            // bothering the user — this class of failure is transient, and the
+            // retry is what they would have done by hand anyway.
+            clearEmptyIncompleteDownloads()
+            do {
+                statusMessage = "Retrying \(model.displayName)…"
+                try await attemptModelPreparation(model)
+                return
+            } catch is CancellationError {
+                return
+            } catch let retryError {
+                if Task.isCancelled { return }
+                // If something else finished the job while we were failing,
+                // there is nothing to report.
+                if whisperKit != nil, isModelLoaded { return }
+                isModelLoaded = false
+                statusMessage = ""
+                showError("""
+                Couldn't prepare \(model.displayName). This is usually a network \
+                hiccup part-way through the download.
+
+                Tap Download to try again — finished parts are kept, so it \
+                resumes rather than starting over.
+
+                \(retryError.localizedDescription)
+                """)
+            }
+        }
+    }
+
+    @MainActor
+    private func attemptModelPreparation(_ model: WhisperModel) async throws {
+        let modelsDir = getModelsDirectory()
+        try FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+        do {
 
             if findModelDirectory(for: model) == nil {
                 statusMessage = "Downloading \(model.displayName) — \(model.sizeLabel)"
@@ -1683,13 +1757,10 @@ struct ContentView: View {
             downloadStatus[model] = true
             statusMessage = ""
             resetResult()
-        } catch is CancellationError {
-            // Superseded by another selection — leave state to the newer task.
         } catch {
-            guard !Task.isCancelled else { return }
-            isModelLoaded = false
-            statusMessage = ""
-            showError("Couldn't prepare \(model.displayName).\n\n\(error.localizedDescription)")
+            isOptimizingModel = false
+            downloadProgress = nil
+            throw error
         }
     }
 
