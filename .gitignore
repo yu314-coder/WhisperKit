@@ -19,3 +19,7 @@ xcuserdata/
 .swiftpm/
 .build/
 Packages/
+
+# Claude Code — local assistant context, not part of the app
+.claude/
+CLAUDE.md
