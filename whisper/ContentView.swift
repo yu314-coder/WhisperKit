@@ -34,6 +34,14 @@ struct ContentView: View {
     /// 0...1 while downloading; nil once we're loading into the Neural Engine
     /// (that phase reports no progress).
     @State private var downloadProgress: Double?
+    /// True while Core ML is specialising the model for this chip — the
+    /// one-time cost that used to land on the user's first recording.
+    @State private var isOptimizingModel = false
+
+    /// Variants already specialised on this device. Core ML caches the
+    /// specialised model outside the app and evicts that cache on OS updates,
+    /// so the record is keyed by OS build as well as variant.
+    @AppStorage("prewarmedVariants") private var prewarmedVariantsRaw: String = ""
     // Previous tick counters for instantaneous CPU & task time deltas.
     // Without this baseline the sampler returns the cumulative since-boot
     // average, which is nearly constant — making the chart look frozen.
@@ -562,11 +570,27 @@ struct ContentView: View {
                 }
             }
 
-            Button { prepareModel(selectedModel) } label: {
+            modelPreparationStatus
+
+            Button {
+                if isPreparingModel {
+                    modelPrepTask?.cancel()
+                    isPreparingModel = false
+                    statusMessage = ""
+                } else {
+                    prepareModel(selectedModel)
+                }
+            } label: {
                 HStack(spacing: 10) {
-                    Image(systemName: downloadStatus[selectedModel] ?? false ? "arrow.clockwise" : "arrow.down")
+                    Image(systemName: isPreparingModel
+                          ? "xmark"
+                          : (downloadStatus[selectedModel] ?? false ? "arrow.clockwise" : "arrow.down"))
                         .font(.system(size: 13, weight: .bold))
-                    Text(downloadStatus[selectedModel] ?? false ? "Reload \(selectedModel.displayName)" : "Download \(selectedModel.displayName)")
+                    Text(isPreparingModel
+                         ? "Cancel"
+                         : (downloadStatus[selectedModel] ?? false
+                            ? "Reload \(selectedModel.displayName)"
+                            : "Download \(selectedModel.displayName) · \(selectedModel.sizeLabel)"))
                         .font(.system(size: 14, weight: .semibold, design: .serif))
                 }
                 .foregroundColor(Self.paperBG)
@@ -579,8 +603,40 @@ struct ContentView: View {
                 )
             }
             .buttonStyle(PressableButtonStyle())
-            .disabled(isProcessing)
-            .opacity(isProcessing ? 0.5 : 1)
+            .disabled(isProcessing && !isPreparingModel)
+            .opacity((isProcessing && !isPreparingModel) ? 0.5 : 1)
+        }
+    }
+
+    /// Preparation progress. Shown in both the inline picker (first launch)
+    /// and the model sheet, so a long first load is never unexplained.
+    @ViewBuilder
+    var modelPreparationStatus: some View {
+        if isPreparingModel {
+            VStack(alignment: .leading, spacing: 7) {
+                if let p = downloadProgress {
+                    ProgressView(value: p)
+                        .progressViewStyle(.linear)
+                        .tint(Self.paperAccent)
+                    Text("\(Int(p * 100))% of \(selectedModel.sizeLabel)")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(Self.paperMute)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .tint(Self.paperAccent)
+                    Text(statusMessage.isEmpty ? "Preparing…" : statusMessage)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(Self.paperMute)
+                    if isOptimizingModel {
+                        Text("iOS compiles each model for this specific chip the first time it runs. This happens once per model — afterwards it loads in a moment.")
+                            .font(.system(size: 11, design: .serif))
+                            .foregroundColor(Self.paperMute)
+                            .lineSpacing(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
         }
     }
 
@@ -999,7 +1055,8 @@ struct ContentView: View {
                     .fill(isModelLoaded ? Color(red: 0.30, green: 0.65, blue: 0.40) : Self.paperMute.opacity(0.4))
                     .frame(width: 7, height: 7)
                 Text(isPreparingModel
-                     ? (downloadProgress != nil ? "Downloading" : "Loading")
+                     ? (downloadProgress != nil ? "Downloading"
+                        : (isOptimizingModel ? "Optimising" : "Loading"))
                      : (isModelLoaded ? "Ready" : "Choose a model to begin"))
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .tracking(1.5)
@@ -1016,25 +1073,7 @@ struct ContentView: View {
                 .buttonStyle(PressableButtonStyle())
             }
 
-            if isPreparingModel {
-                VStack(alignment: .leading, spacing: 6) {
-                    if let p = downloadProgress {
-                        ProgressView(value: p)
-                            .progressViewStyle(.linear)
-                            .tint(Self.paperAccent)
-                        Text("\(Int(p * 100))% of \(selectedModel.sizeLabel)")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(Self.paperMute)
-                    } else {
-                        ProgressView()
-                            .progressViewStyle(.linear)
-                            .tint(Self.paperAccent)
-                        Text(statusMessage.isEmpty ? "Preparing…" : statusMessage)
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(Self.paperMute)
-                    }
-                }
-            }
+            modelPreparationStatus
 
             Text("Each model is downloaded once and runs on this device's Neural Engine. Larger models are slower but more accurate, especially across languages.")
                 .font(.system(size: 13, design: .serif))
@@ -1553,15 +1592,31 @@ struct ContentView: View {
         modelPrepTask = Task { await performModelPreparation(model) }
     }
 
+    private func prewarmKey(_ model: WhisperModel) -> String {
+        "\(model.rawValue)@\(ProcessInfo.processInfo.operatingSystemVersionString)"
+    }
+
+    private func hasBeenPrewarmed(_ model: WhisperModel) -> Bool {
+        prewarmedVariantsRaw.split(separator: "\n").contains(Substring(prewarmKey(model)))
+    }
+
+    private func markPrewarmed(_ model: WhisperModel) {
+        guard !hasBeenPrewarmed(model) else { return }
+        let key = prewarmKey(model)
+        prewarmedVariantsRaw = prewarmedVariantsRaw.isEmpty ? key : prewarmedVariantsRaw + "\n" + key
+    }
+
     @MainActor
     func performModelPreparation(_ model: WhisperModel) async {
         isPreparingModel = true
         downloadProgress = nil
+        isOptimizingModel = false
         errorMessage = nil
         monitor.startSystemMonitoring()
         defer {
             isPreparingModel = false
             downloadProgress = nil
+            isOptimizingModel = false
             monitor.stopSystemMonitoring()
         }
 
@@ -1585,17 +1640,43 @@ struct ContentView: View {
                 downloadStatus[model] = true
             }
 
-            // Loading into the ANE reports no progress, so drop the bar.
-            statusMessage = "Loading \(model.displayName)…"
+            // Loading reports no progress, so drop the bar.
             downloadProgress = nil
+
+            // Two things used to be deferred to the user's first recording:
+            //
+            // 1. WhisperKit's `load` parameter resolves to
+            //    `config.load ?? (config.modelFolder != nil)`. We pass `model:`
+            //    rather than `modelFolder:`, so it defaulted to FALSE and the
+            //    init never actually loaded anything — `runTranscribeTask` hit
+            //    `modelState != .loaded` and loaded the whole model mid-recording,
+            //    while `isModelLoaded` had already been showing "Ready".
+            //
+            // 2. Core ML specialises an .mlmodelc for the specific chip the
+            //    first time it is loaded, caching the result outside the app.
+            //    On a large model that alone is tens of seconds.
+            //
+            // Both now happen here, behind the progress UI. Prewarm runs only
+            // for a variant this device hasn't specialised yet: it costs a
+            // load-unload-load cycle, so paying it on every launch would make
+            // the common case slower.
+            let needsPrewarm = !hasBeenPrewarmed(model)
+            isOptimizingModel = needsPrewarm
+            statusMessage = needsPrewarm
+                ? "Optimising \(model.displayName) for the Neural Engine…"
+                : "Loading \(model.displayName)…"
 
             let kit = try await WhisperKit(
                 model: model.rawValue,
                 downloadBase: modelsDir,
                 verbose: false,
-                logLevel: .error
+                logLevel: .error,
+                prewarm: needsPrewarm,
+                load: true
             )
             try Task.checkCancellation()
+            markPrewarmed(model)
+            isOptimizingModel = false
 
             whisperKit = kit
             isModelLoaded = true
