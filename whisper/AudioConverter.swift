@@ -128,3 +128,42 @@ enum AudioConverter {
         return outputURL
     }
 }
+
+extension AudioConverter {
+    /// Peak absolute sample amplitude (0...1) of a PCM file.
+    ///
+    /// Used to tell "the microphone captured nothing" apart from "the model
+    /// found no speech in this audio" — two failures that look identical to the
+    /// user but need completely different advice. One linear pass is negligible
+    /// next to the transcription that follows it.
+    static func peakAmplitude(of url: URL) -> Float? {
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        let format = file.processingFormat
+        let frameCapacity: AVAudioFrameCount = 16_384
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCapacity) else {
+            return nil
+        }
+
+        var peak: Float = 0
+        while true {
+            buffer.frameLength = 0
+            do {
+                try file.read(into: buffer, frameCount: frameCapacity)
+            } catch {
+                return peak
+            }
+            let frames = Int(buffer.frameLength)
+            if frames == 0 { break }
+
+            guard let channels = buffer.floatChannelData else { break }
+            for ch in 0..<Int(format.channelCount) {
+                let samples = channels[ch]
+                for i in 0..<frames {
+                    let magnitude = abs(samples[i])
+                    if magnitude > peak { peak = magnitude }
+                }
+            }
+        }
+        return peak
+    }
+}

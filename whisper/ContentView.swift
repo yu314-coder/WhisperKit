@@ -15,9 +15,25 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
+    /// Recent work, surfaced on the idle page. On iPad the single column left
+    /// most of the screen empty; showing the library's most recent entries
+    /// gives the page something to be.
+    @Query(sort: \SavedTranscript.createdAt, order: .reverse)
+    private var recentTranscripts: [SavedTranscript]
+    @State private var quickOpenTranscript: SavedTranscript?
+
     /// Sampling model. Isolated from ContentView's own state so its 1 Hz tick
     /// redraws only the meter, not the whole screen.
     @State private var monitor = SystemMonitor()
+
+    /// In-flight model download/load. Held so selecting another model can
+    /// cancel it instead of leaving two WhisperKit inits racing for the same
+    /// `whisperKit` slot.
+    @State private var modelPrepTask: Task<Void, Never>?
+    @State private var isPreparingModel = false
+    /// 0...1 while downloading; nil once we're loading into the Neural Engine
+    /// (that phase reports no progress).
+    @State private var downloadProgress: Double?
     // Previous tick counters for instantaneous CPU & task time deltas.
     // Without this baseline the sampler returns the cumulative since-boot
     // average, which is nearly constant — making the chart look frozen.
@@ -37,9 +53,9 @@ struct ContentView: View {
     @State private var streamingTranscript: String = ""
     @State private var isProcessing = false
     @State private var isModelLoaded = false
-    @AppStorage("selectedModel") private var selectedModelRaw: String = WhisperModel.base.rawValue
+    @AppStorage("selectedModel") private var selectedModelRaw: String = WhisperModel.turbo.rawValue
     private var selectedModel: WhisperModel {
-        get { WhisperModel(rawValue: selectedModelRaw) ?? .base }
+        get { WhisperModel.migrating(selectedModelRaw) ?? .turbo }
         nonmutating set { selectedModelRaw = newValue.rawValue }
     }
     @State private var downloadStatus: [WhisperModel: Bool] = [:]
@@ -99,31 +115,72 @@ struct ContentView: View {
     }
 
     // MARK: - Models
+    //
+    // All four are Argmax's quantized CoreML builds. The previous lineup used
+    // unquantized variants whose advertised sizes were badly wrong — "Large V3
+    // Turbo • ~950MB" actually pulled 3.2 GB, and "Medium • ~750MB" pulled
+    // 1.5 GB. Sizes below are measured from the model repo.
+    //
+    // Base and Medium are gone. Small-quantized beats base outright at a
+    // similar size (base is close to unusable for Chinese), and the quantized
+    // large-v3-turbo beats medium at *less than half* medium's download.
     enum WhisperModel: String, CaseIterable {
-        case base = "openai_whisper-base"
-        case medium = "openai_whisper-medium"
-        case largeV3 = "openai_whisper-large-v3"
-        case largeV3Turbo = "openai_whisper-large-v3_turbo"
-        
+        case small        = "openai_whisper-small_216MB"
+        case turbo        = "openai_whisper-large-v3-v20240930_turbo_632MB"
+        case largeV3      = "openai_whisper-large-v3_947MB"
+        case largeV3Turbo = "openai_whisper-large-v3_turbo_954MB"
+
         var displayName: String {
             switch self {
-            case .base: return "Base"
-            case .medium: return "Medium"
-            case .largeV3: return "Large V3"
+            case .small:        return "Small"
+            case .turbo:        return "Turbo"
+            case .largeV3:      return "Large V3"
             case .largeV3Turbo: return "Large V3 Turbo"
             }
         }
-        
-        var description: String {
+
+        /// Measured download size of the model folder, in megabytes.
+        var sizeMB: Int {
             switch self {
-            case .base: return "Fastest • ~150MB"
-            case .medium: return "Balanced • ~750MB"
-            case .largeV3: return "Best Quality • ~950MB"
-            case .largeV3Turbo: return "Fast & Accurate • ~950MB"
+            case .small:        return 217
+            case .turbo:        return 646
+            case .largeV3:      return 948
+            case .largeV3Turbo: return 1053
+            }
+        }
+
+        var sizeLabel: String {
+            sizeMB >= 1000
+                ? String(format: "%.1f GB", Double(sizeMB) / 1000)
+                : "\(sizeMB) MB"
+        }
+
+        var tagline: String {
+            switch self {
+            case .small:        return "Fastest"
+            case .turbo:        return "Recommended"
+            case .largeV3:      return "Best quality"
+            case .largeV3Turbo: return "Best overall"
+            }
+        }
+
+        var description: String { "\(tagline) • \(sizeLabel)" }
+
+        /// Maps a previously stored raw value onto the current lineup, so an
+        /// upgrade doesn't silently reset the user to the default.
+        static func migrating(_ raw: String) -> WhisperModel? {
+            if let exact = WhisperModel(rawValue: raw) { return exact }
+            switch raw {
+            case "openai_whisper-base", "openai_whisper-tiny",
+                 "openai_whisper-small":                       return .small
+            case "openai_whisper-medium":                      return .turbo
+            case "openai_whisper-large-v3":                    return .largeV3
+            case "openai_whisper-large-v3_turbo":              return .largeV3Turbo
+            default:                                           return nil
             }
         }
     }
-    
+
     // MARK: - Languages
     let supportedLanguages: [(code: String, name: String)] = [
         ("auto", "🌍 Auto Detect"),
@@ -147,6 +204,11 @@ struct ContentView: View {
             .sheet(isPresented: $showLibrary) {
                 TranscriptLibraryView()
             }
+            .sheet(item: $quickOpenTranscript) { t in
+                NavigationStack {
+                    TranscriptDetailView(transcript: t)
+                }
+            }
         .fileImporter(
             isPresented: $showingFilePicker,
             allowedContentTypes: [.audio, .movie, .mpeg4Movie, .quickTimeMovie, .mpeg4Audio],
@@ -155,6 +217,7 @@ struct ContentView: View {
             handleFileImport(result)
         }
         .onAppear {
+            removeRetiredModelDownloads()
             checkModelStatus()
             createDebugFiles()
             monitor.initializeGPUMonitoring()
@@ -223,6 +286,10 @@ struct ContentView: View {
     static let paperAccent = adaptive(
         light: (0.780, 0.290, 0.180, 1.0),   // terracotta
         dark:  (0.910, 0.450, 0.320, 1.0)    // lifted to carry on dark stock
+    )
+    static let paperCard = adaptive(
+        light: (1.000, 1.000, 1.000, 0.55),
+        dark:  (1.000, 0.960, 0.900, 0.06)
     )
     static let paperAccentSoft = adaptive(
         light: (0.940, 0.825, 0.770, 1.0),   // pale terracotta
@@ -321,29 +388,42 @@ struct ContentView: View {
 
     // Transcript canvas — large serif body text on warm paper
     var editorialTranscriptCanvas: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                if isProcessing {
-                    if !streamingTranscript.isEmpty {
-                        liveTranscriptView
+        GeometryReader { geo in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    if isProcessing {
+                        if !streamingTranscript.isEmpty {
+                            liveTranscriptView
+                        } else {
+                            editorialProcessingState
+                        }
+                    } else if let errorMessage {
+                        editorialErrorState(errorMessage)
+                    } else if !transcript.isEmpty {
+                        finishedTranscriptView
                     } else {
-                        editorialProcessingState
+                        editorialEmptyState
                     }
-                } else if let errorMessage {
-                    editorialErrorState(errorMessage)
-                } else if !transcript.isEmpty {
-                    finishedTranscriptView
-                } else {
-                    editorialEmptyState
                 }
+                .padding(.horizontal, isRegularWidth ? gutter : 26)
+                .padding(.top, isRegularWidth ? 44 : 32)
+                .padding(.bottom, 28)
+                .frame(maxWidth: contentMeasure, alignment: .leading)
+                .frame(maxWidth: .infinity)
+                // Short states used to sit in the top-left corner of a mostly
+                // empty iPad screen. Centre them in the available height so the
+                // page reads as composed rather than unfinished.
+                .frame(minHeight: geo.size.height, alignment: shortFormCanvas ? .center : .top)
             }
-            .padding(.horizontal, isRegularWidth ? gutter : 26)
-            .padding(.top, isRegularWidth ? 44 : 32)
-            .padding(.bottom, 28)
-            .frame(maxWidth: contentMeasure, alignment: .leading)
-            .frame(maxWidth: .infinity)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    /// True when the canvas is showing something too small to fill the screen.
+    private var shortFormCanvas: Bool {
+        guard !isProcessing, transcript.isEmpty else { return false }
+        if errorMessage != nil { return true }
+        return recentTranscripts.isEmpty
     }
 
     var editorialEmptyState: some View {
@@ -378,8 +458,86 @@ struct ContentView: View {
                     .padding(.top, 8)
             }
 
-            Spacer(minLength: 60)
+            recentSection
         }
+    }
+
+    /// The most recent transcripts, inline on the idle page.
+    @ViewBuilder
+    var recentSection: some View {
+        let items = Array(recentTranscripts.prefix(isRegularWidth ? 6 : 3))
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Rectangle()
+                        .fill(Self.paperInk.opacity(0.20))
+                        .frame(width: 18, height: 1)
+                    Text("Recent")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .tracking(2)
+                        .foregroundColor(Self.paperMute)
+                    Spacer()
+                    Button {
+                        showLibrary = true
+                    } label: {
+                        Text("All \(recentTranscripts.count) →")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(Self.paperAccent)
+                    }
+                    .buttonStyle(PressableButtonStyle())
+                }
+                .padding(.bottom, 10)
+
+                ForEach(items) { t in
+                    Button {
+                        quickOpenTranscript = t
+                    } label: {
+                        recentRow(t)
+                    }
+                    .buttonStyle(PressableButtonStyle())
+
+                    if t.id != items.last?.id {
+                        Rectangle()
+                            .fill(Self.paperRule)
+                            .frame(height: 0.5)
+                    }
+                }
+            }
+            .padding(.top, 26)
+        }
+    }
+
+    func recentRow(_ t: SavedTranscript) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(t.title)
+                    .font(.system(size: 15, weight: .medium, design: .serif))
+                    .foregroundColor(Self.paperInk)
+                    .lineLimit(1)
+                    .multilineTextAlignment(.leading)
+
+                HStack(spacing: 10) {
+                    Text(TranscriptExporter.formatTimestamp(t.duration))
+                    if let lang = t.languageCode, !lang.isEmpty {
+                        Text(lang.uppercased())
+                    }
+                    if let model = t.modelName {
+                        Text(model)
+                    }
+                }
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundColor(Self.paperMute)
+            }
+
+            Spacer(minLength: 8)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(Self.paperMute.opacity(0.6))
+                .padding(.top, 4)
+        }
+        .padding(.vertical, 11)
+        .contentShape(Rectangle())
     }
 
     // Compact inline model picker shown on the empty state when nothing's loaded yet.
@@ -404,7 +562,7 @@ struct ContentView: View {
                 }
             }
 
-            Button(action: downloadSelectedModel) {
+            Button { prepareModel(selectedModel) } label: {
                 HStack(spacing: 10) {
                     Image(systemName: downloadStatus[selectedModel] ?? false ? "arrow.clockwise" : "arrow.down")
                         .font(.system(size: 13, weight: .bold))
@@ -666,7 +824,8 @@ struct ContentView: View {
             }
             .buttonStyle(PressableButtonStyle())
         }
-        .padding(18)
+        .padding(isRegularWidth ? 24 : 18)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Self.paperAccentSoft.opacity(0.35))
@@ -839,7 +998,9 @@ struct ContentView: View {
                 Circle()
                     .fill(isModelLoaded ? Color(red: 0.30, green: 0.65, blue: 0.40) : Self.paperMute.opacity(0.4))
                     .frame(width: 7, height: 7)
-                Text(isModelLoaded ? "Ready" : "Choose a model to begin")
+                Text(isPreparingModel
+                     ? (downloadProgress != nil ? "Downloading" : "Loading")
+                     : (isModelLoaded ? "Ready" : "Choose a model to begin"))
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .tracking(1.5)
                     .textCase(.uppercase)
@@ -853,6 +1014,26 @@ struct ContentView: View {
                         .overlay(Circle().strokeBorder(Self.paperRule, lineWidth: 0.5))
                 }
                 .buttonStyle(PressableButtonStyle())
+            }
+
+            if isPreparingModel {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let p = downloadProgress {
+                        ProgressView(value: p)
+                            .progressViewStyle(.linear)
+                            .tint(Self.paperAccent)
+                        Text("\(Int(p * 100))% of \(selectedModel.sizeLabel)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(Self.paperMute)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                            .tint(Self.paperAccent)
+                        Text(statusMessage.isEmpty ? "Preparing…" : statusMessage)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(Self.paperMute)
+                    }
+                }
             }
 
             Text("Each model is downloaded once and runs on this device's Neural Engine. Larger models are slower but more accurate, especially across languages.")
@@ -871,11 +1052,25 @@ struct ContentView: View {
             }
 
             // Action button
-            Button(action: downloadSelectedModel) {
+            Button {
+                if isPreparingModel {
+                    modelPrepTask?.cancel()
+                    isPreparingModel = false
+                    statusMessage = ""
+                } else {
+                    prepareModel(selectedModel)
+                }
+            } label: {
                 HStack(spacing: 10) {
-                    Image(systemName: downloadStatus[selectedModel] ?? false ? "arrow.clockwise" : "arrow.down")
+                    Image(systemName: isPreparingModel
+                          ? "xmark"
+                          : (downloadStatus[selectedModel] ?? false ? "arrow.clockwise" : "arrow.down"))
                         .font(.system(size: 14, weight: .bold))
-                    Text(downloadStatus[selectedModel] ?? false ? "Reload \(selectedModel.displayName)" : "Download \(selectedModel.displayName)")
+                    Text(isPreparingModel
+                         ? "Cancel"
+                         : (downloadStatus[selectedModel] ?? false
+                            ? "Reload \(selectedModel.displayName)"
+                            : "Download \(selectedModel.displayName) · \(selectedModel.sizeLabel)"))
                         .font(.system(size: 15, weight: .semibold, design: .serif))
                 }
                 .foregroundColor(Self.paperBG)
@@ -888,8 +1083,8 @@ struct ContentView: View {
                 )
             }
             .buttonStyle(PressableButtonStyle())
-            .disabled(isProcessing)
-            .opacity(isProcessing ? 0.5 : 1)
+            .disabled(isProcessing && !isPreparingModel)
+            .opacity((isProcessing && !isPreparingModel) ? 0.5 : 1)
             .padding(.top, 6)
 
             // Privacy footnote — reinforces that this is differentiated
@@ -934,7 +1129,7 @@ struct ContentView: View {
                     }
                 }
 
-                Text(model.description)
+                Text(model.tagline)
                     .font(.system(size: 12, design: .serif))
                     .foregroundColor(Self.paperInk.opacity(0.55))
                     .lineLimit(2)
@@ -942,21 +1137,27 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 HStack(spacing: 6) {
-                    if isDownloaded {
-                        paperBadge("Downloaded", tint: Color(red: 0.30, green: 0.65, blue: 0.40))
-                    } else {
-                        paperBadge("Not yet", tint: Self.paperMute)
-                    }
+                    paperBadge(model.sizeLabel,
+                               tint: isDownloaded ? Color(red: 0.30, green: 0.65, blue: 0.40) : Self.paperMute)
                     if isActive {
                         paperBadge("Loaded", tint: Self.paperAccent)
+                    } else if isDownloaded {
+                        paperBadge("On device", tint: Color(red: 0.30, green: 0.65, blue: 0.40))
                     }
+                }
+
+                // Per-card progress, so it's obvious which model is downloading.
+                if isSelected, isPreparingModel, let p = downloadProgress {
+                    ProgressView(value: p)
+                        .progressViewStyle(.linear)
+                        .tint(Self.paperAccent)
                 }
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(isSelected ? Self.paperAccentSoft.opacity(0.45) : Color.white.opacity(0.55))
+                    .fill(isSelected ? Self.paperAccentSoft.opacity(0.45) : Self.paperCard)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -967,6 +1168,15 @@ struct ContentView: View {
             )
         }
         .buttonStyle(PressableButtonStyle())
+        .contextMenu {
+            if isDownloaded {
+                Button(role: .destructive) {
+                    deleteModel(model)
+                } label: {
+                    Label("Delete download (\(model.sizeLabel))", systemImage: "trash")
+                }
+            }
+        }
     }
 
     func paperBadge(_ text: String, tint: Color) -> some View {
@@ -1295,16 +1505,153 @@ struct ContentView: View {
         errorMessage = message
     }
 
-    func showNoSpeechDetected() {
-        showError("No speech was detected in this audio.")
+    /// Explains an empty result in terms of what actually happened, rather than
+    /// the flat "no speech detected" that gave the user nothing to act on.
+    func reportEmptyTranscript(peak: Float?) {
+        // -46 dBFS. Room tone and mic self-noise sit below this; anything
+        // audible sits well above it.
+        let silenceFloor: Float = 0.005
+
+        if let peak, peak < silenceFloor {
+            showError("""
+            This recording is essentially silent — nothing reached the microphone.
+
+            If you were capturing sound from another device's speaker, move the \
+            two closer together and turn the source volume up. Also check that \
+            Whisper has microphone access in Settings.
+            """)
+            return
+        }
+
+        let modelHint = selectedModel == .small
+            ? "\n\nThe Small model struggles with quiet or accented speech — try Turbo for a much better result."
+            : ""
+        let languageHint = selectedLanguage == "auto"
+            ? "\n\nAuto-detect can pick the wrong language on a short or noisy clip. Setting the language explicitly usually fixes it."
+            : ""
+
+        showError("The audio came through, but no speech could be transcribed from it.\(modelHint)\(languageHint)")
     }
     
+    /// Switching models used to only do something when the model was already
+    /// on disk — otherwise it silently changed the label while `whisperKit`
+    /// kept holding the *previous* model, so the chip lied about what was
+    /// actually transcribing. Now selecting always (re)prepares.
     func selectModel(_ model: WhisperModel) {
+        let alreadyReady = (model == selectedModel && isModelLoaded && !isPreparingModel)
         selectedModel = model
-        if downloadStatus[model] == true {
-            Task {
-                await loadExistingModel(model)
+        guard !alreadyReady else { return }
+        prepareModel(model)
+    }
+
+    /// Downloads the model if needed, then loads it. Cancels any preparation
+    /// already in flight first.
+    func prepareModel(_ model: WhisperModel) {
+        modelPrepTask?.cancel()
+        isModelLoaded = false
+        whisperKit = nil
+        modelPrepTask = Task { await performModelPreparation(model) }
+    }
+
+    @MainActor
+    func performModelPreparation(_ model: WhisperModel) async {
+        isPreparingModel = true
+        downloadProgress = nil
+        errorMessage = nil
+        monitor.startSystemMonitoring()
+        defer {
+            isPreparingModel = false
+            downloadProgress = nil
+            monitor.stopSystemMonitoring()
+        }
+
+        let modelsDir = getModelsDirectory()
+        do {
+            try FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+
+            if findModelDirectory(for: model) == nil {
+                statusMessage = "Downloading \(model.displayName) — \(model.sizeLabel)"
+                downloadProgress = 0
+                _ = try await WhisperKit.download(
+                    variant: model.rawValue,
+                    downloadBase: modelsDir,
+                    progressCallback: { progress in
+                        Task { @MainActor in
+                            self.downloadProgress = progress.fractionCompleted
+                        }
+                    }
+                )
+                try Task.checkCancellation()
+                downloadStatus[model] = true
             }
+
+            // Loading into the ANE reports no progress, so drop the bar.
+            statusMessage = "Loading \(model.displayName)…"
+            downloadProgress = nil
+
+            let kit = try await WhisperKit(
+                model: model.rawValue,
+                downloadBase: modelsDir,
+                verbose: false,
+                logLevel: .error
+            )
+            try Task.checkCancellation()
+
+            whisperKit = kit
+            isModelLoaded = true
+            downloadStatus[model] = true
+            statusMessage = ""
+            resetResult()
+        } catch is CancellationError {
+            // Superseded by another selection — leave state to the newer task.
+        } catch {
+            guard !Task.isCancelled else { return }
+            isModelLoaded = false
+            statusMessage = ""
+            showError("Couldn't prepare \(model.displayName).\n\n\(error.localizedDescription)")
+        }
+    }
+
+    /// Variants shipped by earlier versions. Anyone who had downloaded Medium
+    /// or the unquantized Large builds is sitting on up to 7.8 GB of weights
+    /// that nothing can load or delete any more, so retire them on launch.
+    static let retiredModelVariants = [
+        "openai_whisper-base",
+        "openai_whisper-base.en",
+        "openai_whisper-tiny",
+        "openai_whisper-medium",
+        "openai_whisper-large-v3",
+        "openai_whisper-large-v3_turbo",
+    ]
+
+    func removeRetiredModelDownloads() {
+        let root = getModelsDirectory()
+            .appendingPathComponent("models/argmaxinc/whisperkit-coreml", isDirectory: true)
+        let live = Set(WhisperModel.allCases.map(\.rawValue))
+
+        for variant in Self.retiredModelVariants where !live.contains(variant) {
+            let dir = root.appendingPathComponent(variant, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: dir.path) else { continue }
+            do {
+                try FileManager.default.removeItem(at: dir)
+                print("Removed retired model download: \(variant)")
+            } catch {
+                print("Could not remove retired model \(variant): \(error)")
+            }
+        }
+    }
+
+    /// Frees a downloaded model's files. The full lineup runs to ~2.9 GB, so
+    /// reclaiming space needs to be possible in-app.
+    func deleteModel(_ model: WhisperModel) {
+        if let dir = findModelDirectory(for: model) {
+            try? FileManager.default.removeItem(at: dir)
+        }
+        downloadStatus[model] = false
+        if model == selectedModel {
+            modelPrepTask?.cancel()
+            whisperKit = nil
+            isModelLoaded = false
         }
     }
     
@@ -1384,20 +1731,32 @@ struct ContentView: View {
     
     // MARK: - Model Management
     
+    /// WhisperKit lays models out at <base>/models/<owner>/<repo>/<variant>.
+    /// This used to enumerate the entire tree — every file of every downloaded
+    /// model — once per model at launch, which is thousands of stat() calls
+    /// against gigabytes of weights just to answer "is it there?". Probe the
+    /// known layout first, and only fall back to a walk if that misses.
     func findModelDirectory(for model: WhisperModel) -> URL? {
         let modelsDir = getModelsDirectory()
+
+        let direct = modelsDir
+            .appendingPathComponent("models/argmaxinc/whisperkit-coreml", isDirectory: true)
+            .appendingPathComponent(model.rawValue, isDirectory: true)
+        if let contents = try? FileManager.default.contentsOfDirectory(atPath: direct.path),
+           !contents.isEmpty {
+            return direct
+        }
+
         guard let enumerator = FileManager.default.enumerator(
             at: modelsDir,
             includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else { return nil }
 
-        for case let url as URL in enumerator {
-            if url.lastPathComponent == model.rawValue {
-                if let contents = try? FileManager.default.contentsOfDirectory(atPath: url.path),
-                   !contents.isEmpty {
-                    return url
-                }
+        for case let url as URL in enumerator where url.lastPathComponent == model.rawValue {
+            if let contents = try? FileManager.default.contentsOfDirectory(atPath: url.path),
+               !contents.isEmpty {
+                return url
             }
         }
         return nil
@@ -1408,83 +1767,8 @@ struct ContentView: View {
             downloadStatus[model] = findModelDirectory(for: model) != nil
         }
 
-        if downloadStatus[selectedModel] == true && !isModelLoaded && !isProcessing {
-            Task {
-                await loadExistingModel(selectedModel)
-            }
-        }
-    }
-    
-    func loadExistingModel(_ model: WhisperModel) async {
-        await MainActor.run {
-            statusMessage = "Loading model..."
-            isProcessing = true
-            monitor.startSystemMonitoring()
-        }
-
-        do {
-            let modelsDir = getModelsDirectory()
-            whisperKit = try await WhisperKit(
-                model: model.rawValue,
-                downloadBase: modelsDir,
-                verbose: true,
-                logLevel: .debug
-            )
-
-            await MainActor.run {
-                isModelLoaded = true
-                isProcessing = false
-                statusMessage = "Model loaded successfully"
-                monitor.stopSystemMonitoring()
-                resetResult()
-            }
-        } catch {
-            await MainActor.run {
-                isModelLoaded = false
-                isProcessing = false
-                statusMessage = "Failed to load model"
-                monitor.stopSystemMonitoring()
-                print("Failed to load model: \(error)")
-            }
-        }
-    }
-
-    func downloadSelectedModel() {
-        isProcessing = true
-        isModelLoaded = false
-        statusMessage = "Downloading \(selectedModel.displayName)..."
-        resetResult()
-        monitor.startSystemMonitoring()
-
-        Task {
-            do {
-                let modelsDir = getModelsDirectory()
-                try FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
-
-                whisperKit = try await WhisperKit(
-                    model: selectedModel.rawValue,
-                    downloadBase: modelsDir,
-                    verbose: true,
-                    logLevel: .debug
-                )
-
-                await MainActor.run {
-                    downloadStatus[selectedModel] = true
-                    isModelLoaded = true
-                    isProcessing = false
-                    statusMessage = "Model ready"
-                    monitor.stopSystemMonitoring()
-                    resetResult()
-                }
-            } catch {
-                await MainActor.run {
-                    isModelLoaded = false
-                    showError("Download failed: \(error.localizedDescription)\n\nCheck your internet connection and try again.")
-                    isProcessing = false
-                    statusMessage = ""
-                    monitor.stopSystemMonitoring()
-                }
-            }
+        if downloadStatus[selectedModel] == true && !isModelLoaded && !isProcessing && !isPreparingModel {
+            prepareModel(selectedModel)
         }
     }
     
@@ -1906,16 +2190,35 @@ struct ContentView: View {
             throw error
         }
 
+        // Measured before decoding so a failure can say which thing went wrong.
+        let peakLevel = AudioConverter.peakAmplitude(of: workURL)
+
         let languageCode = selectedLanguage == "auto" ? nil : selectedLanguage
         let shouldDetectLanguage = (languageCode == nil)
 
+        // Whisper's compression-ratio check exists to catch repetition loops.
+        // It is computed over the UTF-8 bytes of the decoded text, and CJK
+        // characters are three bytes each and compress extremely well — so
+        // perfectly good Chinese, Japanese and Korean routinely score above the
+        // 2.4 default, get treated as failed decodes, exhaust the temperature
+        // fallbacks and end up dropped. That is why Chinese came back as
+        // "no speech detected". Disable the check for those scripts and lean on
+        // the log-prob and no-speech gates instead.
+        let isCJK = ["zh", "ja", "ko"].contains(languageCode ?? "")
+
+        // Audio captured off another device's speaker is quiet and reverberant,
+        // which pushes average log-prob down and no-speech probability up. Both
+        // gates are loosened so far-field recordings aren't silently discarded.
         let options = DecodingOptions(
-            verbose: true,
+            verbose: false,
             task: .transcribe,
             language: languageCode,
             temperature: 0.0,
+            temperatureFallbackCount: 5,
             detectLanguage: shouldDetectLanguage,
-            compressionRatioThreshold: 2.4
+            compressionRatioThreshold: isCJK ? nil : 2.8,
+            logProbThreshold: -1.5,
+            noSpeechThreshold: 0.8
         )
 
         let audioFile = try? AVAudioFile(forReading: workURL)
@@ -2000,8 +2303,14 @@ struct ContentView: View {
             }
             
             if !results.isEmpty {
-                let fullText = results.map { $0.text }.joined(separator: "\n")
-                
+                // Trim before testing — a result made only of whitespace used to
+                // sail through this check and land an empty transcript in the
+                // library.
+                let fullText = results
+                    .map { $0.text }
+                    .joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
                 if !fullText.isEmpty {
                     let detectedLanguage = results.first?.language ?? "Unknown"
                     if selectedLanguage == "auto" {
@@ -2035,10 +2344,10 @@ struct ContentView: View {
                     )
                     errorMessage = nil
                 } else {
-                    showNoSpeechDetected()
+                    reportEmptyTranscript(peak: peakLevel)
                 }
             } else {
-                showNoSpeechDetected()
+                reportEmptyTranscript(peak: peakLevel)
             }
 
             streamingTranscript = ""
