@@ -13,6 +13,7 @@ import BackgroundTasks
 struct ContentView: View {
     // MARK: - State Properties
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     // Previous tick counters for instantaneous CPU & task time deltas.
     // Without this baseline the sampler returns the cumulative since-boot
     // average, which is nearly constant — making the chart look frozen.
@@ -26,7 +27,12 @@ struct ContentView: View {
     @State private var lastTranscriptionResults: [TranscriptionResult] = []
     @State private var showModelDetails: Bool = false
     @State private var detectedLanguageCode: String? = nil
+    /// The transcript body only — clean text, no decoration. Metadata lives in
+    /// `transcriptMeta` and failures in `errorMessage`, so this is always
+    /// exactly what the user would want to copy or export.
     @State private var transcript: String = ""
+    @State private var transcriptMeta: TranscriptMeta? = nil
+    @State private var errorMessage: String? = nil
     @State private var streamingTranscript: String = ""
     @State private var isProcessing = false
     @State private var isModelLoaded = false
@@ -87,6 +93,26 @@ struct ContentView: View {
         let networkIO: Double
     }
     
+    // MARK: - Transcript Result Metadata
+
+    /// Structured stats for a finished run. These used to be interpolated into
+    /// the transcript string itself, which made the on-screen text impossible
+    /// to copy or restyle without the decoration coming along.
+    struct TranscriptMeta {
+        var detectedLanguage: String?
+        var selectedLanguageName: String
+        var audioDuration: Double
+        var processingTime: Double
+        var modelName: String
+        var segmentCount: Int
+
+        /// Seconds of audio handled per second of wall clock.
+        var realtimeFactor: Double? {
+            guard processingTime > 0, audioDuration > 0 else { return nil }
+            return audioDuration / processingTime
+        }
+    }
+
     // MARK: - Models
     enum WhisperModel: String, CaseIterable {
         case base = "openai_whisper-base"
@@ -169,115 +195,66 @@ struct ContentView: View {
             handleScenePhaseChange(oldPhase: oldPhase, newPhase: newPhase)
         }
     }
-    
-    // MARK: - Background
-    var appBackground: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.93, green: 0.95, blue: 1.0),
-                    Color(red: 0.97, green: 0.94, blue: 1.0),
-                    Color(red: 0.99, green: 0.96, blue: 0.99)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            // Soft accent orbs for depth
-            Circle()
-                .fill(Color.blue.opacity(0.18))
-                .frame(width: 320, height: 320)
-                .blur(radius: 90)
-                .offset(x: -160, y: -260)
-
-            Circle()
-                .fill(Color.purple.opacity(0.16))
-                .frame(width: 360, height: 360)
-                .blur(radius: 100)
-                .offset(x: 180, y: 320)
-
-            Circle()
-                .fill(Color.pink.opacity(0.10))
-                .frame(width: 240, height: 240)
-                .blur(radius: 80)
-                .offset(x: 200, y: -180)
-        }
-    }
-
-    // MARK: - Compact Model Pill (iPhone, when model loaded)
-    var compactModelPill: some View {
-        Button {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
-                showModelDetails = true
-            }
-        } label: {
-            HStack(spacing: 12) {
-                ZStack {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.green.opacity(0.25), Color.green.opacity(0.10)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 36, height: 36)
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [Color.green, Color(red: 0.10, green: 0.55, blue: 0.40)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Model Ready")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.primary)
-                    Text(selectedModel.displayName)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(.secondary.opacity(0.7))
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(Color.white.opacity(0.4))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [Color.white.opacity(0.8), Color.white.opacity(0.15)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 1
-                            )
-                    )
-                    .shadow(color: .black.opacity(0.05), radius: 12, x: 0, y: 4)
-            )
-        }
-        .buttonStyle(PressableButtonStyle())
-    }
 
     // MARK: - Palette (warm-paper aesthetic)
-    static let paperBG       = Color(red: 0.980, green: 0.965, blue: 0.940) // #FAF6F0
-    static let paperInk      = Color(red: 0.110, green: 0.095, blue: 0.080) // warm near-black
-    static let paperMute     = Color(red: 0.520, green: 0.495, blue: 0.460) // warm gray
-    static let paperRule     = Color(red: 0.000, green: 0.000, blue: 0.000).opacity(0.10)
-    static let paperAccent   = Color(red: 0.780, green: 0.290, blue: 0.180) // terracotta
-    static let paperAccentSoft = Color(red: 0.940, green: 0.825, blue: 0.770) // pale terracotta
+    //
+    // Light is warm paper; dark is the same page under lamplight — warm
+    // near-black stock with off-white ink, so the editorial feel survives the
+    // switch instead of turning into generic gray-on-black.
+
+    /// Builds a color that resolves per trait collection, so every call site
+    /// stays a plain `Self.paperInk` while still following the system appearance.
+    private static func adaptive(
+        light: (r: Double, g: Double, b: Double, a: Double),
+        dark: (r: Double, g: Double, b: Double, a: Double)
+    ) -> Color {
+        Color(UIColor { traits in
+            let c = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(red: c.r, green: c.g, blue: c.b, alpha: c.a)
+        })
+    }
+
+    static let paperBG = adaptive(
+        light: (0.980, 0.965, 0.940, 1.0),   // #FAF6F0 warm paper
+        dark:  (0.075, 0.068, 0.059, 1.0)    // warm near-black stock
+    )
+    static let paperInk = adaptive(
+        light: (0.110, 0.095, 0.080, 1.0),   // warm near-black
+        dark:  (0.949, 0.929, 0.894, 1.0)    // warm off-white
+    )
+    static let paperMute = adaptive(
+        light: (0.520, 0.495, 0.460, 1.0),   // warm gray
+        dark:  (0.620, 0.592, 0.548, 1.0)
+    )
+    static let paperRule = adaptive(
+        light: (0.000, 0.000, 0.000, 0.10),
+        dark:  (1.000, 0.980, 0.940, 0.16)
+    )
+    static let paperAccent = adaptive(
+        light: (0.780, 0.290, 0.180, 1.0),   // terracotta
+        dark:  (0.910, 0.450, 0.320, 1.0)    // lifted to carry on dark stock
+    )
+    static let paperAccentSoft = adaptive(
+        light: (0.940, 0.825, 0.770, 1.0),   // pale terracotta
+        dark:  (0.310, 0.150, 0.110, 1.0)    // deep terracotta wash
+    )
+
+    // MARK: - Adaptive metrics (compact iPhone vs regular iPad)
+
+    /// True on iPad and in wide multitasking splits. Driven by size class, not
+    /// idiom, so a Slide Over pane correctly gets the compact layout.
+    private var isRegularWidth: Bool { horizontalSizeClass == .regular }
+
+    /// Measure cap for the reading column. Serif body text gets hard to track
+    /// past ~75 characters a line, so on iPad the page stays a centered column
+    /// instead of stretching to a 13" bezel.
+    private var contentMeasure: CGFloat { isRegularWidth ? 720 : .infinity }
+
+    /// Outer gutter — wider on iPad to keep the column off the edges.
+    private var gutter: CGFloat { isRegularWidth ? 40 : 22 }
+
+    /// Body type scales up slightly on the larger canvas.
+    private var bodyTextSize: CGFloat { isRegularWidth ? 21 : 19 }
 
     // MARK: - Editorial / Paper Layout
     var editorialLayout: some View {
@@ -290,7 +267,6 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .preferredColorScheme(.light)
         .sheet(isPresented: $showModelPicker) {
             modelPickerSheet
         }
@@ -341,7 +317,11 @@ struct ContentView: View {
                 .buttonStyle(PressableButtonStyle())
             }
         }
-        .padding(.horizontal, 22)
+        .padding(.horizontal, gutter)
+        // Content tracks the reading column; the hairline rule still spans the
+        // full width so the page reads as one sheet on iPad.
+        .frame(maxWidth: contentMeasure)
+        .frame(maxWidth: .infinity)
         .padding(.top, 8)
         .padding(.bottom, 14)
         .overlay(alignment: .bottom) {
@@ -359,16 +339,19 @@ struct ContentView: View {
                     } else {
                         editorialProcessingState
                     }
+                } else if let errorMessage {
+                    editorialErrorState(errorMessage)
                 } else if !transcript.isEmpty {
                     finishedTranscriptView
                 } else {
                     editorialEmptyState
                 }
             }
-            .padding(.horizontal, 26)
-            .padding(.top, 32)
+            .padding(.horizontal, isRegularWidth ? gutter : 26)
+            .padding(.top, isRegularWidth ? 44 : 32)
             .padding(.bottom, 28)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: contentMeasure, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
         .frame(maxHeight: .infinity)
     }
@@ -382,7 +365,7 @@ struct ContentView: View {
                 .foregroundColor(Self.paperMute)
 
             Text("A quiet place\nfor your voice.")
-                .font(.system(size: 36, weight: .semibold, design: .serif))
+                .font(.system(size: isRegularWidth ? 44 : 36, weight: .semibold, design: .serif))
                 .foregroundColor(Self.paperInk)
                 .lineSpacing(2)
 
@@ -760,7 +743,7 @@ struct ContentView: View {
             }
 
             Text(streamingTranscript)
-                .font(.system(size: 20, weight: .regular, design: .serif))
+                .font(.system(size: bodyTextSize + 1, weight: .regular, design: .serif))
                 .foregroundColor(Self.paperInk)
                 .lineSpacing(7)
 
@@ -806,14 +789,97 @@ struct ContentView: View {
                         .frame(width: 28, height: 28)
                         .overlay(Circle().strokeBorder(Self.paperRule, lineWidth: 0.5))
                 }
+                .accessibilityLabel(showCopySuccess ? "Transcript copied" : "Copy transcript")
+            }
+
+            if let meta = transcriptMeta {
+                transcriptMetaStrip(meta)
             }
 
             Text(transcript)
-                .font(.system(size: 19, weight: .regular, design: .serif))
+                .font(.system(size: bodyTextSize, weight: .regular, design: .serif))
                 .foregroundColor(Self.paperInk)
                 .lineSpacing(8)
                 .textSelection(.enabled)
         }
+    }
+
+    /// Run stats as a quiet rule-bounded strip, so the transcript body below
+    /// stays pure text that copies and exports cleanly.
+    func transcriptMetaStrip(_ meta: TranscriptMeta) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Rectangle().fill(Self.paperRule).frame(height: 0.5)
+
+            HStack(spacing: 14) {
+                ForEach(metaItems(meta), id: \.label) { item in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.label)
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .tracking(1.2)
+                            .foregroundColor(Self.paperMute)
+                        Text(item.value)
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .foregroundColor(Self.paperInk.opacity(0.8))
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+
+            Rectangle().fill(Self.paperRule).frame(height: 0.5)
+        }
+    }
+
+    private func metaItems(_ meta: TranscriptMeta) -> [(label: String, value: String)] {
+        var items: [(label: String, value: String)] = []
+        if meta.audioDuration > 0 {
+            items.append(("LENGTH", formatDuration(meta.audioDuration)))
+        }
+        items.append(("MODEL", meta.modelName))
+        items.append(("SEGMENTS", "\(meta.segmentCount)"))
+        if let factor = meta.realtimeFactor {
+            items.append(("SPEED", String(format: "%.1f×", factor)))
+        }
+        items.append(("TOOK", formatDuration(meta.processingTime)))
+        return items
+    }
+
+    /// Failures get their own presentation instead of being written into the
+    /// transcript text, where they used to be copyable and exportable as if
+    /// they were speech.
+    func editorialErrorState(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 11, weight: .bold))
+                Text("SOMETHING WENT WRONG")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .tracking(2)
+            }
+            .foregroundColor(Self.paperAccent)
+
+            Text(message)
+                .font(.system(size: 16, design: .serif))
+                .foregroundColor(Self.paperInk.opacity(0.8))
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                errorMessage = nil
+            } label: {
+                Text("Dismiss")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Self.paperInk.opacity(0.75))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .overlay(Capsule().strokeBorder(Self.paperRule, lineWidth: 0.5))
+            }
+            .buttonStyle(PressableButtonStyle())
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Self.paperAccentSoft.opacity(0.35))
+        )
     }
 
     // Stamp like "MAY 19, 2026"
@@ -906,7 +972,9 @@ struct ContentView: View {
                 .buttonStyle(PressableButtonStyle())
             }
         }
-        .padding(.horizontal, 22)
+        .padding(.horizontal, gutter)
+        .frame(maxWidth: contentMeasure)
+        .frame(maxWidth: .infinity)
         .padding(.top, 16)
         .padding(.bottom, 18)
         .background(
@@ -1149,887 +1217,6 @@ struct ContentView: View {
             }
         }
     }
-
-    // MARK: - Library Button (top-right floating)
-    var libraryButton: some View {
-        Button {
-            showLibrary = true
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "books.vertical.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("Library")
-                    .font(.system(size: 13, weight: .semibold))
-            }
-            .foregroundStyle(
-                LinearGradient(colors: [.blue, .purple], startPoint: .leading, endPoint: .trailing)
-            )
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(
-                Capsule()
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        Capsule().strokeBorder(
-                            LinearGradient(colors: [Color.blue.opacity(0.4), Color.purple.opacity(0.4)],
-                                           startPoint: .leading, endPoint: .trailing),
-                            lineWidth: 1
-                        )
-                    )
-                    .shadow(color: .black.opacity(0.06), radius: 8, y: 2)
-            )
-        }
-        .buttonStyle(PressableButtonStyle())
-    }
-
-    // MARK: - Header View
-    var headerView: some View {
-        VStack(spacing: 14) {
-            // App Icon — layered glow
-            ZStack {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.blue.opacity(0.35), Color.purple.opacity(0.35)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 96, height: 96)
-                    .blur(radius: 18)
-
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .frame(width: 84, height: 84)
-                    .overlay(
-                        Circle()
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [Color.white.opacity(0.9), Color.white.opacity(0.2)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 1
-                            )
-                    )
-
-                Image(systemName: "waveform")
-                    .font(.system(size: 38, weight: .semibold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [.blue, .purple],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .symbolEffect(.variableColor.iterative, options: .repeating, isActive: isProcessing || isRecording)
-            }
-
-            VStack(spacing: 6) {
-                Text("Whisper")
-                    .font(.system(size: 34, weight: .bold, design: .rounded))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [.blue, .purple],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .tracking(-0.5)
-
-                Text("ON-DEVICE  ·  PRIVATE  ·  NEURAL")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .tracking(2.0)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
-    }
-    
-    // MARK: - Model Management Section
-    var modelManagementSection: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                HStack(spacing: 8) {
-                    Image(systemName: "cpu.fill")
-                        .font(.title3)
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [.blue, .cyan],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("AI Model")
-                            .font(.headline)
-                            .bold()
-                        Text("Neural Engine Optimized")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                Spacer()
-
-                if isModelLoaded {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 10, height: 10)
-                            .shadow(color: .green.opacity(0.5), radius: 3)
-                        Text("Ready")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                            .foregroundColor(.green)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.green.opacity(0.1))
-                    .cornerRadius(20)
-                }
-
-                Button(action: checkModelStatus) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.caption)
-                        .foregroundColor(.blue)
-                }
-                .buttonStyle(BorderlessButtonStyle())
-
-                if isModelLoaded {
-                    Button {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
-                            showModelDetails = false
-                        }
-                    } label: {
-                        Image(systemName: "chevron.up")
-                            .font(.caption.bold())
-                            .foregroundColor(.secondary)
-                            .padding(6)
-                            .background(Circle().fill(Color.gray.opacity(0.15)))
-                    }
-                    .buttonStyle(BorderlessButtonStyle())
-                }
-            }
-            
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                ForEach(WhisperModel.allCases, id: \.self) { model in
-                    CompactModelCard(
-                        model: model,
-                        isSelected: selectedModel == model,
-                        isDownloaded: downloadStatus[model] ?? false,
-                        isLoaded: isModelLoaded && selectedModel == model
-                    ) {
-                        selectModel(model)
-                    }
-                }
-            }
-            
-            Button(action: downloadSelectedModel) {
-                HStack(spacing: 10) {
-                    Image(systemName: downloadStatus[selectedModel] ?? false ? "arrow.clockwise.circle.fill" : "arrow.down.circle.fill")
-                        .font(.title3)
-                    Text(downloadStatus[selectedModel] ?? false ? "Reload Model" : "Download Model")
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
-                .background(
-                    LinearGradient(
-                        colors: [Color(red: 0.20, green: 0.78, blue: 0.55), Color(red: 0.12, green: 0.62, blue: 0.45)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .foregroundColor(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
-                )
-                .shadow(color: Color.green.opacity(0.35), radius: 14, x: 0, y: 6)
-            }
-            .buttonStyle(PressableButtonStyle())
-            .disabled(isProcessing)
-        }
-        .padding(22)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .fill(Color.white.opacity(0.45))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.8), Color.white.opacity(0.15)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 1
-                        )
-                )
-                .shadow(color: .black.opacity(0.06), radius: 18, x: 0, y: 6)
-        )
-    }
-
-    // MARK: - Transcription Section
-    var transcriptionSection: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                HStack(spacing: 8) {
-                    Image(systemName: "text.bubble.fill")
-                        .font(.title3)
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [.purple, .pink],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Transcription")
-                            .font(.headline)
-                            .bold()
-                        Text("Upload & Process Audio")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                
-                Spacer()
-                
-                if isProcessing {
-                    HStack(spacing: 4) {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                        if scenePhase == .background {
-                            Image(systemName: "app.badge")
-                                .font(.caption)
-                                .foregroundColor(.blue)
-                        }
-                        Text(scenePhase == .background ? "Processing" : "Processing")
-                            .font(.caption)
-                            .foregroundColor(.primary)
-                    }
-                }
-            }
-            
-            // Language Selection
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 6) {
-                    Image(systemName: "globe")
-                        .font(.subheadline)
-                        .foregroundColor(.blue)
-                    Text("Language")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.primary)
-                }
-
-                Picker("Language", selection: $selectedLanguage) {
-                    ForEach(supportedLanguages, id: \.code) { language in
-                        Text(language.name).tag(language.code)
-                    }
-                }
-                .pickerStyle(MenuPickerStyle())
-                .padding(14)
-                .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color(UIColor.systemBackground))
-                        .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-                )
-            }
-            
-            // Record Button
-            VStack(spacing: 10) {
-                Button(action: toggleRecording) {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            if isRecording {
-                                Circle()
-                                    .stroke(Color.white.opacity(0.5), lineWidth: 2)
-                                    .frame(width: 28, height: 28)
-                                    .scaleEffect(isRecording ? 1.3 : 1.0)
-                                    .opacity(isRecording ? 0 : 1)
-                                    .animation(.easeOut(duration: 1.2).repeatForever(autoreverses: false), value: isRecording)
-                            }
-                            Image(systemName: isRecording ? "stop.fill" : "mic.fill")
-                                .font(.system(size: 18, weight: .bold))
-                        }
-                        Text(isRecording
-                             ? String(format: "Stop & Transcribe  ·  %@", formatDuration(recordingElapsed))
-                             : "Record Audio")
-                            .fontWeight(.semibold)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 18)
-                    .background(
-                        LinearGradient(
-                            colors: isRecording
-                                ? [Color(red: 0.95, green: 0.25, blue: 0.35), Color(red: 0.78, green: 0.12, blue: 0.30)]
-                                : [Color(red: 0.99, green: 0.40, blue: 0.55), Color(red: 0.82, green: 0.25, blue: 0.60)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .foregroundColor(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
-                    )
-                    .shadow(color: (isRecording ? Color.red : Color.pink).opacity(0.4), radius: 16, x: 0, y: 8)
-                }
-                .buttonStyle(PressableButtonStyle())
-                .disabled(!isModelLoaded || (isProcessing && !isRecording))
-                .opacity((isModelLoaded && (!isProcessing || isRecording)) ? 1.0 : 0.45)
-
-                if isRecording {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: 8, height: 8)
-                            .shadow(color: .red, radius: 4)
-                        Text("Listening…")
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(.red)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(Color.red.opacity(0.1)))
-                }
-            }
-
-            // Upload Buttons
-            VStack(spacing: 12) {
-                Button(action: { showingFilePicker = true }) {
-                    uploadButtonContent(icon: "folder.fill", title: "Files / iCloud", color: Color(red: 0.20, green: 0.55, blue: 0.98))
-                }
-                .buttonStyle(PressableButtonStyle())
-                .disabled(!isModelLoaded || isProcessing)
-                .opacity((isModelLoaded && !isProcessing) ? 1.0 : 0.45)
-
-                PhotosPicker(selection: $selectedPhotoItem, matching: .videos) {
-                    uploadButtonContent(icon: "photo.fill", title: "Photos", color: Color(red: 0.15, green: 0.72, blue: 0.85))
-                }
-                .buttonStyle(PressableButtonStyle())
-                .disabled(!isModelLoaded || isProcessing)
-                .opacity((isModelLoaded && !isProcessing) ? 1.0 : 0.45)
-                .onChange(of: selectedPhotoItem) { _, newItem in
-                    if let newItem = newItem {
-                        handlePhotoSelection(newItem)
-                    }
-                }
-
-            }
-            
-            // Background Warning Banner
-            if isProcessing && scenePhase == .background {
-                backgroundWarningBanner
-            }
-
-            // TQDM Progress
-            if isProcessing {
-                tqdmProgressSection
-            }
-            
-            // Enhanced Performance Monitoring
-            if isProcessing || !systemStatsHistory.isEmpty {
-                enhancedPerformanceSection
-            }
-            
-            // Transcript Display
-            transcriptSection
-        }
-        .padding(22)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .fill(Color.white.opacity(0.45))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.8), Color.white.opacity(0.15)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 1
-                        )
-                )
-                .shadow(color: .black.opacity(0.06), radius: 18, x: 0, y: 6)
-        )
-    }
-    
-    // MARK: - Background Warning Banner
-    var backgroundWarningBanner: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.title2)
-                    .foregroundColor(.orange)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Background Processing Active")
-                        .font(.subheadline)
-                        .fontWeight(.bold)
-                        .foregroundColor(.primary)
-
-                    Text("Tap to return to app for better performance")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-            }
-            .padding(16)
-            .background(
-                LinearGradient(
-                    colors: [Color.orange.opacity(0.15), Color.yellow.opacity(0.1)],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.orange.opacity(0.3), lineWidth: 1.5)
-            )
-        }
-    }
-
-    // MARK: - Upload Button Content
-    func uploadButtonContent(icon: String, title: String, color: Color) -> some View {
-        HStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(Color.white.opacity(0.22))
-                    .frame(width: 32, height: 32)
-                Image(systemName: icon)
-                    .font(.system(size: 14, weight: .bold))
-            }
-            Text(title)
-                .fontWeight(.semibold)
-            Spacer()
-            Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .bold))
-                .opacity(0.65)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 15)
-        .background(
-            LinearGradient(
-                colors: [color.opacity(0.95), color.opacity(0.72)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
-        .foregroundColor(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.25), lineWidth: 1)
-        )
-        .shadow(color: color.opacity(0.35), radius: 12, x: 0, y: 6)
-    }
-    
-    // MARK: - TQDM Progress Section
-    var tqdmProgressSection: some View {
-        VStack(spacing: 16) {
-            HStack {
-                Text(statusMessage)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundColor(.primary)
-                Spacer()
-            }
-            
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    Text("\(Int(transcriptionProgress * 100))%")
-                        .font(.system(.title3, design: .monospaced))
-                        .bold()
-                        .foregroundColor(.blue)
-                        .frame(width: 60, alignment: .trailing)
-                    
-                    GeometryReader { geometry in
-                        ZStack(alignment: .leading) {
-                            Rectangle()
-                                .fill(Color.gray.opacity(0.2))
-                                .frame(height: 24)
-                                .cornerRadius(4)
-                            
-                            Rectangle()
-                                .fill(
-                                    LinearGradient(
-                                        colors: [.blue, .cyan],
-                                        startPoint: .leading,
-                                        endPoint: .trailing
-                                    )
-                                )
-                                .frame(width: geometry.size.width * transcriptionProgress, height: 24)
-                                .cornerRadius(4)
-                                .animation(.easeInOut(duration: 0.3), value: transcriptionProgress)
-                            
-                            if transcriptionProgress > 0.1 {
-                                Text(tqdmProgressBar())
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(.leading, 8)
-                            }
-                        }
-                    }
-                    .frame(height: 24)
-                }
-                
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 16) {
-                        StatLabel(label: "Segments", value: "\(currentSegment)/\(totalSegments)")
-                        StatLabel(label: "Speed", value: String(format: "%.2f seg/s", segmentsPerSecond))
-                        StatLabel(label: "Elapsed", value: formatDuration(getElapsedTime()))
-                        StatLabel(label: "Remaining", value: formatDuration(getRemainingTime()))
-                    }
-                    .font(.system(.caption, design: .monospaced))
-                    
-                    if estimatedTotalTime > 0 {
-                        Text("ETA: \(formatTime(estimatedTotalTime))")
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundColor(.gray)
-                    }
-                }
-            }
-            .padding()
-            .background(Color.white)
-            .cornerRadius(12)
-            .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
-        }
-    }
-    
-    // MARK: - ENHANCED PERFORMANCE SECTION (FIXED)
-    var enhancedPerformanceSection: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                Image(systemName: "chart.line.uptrend.xyaxis")
-                    .foregroundColor(.blue)
-                    .font(.title3)
-                Text("System Performance Monitor")
-                    .font(.headline)
-                    .bold()
-                
-                Spacer()
-                
-                if let latest = systemStatsHistory.last {
-                    HStack(spacing: 3) {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 6, height: 6)
-                        Text("LIVE")
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundColor(.green)
-                            .bold()
-                    }
-                }
-            }
-            
-            if systemStatsHistory.count > 1, let latest = systemStatsHistory.last {
-                VStack(spacing: 16) {
-                    // CPU Graph
-                    PerformanceGraphCard(
-                        title: "CPU",
-                        icon: "cpu.fill",
-                        color: .blue,
-                        currentValue: systemStatsHistory.last?.cpuUsage ?? 0,
-                        unit: "%",
-                        data: systemStatsHistory.map { ($0.timestamp, $0.cpuUsage) },
-                        maxValue: 100
-                    )
-                    
-                    // Memory Graph
-                    PerformanceGraphCard(
-                        title: "Memory",
-                        icon: "memorychip.fill",
-                        color: .green,
-                        currentValue: latest.memoryPercent,
-                        unit: "%",
-                        data: systemStatsHistory.map { ($0.timestamp, $0.memoryPercent) },
-                        maxValue: 100,
-                        subtitle: String(format: "%.0f MB / %@ GB",
-                                       latest.memoryUsage,
-                                       getTotalMemoryGB())
-                    )
-                    
-                    // Neural Engine Graph (Fixed Icon)
-                    PerformanceGraphCard(
-                        title: "Neural Engine",
-                        icon: "brain.head.profile",
-                        color: .purple,
-                        currentValue: latest.gpuUsage,
-                        unit: "%",
-                        data: systemStatsHistory.map { ($0.timestamp, $0.gpuUsage) },
-                        maxValue: 100,
-                        subtitle: metalDevice?.name ?? "Apple Neural Engine"
-                    )
-                }
-                
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    SystemInfoCard(
-                        title: "Processor",
-                        value: getProcessorInfo(),
-                        icon: "cpu",
-                        color: .blue
-                    )
-                    
-                    SystemInfoCard(
-                        title: "Total Memory",
-                        value: getTotalMemoryGB() + " GB",
-                        icon: "memorychip",
-                        color: .green
-                    )
-                    
-                    SystemInfoCard(
-                        title: "Processing Time",
-                        value: formatDuration(getElapsedTime()),
-                        icon: "clock",
-                        color: .orange
-                    )
-                    
-                    SystemInfoCard(
-                        title: "Throughput",
-                        value: String(format: "%.2f seg/s", segmentsPerSecond),
-                        icon: "gauge.with.dots.needle.67percent",
-                        color: .purple
-                    )
-                }
-                
-            } else {
-                HStack {
-                    Spacer()
-                    VStack(spacing: 8) {
-                        ProgressView()
-                            .scaleEffect(1.2)
-                        Text("Initializing performance monitoring...")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.gray)
-                    }
-                    Spacer()
-                }
-                .padding(.vertical, 40)
-            }
-        }
-        .padding()
-        .background(
-            LinearGradient(
-                colors: [Color.gray.opacity(0.03), Color.blue.opacity(0.02)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
-        .cornerRadius(16)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-        )
-    }
-    
-    // MARK: - Performance Graph Card
-    struct PerformanceGraphCard: View {
-        let title: String
-        let icon: String
-        let color: Color
-        let currentValue: Double
-        let unit: String
-        let data: [(Date, Double)]
-        let maxValue: Double
-        var subtitle: String = ""
-        
-        var body: some View {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    HStack(spacing: 8) {
-                        Image(systemName: icon)
-                            .font(.title3)
-                            .foregroundColor(color)
-                        
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(title)
-                                .font(.system(.subheadline, design: .default))
-                                .bold()
-                            
-                            if !subtitle.isEmpty {
-                                Text(subtitle)
-                                    .font(.system(.caption2, design: .monospaced))
-                                    .foregroundColor(.gray)
-                            }
-                        }
-                    }
-                    
-                    Spacer()
-                    
-                    HStack(alignment: .firstTextBaseline, spacing: 2) {
-                        Text(String(format: "%.1f", currentValue))
-                            .font(.system(.title2, design: .monospaced))
-                            .bold()
-                            .foregroundColor(getColorForValue(currentValue))
-                        Text(unit)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.gray)
-                    }
-                }
-                
-                Chart {
-                    ForEach(Array(data.enumerated()), id: \.offset) { _, point in
-                        LineMark(
-                            x: .value("Time", point.0),
-                            y: .value("Value", point.1)
-                        )
-                        .foregroundStyle(color)
-                        .lineStyle(StrokeStyle(lineWidth: 2.5))
-                        .interpolationMethod(.catmullRom)
-                        
-                        AreaMark(
-                            x: .value("Time", point.0),
-                            y: .value("Value", point.1)
-                        )
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [color.opacity(0.4), color.opacity(0.05)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .interpolationMethod(.catmullRom)
-                    }
-                    
-                    if !data.isEmpty {
-                        let average = data.map { $0.1 }.reduce(0, +) / Double(data.count)
-                        RuleMark(y: .value("Average", average))
-                            .foregroundStyle(color.opacity(0.3))
-                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 5]))
-                    }
-                }
-                .chartYScale(domain: 0...maxValue)
-                .chartYAxis {
-                    AxisMarks(position: .leading, values: .automatic(desiredCount: 5)) { value in
-                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
-                            .foregroundStyle(.gray.opacity(0.2))
-                        AxisValueLabel {
-                            if let intValue = value.as(Int.self) {
-                                Text("\(intValue)")
-                                    .font(.system(.caption2, design: .monospaced))
-                                    .foregroundColor(.gray)
-                            }
-                        }
-                    }
-                }
-                .chartXAxis {
-                    AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
-                            .foregroundStyle(.gray.opacity(0.2))
-                    }
-                }
-                .frame(height: 120)
-                
-                if !data.isEmpty {
-                    HStack(spacing: 20) {
-                        MiniStat(label: "Min", value: String(format: "%.1f", data.map { $0.1 }.min() ?? 0), color: .gray)
-                        MiniStat(label: "Avg", value: String(format: "%.1f", data.map { $0.1 }.reduce(0, +) / Double(data.count)), color: .gray)
-                        MiniStat(label: "Max", value: String(format: "%.1f", data.map { $0.1 }.max() ?? 0), color: .gray)
-                        MiniStat(label: "Current", value: String(format: "%.1f", currentValue), color: getColorForValue(currentValue))
-                    }
-                    .font(.system(.caption2, design: .monospaced))
-                }
-            }
-            .padding()
-            .background(Color.white)
-            .cornerRadius(14)
-            .shadow(color: color.opacity(0.1), radius: 4, x: 0, y: 2)
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(
-                        LinearGradient(
-                            colors: [color.opacity(0.3), color.opacity(0.1)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            )
-        }
-        
-        func getColorForValue(_ value: Double) -> Color {
-            if title == "CPU" || title == "Neural Engine" {
-                if value > 80 { return .red }
-                if value > 60 { return .orange }
-                return color
-            } else if title == "Memory" {
-                if value > 85 { return .red }
-                if value > 70 { return .orange }
-                return color
-            }
-            return color
-        }
-    }
-    
-    struct MiniStat: View {
-        let label: String
-        let value: String
-        let color: Color
-        
-        var body: some View {
-            VStack(spacing: 2) {
-                Text(label)
-                    .foregroundColor(.gray)
-                Text(value)
-                    .foregroundColor(color)
-                    .bold()
-            }
-        }
-    }
-    
-    struct SystemInfoCard: View {
-        let title: String
-        let value: String
-        let icon: String
-        let color: Color
-        
-        var body: some View {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.title2)
-                    .foregroundColor(color)
-                    .frame(width: 32)
-                
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(.system(.caption, design: .default))
-                        .foregroundColor(.gray)
-                    Text(value)
-                        .font(.system(.subheadline, design: .monospaced))
-                        .bold()
-                        .lineLimit(1)
-                }
-                
-                Spacer()
-            }
-            .padding()
-            .background(Color.white)
-            .cornerRadius(10)
-            .shadow(color: .black.opacity(0.03), radius: 2, x: 0, y: 1)
-        }
-    }
     
     // MARK: - Transcript Section
     // Friendly display for a detected ISO language code from Whisper.
@@ -2043,207 +1230,6 @@ struct ContentView: View {
             return name.prefix(1).uppercased() + name.dropFirst()
         }
         return code.uppercased()
-    }
-
-    var detectedLanguageBadge: some View {
-        Group {
-            if let code = detectedLanguageCode, !code.isEmpty {
-                HStack(spacing: 6) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 10, weight: .bold))
-                    Text("Detected: \(displayName(forLanguageCode: code))")
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.blue, .purple],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    Capsule()
-                        .fill(.ultraThinMaterial)
-                        .overlay(
-                            Capsule().strokeBorder(
-                                LinearGradient(
-                                    colors: [Color.blue.opacity(0.4), Color.purple.opacity(0.4)],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                ),
-                                lineWidth: 1
-                            )
-                        )
-                )
-                .transition(.scale.combined(with: .opacity))
-            }
-        }
-    }
-
-    var transcriptSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Transcript")
-                    .font(.subheadline)
-                    .bold()
-
-                detectedLanguageBadge
-
-                Spacer()
-
-                if !transcript.isEmpty && !isProcessing {
-                    Button(action: copyTranscript) {
-                        HStack(spacing: 4) {
-                            Image(systemName: showCopySuccess ? "checkmark.circle.fill" : "doc.on.doc")
-                            Text(showCopySuccess ? "Copied!" : "Copy")
-                        }
-                        .font(.caption)
-                        .foregroundColor(showCopySuccess ? .green : .blue)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.gray.opacity(0.1))
-                        .cornerRadius(8)
-                    }
-                }
-            }
-            
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if isProcessing && !streamingTranscript.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack(spacing: 6) {
-                                Circle()
-                                    .fill(Color.red)
-                                    .frame(width: 8, height: 8)
-                                    .shadow(color: .red.opacity(0.5), radius: 2)
-                                Text("Live Transcription")
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundColor(.red)
-                                    .fontWeight(.semibold)
-                            }
-
-                            Text(streamingTranscript)
-                                .font(.system(.body, design: .default))
-                                .foregroundColor(.primary)
-                                .padding(14)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(
-                                    LinearGradient(
-                                        colors: [Color.yellow.opacity(0.15), Color.orange.opacity(0.08)],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                                .cornerRadius(10)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 10)
-                                        .stroke(Color.orange.opacity(0.3), lineWidth: 1.5)
-                                )
-                        }
-                    }
-
-                    if !transcript.isEmpty {
-                        Text(transcript)
-                            .font(.system(.body, design: .default))
-                            .textSelection(.enabled)
-                            .padding(2)
-                    } else if !isProcessing {
-                        VStack(spacing: 8) {
-                            Image(systemName: "doc.text")
-                                .font(.system(size: 32))
-                                .foregroundColor(.gray.opacity(0.5))
-                            Text("Transcript will appear here")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 60)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(16)
-            }
-            .frame(height: 280)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(UIColor.secondarySystemBackground))
-            )
-        }
-    }
-    
-    // MARK: - Supporting Views
-    
-    struct StatLabel: View {
-        let label: String
-        let value: String
-        
-        var body: some View {
-            HStack(spacing: 4) {
-                Text(label + ":")
-                    .foregroundColor(.gray)
-                Text(value)
-                    .foregroundColor(.primary)
-                    .bold()
-            }
-        }
-    }
-    
-    struct CompactModelCard: View {
-        let model: WhisperModel
-        let isSelected: Bool
-        let isDownloaded: Bool
-        let isLoaded: Bool
-        let action: () -> Void
-
-        var body: some View {
-            Button(action: action) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text(model.displayName)
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                            .foregroundColor(isSelected ? .blue : .primary)
-
-                        Spacer()
-
-                        if isLoaded {
-                            Circle()
-                                .fill(Color.green)
-                                .frame(width: 10, height: 10)
-                                .shadow(color: .green.opacity(0.5), radius: 2)
-                        } else if isDownloaded {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                                .font(.subheadline)
-                        }
-                    }
-
-                    Text(model.description)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(isSelected ? Color.blue.opacity(0.08) : Color(UIColor.systemBackground))
-                        .shadow(color: .black.opacity(isSelected ? 0.08 : 0.03), radius: isSelected ? 4 : 2, x: 0, y: 1)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(
-                            isSelected ?
-                                LinearGradient(colors: [.blue, .blue.opacity(0.6)], startPoint: .topLeading, endPoint: .bottomTrailing) :
-                                LinearGradient(colors: [.gray.opacity(0.2), .gray.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                            lineWidth: isSelected ? 2 : 1
-                        )
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-        }
     }
     
     // MARK: - Live Activity Functions
@@ -2496,6 +1482,25 @@ struct ContentView: View {
             showCopySuccess = false
         }
     }
+
+    /// Clears any previous result and error so a new run starts from a blank page.
+    func resetResult() {
+        transcript = ""
+        transcriptMeta = nil
+        errorMessage = nil
+    }
+
+    /// Surfaces a failure in the dedicated error channel rather than smuggling
+    /// it into the transcript text.
+    func showError(_ message: String) {
+        transcript = ""
+        transcriptMeta = nil
+        errorMessage = message
+    }
+
+    func showNoSpeechDetected() {
+        showError("No speech was detected in this audio.")
+    }
     
     func selectModel(_ model: WhisperModel) {
         selectedModel = model
@@ -2674,14 +1679,6 @@ struct ContentView: View {
         monitoringTimer = nil
     }
     
-    // MARK: - TQDM Helpers
-    
-    func tqdmProgressBar() -> String {
-        let filled = Int(transcriptionProgress * 20)
-        let empty = 20 - filled
-        return String(repeating: "█", count: filled) + String(repeating: "░", count: empty)
-    }
-    
     func getElapsedTime() -> TimeInterval {
         guard let startTime = processStartTime else { return 0 }
         return Date().timeIntervalSince(startTime)
@@ -2701,17 +1698,6 @@ struct ContentView: View {
             return String(format: "%02d:%02d", minutes, seconds)
         }
         return String(format: "%ds", seconds)
-    }
-    
-    func formatTime(_ duration: TimeInterval) -> String {
-        let hours = Int(duration) / 3600
-        let minutes = (Int(duration) % 3600) / 60
-        let seconds = Int(duration) % 60
-        
-        if hours > 0 {
-            return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
-        }
-        return String(format: "%02d:%02d", minutes, seconds)
     }
     
     func getProcessorInfo() -> String {
@@ -2821,7 +1807,7 @@ struct ContentView: View {
                 isProcessing = false
                 statusMessage = "Model loaded successfully"
                 stopSystemMonitoring()
-                transcript = ""
+                resetResult()
             }
         } catch {
             await MainActor.run {
@@ -2838,7 +1824,7 @@ struct ContentView: View {
         isProcessing = true
         isModelLoaded = false
         statusMessage = "Downloading \(selectedModel.displayName)..."
-        transcript = ""
+        resetResult()
         startSystemMonitoring()
 
         Task {
@@ -2859,12 +1845,12 @@ struct ContentView: View {
                     isProcessing = false
                     statusMessage = "Model ready"
                     stopSystemMonitoring()
-                    transcript = ""
+                    resetResult()
                 }
             } catch {
                 await MainActor.run {
                     isModelLoaded = false
-                    transcript = "❌ Download failed: \(error.localizedDescription)\n\nPlease check your internet connection and try again."
+                    showError("Download failed: \(error.localizedDescription)\n\nCheck your internet connection and try again.")
                     isProcessing = false
                     statusMessage = ""
                     stopSystemMonitoring()
@@ -2883,7 +1869,7 @@ struct ContentView: View {
                 await importFileDirectly(from: sourceURL)
             }
         case .failure(let error):
-            transcript = "❌ File selection failed: \(error.localizedDescription)"
+            showError("File selection failed: \(error.localizedDescription)")
         }
     }
     
@@ -2935,7 +1921,7 @@ struct ContentView: View {
             
         case .failure(let error):
             await MainActor.run {
-                transcript = "❌ Failed to access file: \(error.localizedDescription)\n\n💡 Try:\n• Downloading file from iCloud first\n• Using Photos upload (cyan button)\n• Testing on a real device"
+                showError("Couldn't open that file: \(error.localizedDescription)\n\nIf it lives in iCloud, download it first, or import the video from Photos instead.")
                 isProcessing = false
                 statusMessage = ""
             }
@@ -2950,7 +1936,7 @@ struct ContentView: View {
             do {
                 guard let movie = try await item.loadTransferable(type: Data.self) else {
                     await MainActor.run {
-                        transcript = "❌ Failed to load video from Photos"
+                        showError("Couldn't load that video from Photos.")
                         isProcessing = false
                         selectedPhotoItem = nil
                     }
@@ -2970,7 +1956,7 @@ struct ContentView: View {
                 }
             } catch {
                 await MainActor.run {
-                    transcript = "❌ Photo import failed: \(error.localizedDescription)"
+                    showError("Photo import failed: \(error.localizedDescription)")
                     isProcessing = false
                     selectedPhotoItem = nil
                 }
@@ -2986,7 +1972,7 @@ struct ContentView: View {
             statusMessage = "Importing file..."
             isProcessing = true
             streamingTranscript = ""
-            transcript = ""
+            resetResult()
             transcriptionProgress = 0.0
             currentSegment = 0
             totalSegments = 0
@@ -3026,21 +2012,20 @@ struct ContentView: View {
             
         } catch {
             await MainActor.run {
-                let errorMessage = error.localizedDescription
+                let detail = error.localizedDescription
 
-                // Check if it's the background ML error
-                if errorMessage.contains("ML Programs") || errorMessage.contains("asynchronous prediction") {
-                    transcript = """
-                    ⚠️ Background Processing Limited
+                // iOS denies Neural Engine / GPU access to backgrounded apps, so
+                // this failure needs a different explanation than a generic one.
+                if detail.contains("ML Programs") || detail.contains("asynchronous prediction") {
+                    showError("""
+                    Background processing is limited. iOS restricts Neural Engine \
+                    access while the app is in the background — keep Whisper in the \
+                    foreground during transcription.
 
-                    iOS restricts Neural Engine/GPU access when app is in background.
-
-                    ✅ Solution: Keep the app in foreground during transcription.
-
-                    Technical error: \(errorMessage)
-                    """
+                    Details: \(detail)
+                    """)
                 } else {
-                    transcript = "❌ Import failed: \(errorMessage)"
+                    showError("Import failed: \(detail)")
                 }
 
                 isProcessing = false
@@ -3064,10 +2049,10 @@ struct ContentView: View {
 
     func startRecording() {
         let session = AVAudioSession.sharedInstance()
-        session.requestRecordPermission { granted in
+        AVAudioApplication.requestRecordPermission { granted in
             DispatchQueue.main.async {
                 guard granted else {
-                    transcript = "❌ Microphone permission denied. Enable it in Settings."
+                    showError("Microphone access is off. Enable it in Settings › Whisper.")
                     return
                 }
                 do {
@@ -3076,7 +2061,7 @@ struct ContentView: View {
                     #if targetEnvironment(macCatalyst)
                     try? session.setCategory(.playAndRecord, mode: .default, options: [])
                     #else
-                    try? session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
+                    try? session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
                     #endif
                     try session.setActive(true)
 
@@ -3106,7 +2091,7 @@ struct ContentView: View {
                     isRecording = true
                     recordingStartTime = Date()
                     recordingElapsed = 0
-                    transcript = ""
+                    resetResult()
                     streamingTranscript = ""
 
                     recordingTimer?.invalidate()
@@ -3116,7 +2101,7 @@ struct ContentView: View {
                         }
                     }
                 } catch {
-                    transcript = "❌ Failed to start recording: \(error.localizedDescription)"
+                    showError("Couldn't start recording: \(error.localizedDescription)")
                 }
             }
         }
@@ -3150,7 +2135,7 @@ struct ContentView: View {
             let ready = await waitForRecordingFile(at: url, recorder: recorder)
             guard ready else {
                 await MainActor.run {
-                    transcript = "❌ Recording was too short or failed to save. Please record at least 1 second of audio."
+                    showError("That recording was too short to save. Record at least one second of audio.")
                     isProcessing = false
                     statusMessage = ""
                 }
@@ -3261,51 +2246,6 @@ struct ContentView: View {
             print("⚠️ Failed to save transcript: \(error)")
         }
     }
-
-    func testWithBundledAudio() {
-        let audioExtensions = ["m4a", "mp3", "wav", "aac", "mp4"]
-        var audioURL: URL?
-        
-        for ext in audioExtensions {
-            if let url = Bundle.main.url(forResource: "test", withExtension: ext) {
-                audioURL = url
-                break
-            }
-        }
-        
-        guard let url = audioURL else {
-            transcript = "❌ No bundled audio file found!\n\nAdd a test audio file to the project:\n1. Drag audio file into Xcode\n2. Name it 'test.mp3' or 'test.m4a'\n3. Check 'Add to targets: whisper'\n4. Rebuild and try again"
-            return
-        }
-        
-        isProcessing = true
-        statusMessage = "Loading bundled test audio..."
-        
-        Task {
-            do {
-                let importsDir = getImportsDirectory()
-                try FileManager.default.createDirectory(at: importsDir, withIntermediateDirectories: true)
-                
-                let fileName = url.lastPathComponent
-                let destinationURL = importsDir.appendingPathComponent(fileName)
-                
-                try? FileManager.default.removeItem(at: destinationURL)
-                try FileManager.default.copyItem(at: url, to: destinationURL)
-                
-                await MainActor.run {
-                    statusMessage = "Transcribing bundled audio..."
-                }
-                
-                try await transcribeAudio(at: destinationURL)
-            } catch {
-                await MainActor.run {
-                    transcript = "❌ Test failed: \(error.localizedDescription)"
-                    isProcessing = false
-                    statusMessage = ""
-                }
-            }
-        }
-    }
     
     // MARK: - Transcription
     
@@ -3365,7 +2305,6 @@ struct ContentView: View {
             totalSegments = max(1, Int(ceil(duration / 30.0)))
         }
         
-        var lastSegmentTime = Date()
         var segmentCount = 0
         var lastReportedProgress = 0.0
         
@@ -3404,8 +2343,6 @@ struct ContentView: View {
                             self.segmentsPerSecond = Double(segmentCount) / totalElapsed
                         }
                     }
-                    
-                    lastSegmentTime = currentTime
                     
                     // Update status message
                     let elapsed = self.getElapsedTime()
@@ -3458,35 +2395,25 @@ struct ContentView: View {
                         }
                     }
                     
-                    let durationStr = totalDuration > 0 ? String(format: "%.1f", totalDuration) : "Unknown"
                     let selectedLangName = supportedLanguages.first(where: { $0.code == selectedLanguage })?.name ?? "Auto Detect"
-                    let processingTime = getElapsedTime()
-                    
-                    transcript = """
-                    ✅ Transcription Complete
-                    
-                    📊 Metadata:
-                    • Detected Language: \(detectedLanguage.uppercased())
-                    • Selected Language: \(selectedLangName)
-                    • Audio Duration: \(durationStr)s
-                    • Processing Time: \(formatDuration(processingTime))
-                    • Speed: \(String(format: "%.2fx real-time", totalDuration / processingTime))
-                    • Model: \(selectedModel.displayName)
-                    • Segments: \(results.count)
-                    • Avg Speed: \(String(format: "%.2f seg/s", segmentsPerSecond))
-                    
-                    📝 Transcript:
-                    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                    
-                    \(fullText)
-                    """
+
+                    transcript = fullText
+                    transcriptMeta = TranscriptMeta(
+                        detectedLanguage: detectedLanguage == "Unknown" ? nil : detectedLanguage,
+                        selectedLanguageName: selectedLangName,
+                        audioDuration: totalDuration,
+                        processingTime: getElapsedTime(),
+                        modelName: selectedModel.displayName,
+                        segmentCount: results.count
+                    )
+                    errorMessage = nil
                 } else {
-                    transcript = "⚠️ No speech detected in audio file"
+                    showNoSpeechDetected()
                 }
             } else {
-                transcript = "⚠️ No speech detected in audio file"
+                showNoSpeechDetected()
             }
-            
+
             streamingTranscript = ""
             isProcessing = false
             statusMessage = ""
