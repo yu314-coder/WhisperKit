@@ -45,6 +45,8 @@ struct ContentView: View {
     /// specialised model outside the app and evicts that cache on OS updates,
     /// so the record is keyed by OS build as well as variant.
     @AppStorage("prewarmedVariants") private var prewarmedVariantsRaw: String = ""
+    /// Guards the one-time repair of segments written by 1.1 (1)–(4).
+    @AppStorage("didSanitiseStoredSegments") private var didSanitiseStoredSegments = false
     // Previous tick counters for instantaneous CPU & task time deltas.
     // Without this baseline the sampler returns the cumulative since-boot
     // average, which is nearly constant — making the chart look frozen.
@@ -229,6 +231,7 @@ struct ContentView: View {
         }
         .onAppear {
             removeRetiredModelDownloads()
+            sanitiseStoredSegmentsIfNeeded()
             checkModelStatus()
             createDebugFiles()
             monitor.initializeGPUMonitoring()
@@ -1793,6 +1796,29 @@ struct ContentView: View {
         }
     }
 
+    /// Repairs transcripts saved by 1.1 (1)–(4), whose segments were stored
+    /// with Whisper's special tokens still embedded. Without this, existing
+    /// library entries keep showing `<|startoftranscript|>` and keep exporting
+    /// broken subtitles even after the decoder fix.
+    func sanitiseStoredSegmentsIfNeeded() {
+        guard !didSanitiseStoredSegments else { return }
+        guard let segments = try? modelContext.fetch(FetchDescriptor<SavedSegment>()) else { return }
+
+        var repaired = 0
+        for segment in segments where segment.text.contains("<|") {
+            let cleaned = WhisperText.stripSpecialTokens(segment.text)
+            if cleaned != segment.text {
+                segment.text = cleaned
+                repaired += 1
+            }
+        }
+        if repaired > 0 {
+            try? modelContext.save()
+            print("Repaired \(repaired) segment(s) containing special tokens")
+        }
+        didSanitiseStoredSegments = true
+    }
+
     /// Frees a downloaded model's files. The full lineup runs to ~2.9 GB, so
     /// reclaiming space needs to be possible in-app.
     func deleteModel(_ model: WhisperModel) {
@@ -2286,10 +2312,12 @@ struct ContentView: View {
         var segs: [SavedSegment] = []
         for r in results {
             for s in r.segments {
+                let cleaned = WhisperText.stripSpecialTokens(s.text)
+                guard !cleaned.isEmpty else { continue }
                 segs.append(SavedSegment(
                     startTime: Double(s.start),
                     endTime: Double(s.end),
-                    text: s.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    text: cleaned
                 ))
             }
         }
@@ -2368,6 +2396,7 @@ struct ContentView: View {
             temperature: 0.0,
             temperatureFallbackCount: 5,
             detectLanguage: shouldDetectLanguage,
+            skipSpecialTokens: true,
             compressionRatioThreshold: isCJK ? nil : 2.8,
             logProbThreshold: -1.5,
             noSpeechThreshold: 0.8

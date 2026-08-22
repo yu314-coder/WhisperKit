@@ -59,3 +59,33 @@ final class SavedSegment {
         self.speaker = speaker
     }
 }
+
+// MARK: - Segment text sanitising
+
+enum WhisperText {
+    /// Strips Whisper's special tokens from decoded segment text.
+    ///
+    /// `TranscriptionResult.text` arrives already cleaned, but
+    /// `TranscriptionResult.segments[].text` does not — WhisperKit only drops
+    /// them when `DecodingOptions.skipSpecialTokens` is set, and that defaults
+    /// to false. Segments feed both the detail view and every export format, so
+    /// unsanitised text meant SRT/VTT subtitles shipped with
+    /// `<|startoftranscript|><|en|><|transcribe|><|0.00|>` baked in.
+    ///
+    /// Applied defensively even with `skipSpecialTokens: true`, so old records
+    /// and any future decoder change are both covered.
+    static func stripSpecialTokens(_ raw: String) -> String {
+        guard raw.contains("<|") else {
+            return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let cleaned = raw.replacingOccurrences(
+            of: "<\\|[^|]*\\|>",
+            with: "",
+            options: .regularExpression
+        )
+        // Collapse the runs of whitespace the removals leave behind.
+        return cleaned
+            .replacingOccurrences(of: "[ \\t]{2,}", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
