@@ -214,13 +214,19 @@ struct ContentView: View {
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isProcessing)
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isModelLoaded)
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isRecording)
+            // .page rather than the default form sheet: on a 13" iPad the
+            // default is a small panel marooned in a dimmed screen, which
+            // wastes most of the display for content that wants the room.
+            // No effect in compact width, where sheets are already full width.
             .sheet(isPresented: $showLibrary) {
                 TranscriptLibraryView()
+                    .presentationSizing(.page)
             }
             .sheet(item: $quickOpenTranscript) { t in
                 NavigationStack {
                     TranscriptDetailView(transcript: t)
                 }
+                .presentationSizing(.page)
             }
         .fileImporter(
             isPresented: $showingFilePicker,
@@ -340,9 +346,11 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .sheet(isPresented: $showModelPicker) {
             modelPickerSheet
+                .presentationSizing(.page)
         }
         .sheet(isPresented: $showLanguagePicker) {
             languagePickerSheet
+                .presentationSizing(.page)
         }
     }
 
@@ -1040,7 +1048,6 @@ struct ContentView: View {
                 paperModelPicker
             }
             .background(Self.paperBG.ignoresSafeArea())
-            .preferredColorScheme(.light)
             .navigationTitle("Transcription Model")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1147,6 +1154,8 @@ struct ContentView: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 22)
+        .frame(maxWidth: 620)
+        .frame(maxWidth: .infinity)
     }
 
     func paperModelCard(_ model: WhisperModel) -> some View {
@@ -1258,8 +1267,9 @@ struct ContentView: View {
                     }
                 }
             }
+            .frame(maxWidth: 620)
+            .frame(maxWidth: .infinity)
             .background(Self.paperBG.ignoresSafeArea())
-            .preferredColorScheme(.light)
             .navigationTitle("Language")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
