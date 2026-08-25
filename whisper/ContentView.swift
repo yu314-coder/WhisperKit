@@ -48,6 +48,15 @@ struct ContentView: View {
     /// Guards the one-time repair of segments written by 1.1 (1)–(4).
     @AppStorage("didSanitiseStoredSegments") private var didSanitiseStoredSegments = false
 
+    /// Which processor Core ML runs the model on. Defaults to GPU because the
+    /// Neural Engine's one-time "specialisation" compile is what made the first
+    /// load take minutes even on an M3; Metal skips that step entirely.
+    @AppStorage("computeMode") private var computeModeRaw: String = ComputeMode.gpu.rawValue
+    private var computeMode: ComputeMode {
+        get { ComputeMode(rawValue: computeModeRaw) ?? .gpu }
+        nonmutating set { computeModeRaw = newValue.rawValue }
+    }
+
     /// Set across a model load and cleared when it settles. Finding it still
     /// set at launch means the previous load never finished — the app was
     /// killed part-way, which on iOS almost always means it was jetsammed for
@@ -516,9 +525,9 @@ struct ContentView: View {
             return "Press the round button below to start a new recording, or pull in an audio file. Everything you transcribe stays on this device — every page is kept in your library."
         }
         if isReloadingKnownModel {
-            return "\(selectedModel.displayName) is loading onto the Neural Engine — this happens once each time you open the app. Go ahead and record; it will transcribe as soon as the model is ready."
+            return "\(selectedModel.displayName) is loading onto the \(computeMode.shortName) — this happens once each time you open the app. Go ahead and record; it will transcribe as soon as the model is ready."
         }
-        return "First, choose a transcription model. It downloads once and runs on this device's Neural Engine. Larger models are slower but more accurate."
+        return "First, choose a transcription model. It downloads once and runs entirely on this device. Larger models are slower but more accurate."
     }
 
     /// The most recent transcripts, inline on the idle page.
@@ -1176,6 +1185,8 @@ struct ContentView: View {
             .opacity((isProcessing && !isPreparingModel) ? 0.5 : 1)
             .padding(.top, 6)
 
+            computeModePicker
+
             // Privacy footnote — reinforces that this is differentiated
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "lock.fill")
@@ -1193,6 +1204,54 @@ struct ContentView: View {
         .padding(.vertical, 22)
         .frame(maxWidth: 620)
         .frame(maxWidth: .infinity)
+    }
+
+    /// Processor selector. Exposed because the trade-off is real and personal:
+    /// the Neural Engine saves battery but makes the first load after every
+    /// model or OS change take minutes, which reads as a hang.
+    var computeModePicker: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Rectangle()
+                    .fill(Self.paperInk.opacity(0.20))
+                    .frame(width: 18, height: 1)
+                Text("Run on")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .tracking(2)
+                    .foregroundColor(Self.paperMute)
+            }
+
+            ForEach(ComputeMode.allCases) { mode in
+                Button {
+                    selectComputeMode(mode)
+                } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: mode == computeMode ? "largecircle.fill.circle" : "circle")
+                            .font(.system(size: 15))
+                            .foregroundColor(mode == computeMode ? Self.paperAccent : Self.paperMute.opacity(0.6))
+                            .padding(.top, 1)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(mode.displayName)
+                                .font(.system(size: 14, weight: .semibold, design: .serif))
+                                .foregroundColor(Self.paperInk)
+                            Text(mode.detail)
+                                .font(.system(size: 11, design: .serif))
+                                .foregroundColor(Self.paperInk.opacity(0.55))
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 7)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(PressableButtonStyle())
+                .disabled(isPreparingModel || isProcessing)
+                .opacity((isPreparingModel || isProcessing) ? 0.5 : 1)
+            }
+        }
+        .padding(.top, 6)
     }
 
     func paperModelCard(_ model: WhisperModel) -> some View {
@@ -1675,8 +1734,11 @@ struct ContentView: View {
         }
     }
 
+    /// Core ML specialises per compute-unit configuration, so a model prewarmed
+    /// for the Neural Engine is *not* warm for the GPU. The mode belongs in the
+    /// key, or switching would skip a prewarm that had never actually happened.
     private func prewarmKey(_ model: WhisperModel) -> String {
-        "\(model.rawValue)@\(ProcessInfo.processInfo.operatingSystemVersionString)"
+        "\(model.rawValue)@\(ProcessInfo.processInfo.operatingSystemVersionString)#\(computeMode.rawValue)"
     }
 
     private func hasBeenPrewarmed(_ model: WhisperModel) -> Bool {
@@ -1817,7 +1879,7 @@ struct ContentView: View {
             isOptimizingModel = needsPrewarm
             modelLoadInFlight = true
             statusMessage = needsPrewarm
-                ? "Optimising \(model.displayName) for the Neural Engine…"
+                ? "Optimising \(model.displayName) for the \(computeMode.shortName)…"
                 : "Loading \(model.displayName)…"
 
             // A load that never returns used to leave the UI on "Loading"
@@ -1829,6 +1891,7 @@ struct ContentView: View {
                 try await WhisperKit(
                     model: model.rawValue,
                     downloadBase: modelsDir,
+                    computeOptions: computeMode.computeOptions,
                     verbose: false,
                     logLevel: .error,
                     prewarm: needsPrewarm,
@@ -1933,6 +1996,14 @@ struct ContentView: View {
             print("Repaired \(repaired) segment(s) containing special tokens")
         }
         didSanitiseStoredSegments = true
+    }
+
+    /// Switching processor requires a fresh load — Core ML bakes the compute
+    /// units into the loaded model.
+    func selectComputeMode(_ mode: ComputeMode) {
+        guard mode != computeMode else { return }
+        computeMode = mode
+        prepareModel(selectedModel, force: true)
     }
 
     /// Frees a downloaded model's files. The full lineup runs to ~2.9 GB, so
