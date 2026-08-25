@@ -47,6 +47,12 @@ struct ContentView: View {
     @AppStorage("prewarmedVariants") private var prewarmedVariantsRaw: String = ""
     /// Guards the one-time repair of segments written by 1.1 (1)–(4).
     @AppStorage("didSanitiseStoredSegments") private var didSanitiseStoredSegments = false
+
+    /// Set across a model load and cleared when it settles. Finding it still
+    /// set at launch means the previous load never finished — the app was
+    /// killed part-way, which on iOS almost always means it was jetsammed for
+    /// memory while Core ML specialised the model.
+    @AppStorage("modelLoadInFlight") private var modelLoadInFlight = false
     // Previous tick counters for instantaneous CPU & task time deltas.
     // Without this baseline the sampler returns the cumulative since-boot
     // average, which is nearly constant — making the chart look frozen.
@@ -236,10 +242,15 @@ struct ContentView: View {
             handleFileImport(result)
         }
         .onAppear {
-            removeRetiredModelDownloads()
-            sanitiseStoredSegmentsIfNeeded()
+            // Start the model loading first — it is the long pole on launch.
+            // The one-time maintenance below walks every stored segment, which
+            // on a large library is slow enough to visibly delay it.
             checkModelStatus()
-            createDebugFiles()
+            Task { @MainActor in
+                removeRetiredModelDownloads()
+                sanitiseStoredSegmentsIfNeeded()
+                createDebugFiles()
+            }
             monitor.initializeGPUMonitoring()
             monitor.onSample = {
                 if isProcessing && scenePhase == .background {
@@ -332,6 +343,12 @@ struct ContentView: View {
 
     /// Body type scales up slightly on the larger canvas.
     private var bodyTextSize: CGFloat { isRegularWidth ? 21 : 19 }
+
+    /// Capturing audio needs no model — only transcribing does. Loading a model
+    /// takes real time on every launch (the weights live in memory, so it can't
+    /// be skipped), and gating the record button on it made the app unusable
+    /// for that whole window. Record now, transcribe when the model arrives.
+    private var canCapture: Bool { isModelLoaded || isPreparingModel }
 
     // MARK: - Editorial / Paper Layout
     var editorialLayout: some View {
@@ -461,9 +478,7 @@ struct ContentView: View {
                 .foregroundColor(Self.paperInk)
                 .lineSpacing(2)
 
-            Text(isModelLoaded
-                 ? "Press the round button below to start a new recording, or pull in an audio file. Everything you transcribe stays on this device — every page is kept in your library."
-                 : "First, choose a transcription model. It downloads once and runs on this device's Neural Engine. Larger models are slower but more accurate.")
+            Text(emptyStateBlurb)
                 .font(.system(size: 16, design: .serif))
                 .foregroundColor(Self.paperInk.opacity(0.65))
                 .lineSpacing(4)
@@ -475,6 +490,12 @@ struct ContentView: View {
                     editorialChip(icon: "books.vertical", text: "Library")
                 }
                 .padding(.top, 4)
+            } else if isReloadingKnownModel {
+                // The model is already on disk and simply loading. Showing the
+                // whole "choose a model" grid here implied a decision the user
+                // had already made, and hid the fact that they can just record.
+                modelPreparationStatus
+                    .padding(.top, 4)
             } else {
                 inlineModelPicker
                     .padding(.top, 8)
@@ -482,6 +503,22 @@ struct ContentView: View {
 
             recentSection
         }
+    }
+
+    /// True when the selected model is already downloaded and is merely being
+    /// loaded — as opposed to the user not having chosen one yet.
+    private var isReloadingKnownModel: Bool {
+        isPreparingModel && (downloadStatus[selectedModel] ?? false)
+    }
+
+    private var emptyStateBlurb: String {
+        if isModelLoaded {
+            return "Press the round button below to start a new recording, or pull in an audio file. Everything you transcribe stays on this device — every page is kept in your library."
+        }
+        if isReloadingKnownModel {
+            return "\(selectedModel.displayName) is loading onto the Neural Engine — this happens once each time you open the app. Go ahead and record; it will transcribe as soon as the model is ready."
+        }
+        return "First, choose a transcription model. It downloads once and runs on this device's Neural Engine. Larger models are slower but more accurate."
     }
 
     /// The most recent transcripts, inline on the idle page.
@@ -934,14 +971,14 @@ struct ContentView: View {
             }
 
             HStack(spacing: 18) {
-                editorialIconButton(icon: "folder", disabled: !isModelLoaded || isProcessing) {
+                editorialIconButton(icon: "folder", disabled: !canCapture || isProcessing) {
                     showingFilePicker = true
                 }
 
                 PhotosPicker(selection: $selectedPhotoItem, matching: .videos) {
                     editorialIconButtonLabel(icon: "photo.on.rectangle.angled")
                 }
-                .disabled(!isModelLoaded || isProcessing)
+                .disabled(!canCapture || isProcessing)
                 .opacity((isModelLoaded && !isProcessing) ? 1.0 : 0.35)
                 .onChange(of: selectedPhotoItem) { _, newItem in
                     if let newItem = newItem { handlePhotoSelection(newItem) }
@@ -979,7 +1016,7 @@ struct ContentView: View {
                     }
                 }
                 .buttonStyle(PressableButtonStyle())
-                .disabled(!isModelLoaded || (isProcessing && !isRecording))
+                .disabled(!canCapture || (isProcessing && !isRecording))
                 .opacity((isModelLoaded && (!isProcessing || isRecording)) ? 1.0 : 0.4)
 
                 Button {
@@ -1646,6 +1683,18 @@ struct ContentView: View {
         prewarmedVariantsRaw.split(separator: "\n").contains(Substring(prewarmKey(model)))
     }
 
+    /// Drops a variant's prewarm marker. Core ML evicts its specialised-model
+    /// cache on OS updates *and* after a model goes unused for a while, and
+    /// there is no API to ask whether the cache is still warm. When a load
+    /// stalls we assume it went cold and re-arm prewarming for next time.
+    private func clearPrewarmed(_ model: WhisperModel) {
+        let key = prewarmKey(model)
+        prewarmedVariantsRaw = prewarmedVariantsRaw
+            .split(separator: "\n")
+            .filter { $0 != Substring(key) }
+            .joined(separator: "\n")
+    }
+
     private func markPrewarmed(_ model: WhisperModel) {
         guard !hasBeenPrewarmed(model) else { return }
         let key = prewarmKey(model)
@@ -1679,6 +1728,14 @@ struct ContentView: View {
             // bothering the user — this class of failure is transient, and the
             // retry is what they would have done by hand anyway.
             clearEmptyIncompleteDownloads()
+
+            // A stall almost always means Core ML has to re-specialise the
+            // model and did it the memory-hungry way, because we believed our
+            // own "already prewarmed" note. Forget it so the retry prewarms —
+            // that loads one sub-model at a time and keeps peak memory down.
+            if error is ModelLoadTimeout {
+                clearPrewarmed(model)
+            }
             do {
                 statusMessage = "Retrying \(model.displayName)…"
                 try await attemptModelPreparation(model)
@@ -1747,21 +1804,39 @@ struct ContentView: View {
             // for a variant this device hasn't specialised yet: it costs a
             // load-unload-load cycle, so paying it on every launch would make
             // the common case slower.
-            let needsPrewarm = !hasBeenPrewarmed(model)
+            // If the last load never settled, the app died during it. Prewarm
+            // this time regardless of what our notes say: it loads one
+            // sub-model at a time instead of all at once, which is the
+            // difference between fitting in memory and being killed again.
+            let crashedLastLoad = modelLoadInFlight
+            if crashedLastLoad {
+                clearPrewarmed(model)
+            }
+
+            let needsPrewarm = crashedLastLoad || !hasBeenPrewarmed(model)
             isOptimizingModel = needsPrewarm
+            modelLoadInFlight = true
             statusMessage = needsPrewarm
                 ? "Optimising \(model.displayName) for the Neural Engine…"
                 : "Loading \(model.displayName)…"
 
-            let kit = try await WhisperKit(
-                model: model.rawValue,
-                downloadBase: modelsDir,
-                verbose: false,
-                logLevel: .error,
-                prewarm: needsPrewarm,
-                load: true
-            )
+            // A load that never returns used to leave the UI on "Loading"
+            // forever with no way forward. Race it against a deadline so a
+            // stall becomes a recoverable error instead of a dead end.
+            // Generous, because a cold Core ML specialisation of a large model
+            // genuinely can take minutes on older hardware.
+            let kit = try await withModelLoadTimeout(seconds: needsPrewarm ? 420 : 180) {
+                try await WhisperKit(
+                    model: model.rawValue,
+                    downloadBase: modelsDir,
+                    verbose: false,
+                    logLevel: .error,
+                    prewarm: needsPrewarm,
+                    load: true
+                )
+            }
             try Task.checkCancellation()
+            modelLoadInFlight = false
             markPrewarmed(model)
             isOptimizingModel = false
 
@@ -1773,6 +1848,8 @@ struct ContentView: View {
         } catch {
             isOptimizingModel = false
             downloadProgress = nil
+            // Cleared on failure too — only an outright kill should leave it set.
+            modelLoadInFlight = false
             throw error
         }
     }
@@ -1803,6 +1880,35 @@ struct ContentView: View {
             } catch {
                 print("Could not remove retired model \(variant): \(error)")
             }
+        }
+    }
+
+    /// Runs `work`, cancelling it and failing with `ModelLoadTimeout` if it
+    /// outlives `seconds`.
+    ///
+    /// Stays on the main actor throughout — `WhisperKit` is not `Sendable`, and
+    /// keeping the result inside one isolation domain avoids passing it across
+    /// one. Best-effort: it can only interrupt a load that honours
+    /// cancellation, but that is the difference between an error the user can
+    /// act on and a spinner that never ends.
+    @MainActor
+    private func withModelLoadTimeout<T>(
+        seconds: Double,
+        _ work: @escaping @MainActor () async throws -> T
+    ) async throws -> T {
+        let workTask = Task { @MainActor in try await work() }
+        let watchdog = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if !Task.isCancelled { workTask.cancel() }
+        }
+        defer { watchdog.cancel() }
+
+        do {
+            return try await workTask.value
+        } catch is CancellationError {
+            // Ours if the watchdog fired; the caller's otherwise.
+            if Task.isCancelled { throw CancellationError() }
+            throw ModelLoadTimeout()
         }
     }
 
@@ -2357,8 +2463,23 @@ struct ContentView: View {
             }
         }
 
+        // The capture buttons stay live while the model loads, so by the time
+        // we get here the load may still be running. Join it rather than
+        // failing — the user's audio is already recorded and waiting.
+        if whisperKit == nil, let prep = modelPrepTask {
+            await MainActor.run {
+                statusMessage = "Waiting for \(selectedModel.displayName) to finish loading…"
+            }
+            _ = await prep.value
+        }
+
         guard let whisper = whisperKit else {
-            throw NSError(domain: "WhisperKit not initialized", code: -1)
+            throw NSError(
+                domain: "Whisper",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "The transcription model isn't loaded. Open the model picker and tap Reload, then try again."]
+            )
         }
 
         // Ensure we're keeping the app active

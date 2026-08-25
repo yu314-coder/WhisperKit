@@ -89,3 +89,11 @@ enum WhisperText {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
+
+/// Raised when loading a model outlives its deadline. Distinct from a generic
+/// failure so the retry can respond to it specifically.
+struct ModelLoadTimeout: Error, LocalizedError {
+    var errorDescription: String? {
+        "The model took too long to load."
+    }
+}
