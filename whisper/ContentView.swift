@@ -2450,7 +2450,7 @@ struct ContentView: View {
 
     // MARK: - SwiftData Library Persistence
 
-    func saveTranscriptToLibrary(audioURL: URL, results: [TranscriptionResult], fullText: String) {
+    func saveTranscriptToLibrary(audioURL: URL, results: [TranscriptionResult], fullText: String, waveform: [Float]? = nil) {
         // Move audio file into the durable SavedAudio folder so the user can
         // still play it back even after temp gets cleaned.
         var savedRelativePath: String? = nil
@@ -2492,7 +2492,8 @@ struct ContentView: View {
             languageCode: langForRecord,
             modelName: selectedModel.displayName,
             fullText: fullText,
-            audioFilePath: savedRelativePath
+            audioFilePath: savedRelativePath,
+            waveform: waveform
         )
 
         // Flatten WhisperKit segments across all results into our SavedSegment rows.
@@ -2572,8 +2573,13 @@ struct ContentView: View {
             throw error
         }
 
-        // Measured before decoding so a failure can say which thing went wrong.
-        let peakLevel = AudioConverter.peakAmplitude(of: workURL)
+        // One pass over the converted WAV yields both the level (so a failure can
+        // say which thing went wrong) and the waveform envelope. Measured on
+        // workURL, not the original: an import from Photos is an .mp4, and
+        // AVAudioFile cannot open a video container — reading the original would
+        // silently leave every such transcript without a waveform.
+        let envelope = AudioConverter.peakEnvelope(of: workURL)
+        let peakLevel = envelope?.peak
 
         let languageCode = selectedLanguage == "auto" ? nil : selectedLanguage
         let shouldDetectLanguage = (languageCode == nil)
@@ -2705,7 +2711,7 @@ struct ContentView: View {
                     // Persist to SwiftData library
                     self.lastTranscribedAudioURL = url
                     self.lastTranscriptionResults = results
-                    self.saveTranscriptToLibrary(audioURL: url, results: results, fullText: fullText)
+                    self.saveTranscriptToLibrary(audioURL: url, results: results, fullText: fullText, waveform: envelope?.buckets)
                     
                     var totalDuration: Double = 0.0
                     for result in results {

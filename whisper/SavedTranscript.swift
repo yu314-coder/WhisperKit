@@ -12,6 +12,14 @@ final class SavedTranscript {
     var fullText: String
     var audioFilePath: String?     // relative path under app sandbox
 
+    /// Downsampled peak envelope of the audio, normalised 0...1.
+    ///
+    /// Computed once when the transcript is saved so the library can draw a
+    /// waveform per row without re-decoding every file. Optional because
+    /// transcripts saved before this existed have none — draw a flat line, or
+    /// backfill from `audioFilePath`.
+    var waveform: [Float]?
+
     @Relationship(deleteRule: .cascade, inverse: \SavedSegment.transcript)
     var segments: [SavedSegment] = []
 
@@ -23,7 +31,8 @@ final class SavedTranscript {
         languageCode: String? = nil,
         modelName: String? = nil,
         fullText: String,
-        audioFilePath: String? = nil
+        audioFilePath: String? = nil,
+        waveform: [Float]? = nil
     ) {
         self.id = id
         self.title = title
@@ -33,6 +42,7 @@ final class SavedTranscript {
         self.modelName = modelName
         self.fullText = fullText
         self.audioFilePath = audioFilePath
+        self.waveform = waveform
     }
 }
 

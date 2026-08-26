@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import Accelerate
 
 /// Converts any input audio (mp3, m4a, mp4, wav, caf, etc.) into a
 /// 16 kHz mono 16-bit Linear PCM WAV that both WhisperKit and
@@ -129,41 +130,96 @@ enum AudioConverter {
     }
 }
 
+// MARK: - Peak envelope
+
+/// A downsampled amplitude envelope: what a waveform view draws.
+struct PeakEnvelope {
+    /// One value per bucket, scaled so the loudest bucket is 1.0. Normalised
+    /// because a quiet recording still needs a legible shape; `peak` carries
+    /// the true level for anything that needs the absolute figure.
+    let buckets: [Float]
+    /// Loudest absolute sample in the file, 0...1.
+    let peak: Float
+    let duration: TimeInterval
+}
+
 extension AudioConverter {
-    /// Peak absolute sample amplitude (0...1) of a PCM file.
+    /// Reduces a PCM file to `bucketCount` peak amplitudes in a single pass.
     ///
-    /// Used to tell "the microphone captured nothing" apart from "the model
-    /// found no speech in this audio" — two failures that look identical to the
-    /// user but need completely different advice. One linear pass is negligible
-    /// next to the transcription that follows it.
-    static func peakAmplitude(of url: URL) -> Float? {
-        guard let file = try? AVAudioFile(forReading: url) else { return nil }
-        let format = file.processingFormat
-        let frameCapacity: AVAudioFrameCount = 16_384
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCapacity) else {
-            return nil
+    /// Peak rather than RMS: peak is what audio editors draw, and it keeps
+    /// transients visible at any zoom. Within a bucket the maximum magnitude is
+    /// taken with `vDSP_maxmgv` over each channel's slice — a 40-minute
+    /// recording is ~38M frames at 16 kHz, and a per-frame Swift loop over that
+    /// is slow enough to be felt.
+    ///
+    /// Synchronous and I/O-bound; call it off the main actor.
+    static func peakEnvelope(of url: URL, bucketCount: Int = 120) -> PeakEnvelope? {
+        guard bucketCount > 0, let file = try? AVAudioFile(forReading: url) else { return nil }
+
+        let totalFrames = file.length
+        let sampleRate = file.processingFormat.sampleRate
+        let duration = sampleRate > 0 ? Double(totalFrames) / sampleRate : 0
+        guard totalFrames > 0 else {
+            return PeakEnvelope(buckets: [Float](repeating: 0, count: bucketCount), peak: 0, duration: 0)
         }
 
-        var peak: Float = 0
-        while true {
+        let format = file.processingFormat
+        let channels = Int(format.channelCount)
+        let frameCapacity: AVAudioFrameCount = 16_384
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCapacity) else { return nil }
+
+        var envelope = [Float](repeating: 0, count: bucketCount)
+        var readCursor: Int64 = 0
+
+        while readCursor < totalFrames {
             buffer.frameLength = 0
             do {
                 try file.read(into: buffer, frameCount: frameCapacity)
             } catch {
-                return peak
+                break
             }
             let frames = Int(buffer.frameLength)
             if frames == 0 { break }
+            guard let data = buffer.floatChannelData else { break }
 
-            guard let channels = buffer.floatChannelData else { break }
-            for ch in 0..<Int(format.channelCount) {
-                let samples = channels[ch]
-                for i in 0..<frames {
-                    let magnitude = abs(samples[i])
-                    if magnitude > peak { peak = magnitude }
+            let chunkStart = readCursor
+            let chunkEnd = readCursor + Int64(frames)
+
+            // Only the buckets this chunk actually overlaps.
+            let firstBucket = Int(chunkStart * Int64(bucketCount) / totalFrames)
+            let lastBucket = min(Int((chunkEnd - 1) * Int64(bucketCount) / totalFrames), bucketCount - 1)
+
+            for bucket in firstBucket...max(firstBucket, lastBucket) {
+                let bucketStart = Int64(bucket) * totalFrames / Int64(bucketCount)
+                let bucketEnd = Int64(bucket + 1) * totalFrames / Int64(bucketCount)
+
+                let from = max(bucketStart, chunkStart) - chunkStart
+                let to = min(bucketEnd, chunkEnd) - chunkStart
+                guard to > from else { continue }
+
+                let offset = Int(from)
+                let count = vDSP_Length(to - from)
+                var loudest: Float = 0
+                for ch in 0..<channels {
+                    var m: Float = 0
+                    vDSP_maxmgv(data[ch] + offset, 1, &m, count)
+                    if m > loudest { loudest = m }
                 }
+                if loudest > envelope[bucket] { envelope[bucket] = loudest }
             }
+
+            readCursor = chunkEnd
         }
-        return peak
+
+        let peak = envelope.max() ?? 0
+        guard peak > 0 else {
+            return PeakEnvelope(buckets: envelope, peak: 0, duration: duration)
+        }
+        // vDSP_vsdiv scales the whole array in one call.
+        var normalised = [Float](repeating: 0, count: bucketCount)
+        var divisor = peak
+        vDSP_vsdiv(envelope, 1, &divisor, &normalised, 1, vDSP_Length(bucketCount))
+
+        return PeakEnvelope(buckets: normalised, peak: peak, duration: duration)
     }
 }
