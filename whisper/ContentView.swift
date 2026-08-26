@@ -80,6 +80,10 @@ struct ContentView: View {
     /// Envelope of the audio just transcribed, so the result screen shows the
     /// same waveform the library will.
     @State private var transcriptWaveform: [Float]? = nil
+    /// The record just written for this run. Held so the result screen can show
+    /// real segments and play the audio back, rather than only flat text.
+    @State private var currentTranscript: SavedTranscript?
+    @StateObject private var resultPlayer = TranscriptPlayer()
     @State private var errorMessage: String? = nil
     @State private var streamingTranscript: String = ""
     @State private var isProcessing = false
@@ -336,10 +340,19 @@ struct ContentView: View {
     var editorialLayout: some View {
         ZStack {
             Self.paperBG.ignoresSafeArea()
-            VStack(spacing: 0) {
-                editorialTopBar
-                editorialTranscriptCanvas
-                editorialControlBar
+            HStack(spacing: 0) {
+                // The rail is the point of the iPad layout: past sessions stay
+                // one tap away instead of behind a sheet. Compact width has no
+                // room for it and keeps the library button.
+                if isRegularWidth {
+                    sessionsRail
+                    Rectangle().fill(Self.paperRule).frame(width: 1)
+                }
+                VStack(spacing: 0) {
+                    editorialTopBar
+                    editorialTranscriptCanvas
+                    editorialControlBar
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -353,15 +366,116 @@ struct ContentView: View {
         }
     }
 
+    /// Persistent session list, iPad only.
+    var sessionsRail: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(Studio.accent)
+                Text("whisper")
+                    .font(Studio.mono(13, weight: .semibold))
+                    .foregroundColor(Studio.ink)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 15)
+            .overlay(alignment: .bottom) { Rectangle().fill(Self.paperRule).frame(height: 1) }
+
+            HStack {
+                StudioLabel(text: "Sessions")
+                Spacer()
+                if !recentTranscripts.isEmpty {
+                    Button { showLibrary = true } label: {
+                        Text("All \(recentTranscripts.count)")
+                            .font(Studio.mono(9, weight: .semibold))
+                            .foregroundColor(Studio.accent)
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 7)
+
+            ScrollView {
+                LazyVStack(spacing: 1) {
+                    ForEach(recentTranscripts.prefix(14)) { t in
+                        Button { quickOpenTranscript = t } label: { railRow(t) }
+                            .buttonStyle(PressableButtonStyle())
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+
+            Spacer(minLength: 0)
+
+            VStack(alignment: .leading, spacing: 7) {
+                StudioLabel(text: "Engine")
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(isModelLoaded ? Studio.ok : Studio.mute.opacity(0.5))
+                        .frame(width: 6, height: 6)
+                    Text("\(selectedModel.displayName) · \(computeMode.shortName)")
+                        .font(Studio.mono(11))
+                        .foregroundColor(Studio.ink.opacity(0.82))
+                }
+                Text(isModelLoaded ? "\(selectedModel.sizeLabel) · ready" : (isPreparingModel ? "loading…" : "not loaded"))
+                    .font(Studio.mono(10))
+                    .foregroundColor(Studio.mute)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .overlay(alignment: .top) { Rectangle().fill(Self.paperRule).frame(height: 1) }
+        }
+        .frame(width: Studio.railWidth)
+        .background(Studio.panel)
+    }
+
+    private func railRow(_ t: SavedTranscript) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(t.title)
+                .font(Studio.text(12))
+                .foregroundColor(Studio.ink.opacity(0.85))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let env = t.envelope(limit: 26) {
+                WaveformView(buckets: env, progress: nil, idleColor: Studio.mute.opacity(0.5))
+                    .frame(height: 15)
+            }
+
+            Text("\(TranscriptExporter.formatTimestamp(t.duration)) · \((t.languageCode ?? "—").uppercased())")
+                .font(Studio.mono(10))
+                .foregroundColor(Studio.mute)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
+    }
+
     // Clean top bar — serif wordmark left, model chip + library right
     var editorialTopBar: some View {
         HStack(alignment: .center, spacing: 0) {
-            (Text("Whisper")
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundColor(Self.paperInk)
-             + Text(".")
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundColor(Self.paperAccent))
+            if !isRegularWidth {
+                (Text("Whisper")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundColor(Self.paperInk)
+                 + Text(".")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundColor(Self.paperAccent))
+            } else if let record = currentTranscript {
+                Text(record.title)
+                    .font(Studio.text(17, weight: .semibold))
+                    .foregroundColor(Self.paperInk)
+                    .lineLimit(1)
+            } else {
+                Text(todayPaperDate())
+                    .font(Studio.mono(11, weight: .medium))
+                    .tracking(2)
+                    .foregroundColor(Studio.mute)
+            }
 
             Spacer()
 
@@ -506,7 +620,9 @@ struct ContentView: View {
     /// The most recent transcripts, inline on the idle page.
     @ViewBuilder
     var recentSection: some View {
-        let items = Array(recentTranscripts.prefix(isRegularWidth ? 6 : 3))
+        // On regular width the sessions rail already lists these; showing them
+        // twice on one screen is just noise.
+        let items = isRegularWidth ? [] : Array(recentTranscripts.prefix(3))
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
@@ -549,7 +665,12 @@ struct ContentView: View {
     }
 
     func recentRow(_ t: SavedTranscript) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
+            if let env = t.envelope(limit: 22) {
+                WaveformView(buckets: env, progress: nil, idleColor: Studio.mute.opacity(0.5))
+                    .frame(width: 54, height: 24)
+            }
+
             VStack(alignment: .leading, spacing: 3) {
                 Text(t.title)
                     .font(.system(size: 15, weight: .medium))
@@ -575,7 +696,6 @@ struct ContentView: View {
             Image(systemName: "chevron.right")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(Self.paperMute.opacity(0.6))
-                .padding(.top, 4)
         }
         .padding(.vertical, 11)
         .contentShape(Rectangle())
@@ -831,22 +951,124 @@ struct ContentView: View {
             }
 
             if let env = transcriptWaveform, !env.isEmpty {
-                WaveformView(buckets: env, progress: nil, idleColor: Studio.mute.opacity(0.55))
-                    .frame(height: isRegularWidth ? 68 : 54)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(RoundedRectangle(cornerRadius: Studio.corner).fill(Studio.sunk))
+                resultWaveform(env)
             }
 
             if let meta = transcriptMeta {
                 transcriptMetaStrip(meta)
             }
 
-            Text(transcript)
-                .font(.system(size: bodyTextSize, weight: .regular))
-                .foregroundColor(Self.paperInk)
-                .lineSpacing(8)
-                .textSelection(.enabled)
+            if let record = currentTranscript, !record.segments.isEmpty {
+                resultSegments(record)
+            } else {
+                // No segments (or the record failed to save) — the flat text is
+                // still the transcript, so show that rather than nothing.
+                Text(transcript)
+                    .font(.system(size: bodyTextSize, weight: .regular))
+                    .foregroundColor(Self.paperInk)
+                    .lineSpacing(8)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    /// Waveform plus transport for the run just finished. Scrubbing seeks, and
+    /// the highlighted row below follows the playhead.
+    @ViewBuilder
+    func resultWaveform(_ env: [Float]) -> some View {
+        let playable = resultPlayer.duration > 0
+
+        VStack(spacing: 10) {
+            WaveformView(
+                buckets: env,
+                progress: playable ? resultPlayer.currentTime / resultPlayer.duration : nil,
+                idleColor: Studio.mute.opacity(0.55),
+                onScrub: playable ? { f in resultPlayer.seek(to: f * resultPlayer.duration) } : nil
+            )
+            .frame(height: isRegularWidth ? 68 : 54)
+
+            if playable {
+                HStack(spacing: 14) {
+                    Button { resultPlayer.seek(to: max(0, resultPlayer.currentTime - 10)) } label: {
+                        Image(systemName: "gobackward.10")
+                            .font(.system(size: 15))
+                            .foregroundColor(Self.paperInk.opacity(0.62))
+                    }
+                    Button { resultPlayer.togglePlayPause() } label: {
+                        Image(systemName: resultPlayer.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 13))
+                            .foregroundColor(Studio.onAccent)
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(Studio.accent))
+                    }
+                    Button { resultPlayer.seek(to: min(resultPlayer.duration, resultPlayer.currentTime + 10)) } label: {
+                        Image(systemName: "goforward.10")
+                            .font(.system(size: 15))
+                            .foregroundColor(Self.paperInk.opacity(0.62))
+                    }
+                    Spacer()
+                    Text("\(TranscriptExporter.formatTimestamp(resultPlayer.currentTime)) / \(TranscriptExporter.formatTimestamp(resultPlayer.duration))")
+                        .font(Studio.mono(11))
+                        .foregroundColor(Studio.mute)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: Studio.corner).fill(Studio.sunk))
+    }
+
+    /// Timestamped rows rather than one flowing block: the transcript becomes
+    /// navigable, and each line is a seek target.
+    @ViewBuilder
+    func resultSegments(_ record: SavedTranscript) -> some View {
+        let segs = record.segments.sorted { $0.startTime < $1.startTime }
+        let now = resultPlayer.currentTime
+
+        VStack(spacing: 1) {
+            ForEach(segs) { seg in
+                let active = resultPlayer.duration > 0 && now >= seg.startTime && now < seg.endTime
+                Button {
+                    resultPlayer.seek(to: seg.startTime)
+                } label: {
+                    HStack(alignment: .top, spacing: 12) {
+                        Text(TranscriptExporter.formatTimestamp(seg.startTime))
+                            .font(Studio.mono(11))
+                            .foregroundColor(active ? Studio.accent : Studio.mute)
+                            .frame(width: 44, alignment: .leading)
+                            .padding(.top, 2)
+
+                        if let speaker = seg.speaker, !speaker.isEmpty {
+                            Text(speaker)
+                                .font(Studio.mono(11))
+                                .foregroundColor(Studio.accent)
+                                .frame(width: 76, alignment: .leading)
+                                .padding(.top, 2)
+                        }
+
+                        Text(seg.text)
+                            .font(.system(size: bodyTextSize - 3))
+                            .foregroundColor(Self.paperInk)
+                            .lineSpacing(5)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .multilineTextAlignment(.leading)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(active ? Studio.accent.opacity(0.10) : Color.clear)
+                    )
+                    .overlay(alignment: .leading) {
+                        Rectangle()
+                            .fill(active ? Studio.accent : Color.clear)
+                            .frame(width: 2)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 
@@ -1627,6 +1849,8 @@ struct ContentView: View {
         transcript = ""
         transcriptMeta = nil
         transcriptWaveform = nil
+        currentTranscript = nil
+        resultPlayer.stop()
         errorMessage = nil
     }
 
@@ -1636,6 +1860,8 @@ struct ContentView: View {
         transcript = ""
         transcriptMeta = nil
         transcriptWaveform = nil
+        currentTranscript = nil
+        resultPlayer.stop()
         errorMessage = message
     }
 
@@ -2528,6 +2754,13 @@ struct ContentView: View {
         record.segments = segs
 
         modelContext.insert(record)
+        currentTranscript = record
+        if let relative = savedRelativePath {
+            let audio = AudioFiles.urlForRelativePath(relative)
+            if FileManager.default.fileExists(atPath: audio.path) {
+                resultPlayer.load(audioURL: audio)
+            }
+        }
         do {
             try modelContext.save()
         } catch {
@@ -2748,7 +2981,11 @@ struct ContentView: View {
                         audioDuration: totalDuration,
                         processingTime: getElapsedTime(),
                         modelName: selectedModel.displayName,
-                        segmentCount: results.count
+                        // Actual speech segments, not the number of
+                        // TranscriptionResults — WhisperKit returns one result
+                        // per file, so this read "SEGMENTS 1" for every
+                        // transcript regardless of length.
+                        segmentCount: results.reduce(0) { $0 + $1.segments.count }
                     )
                     errorMessage = nil
                 } else {
