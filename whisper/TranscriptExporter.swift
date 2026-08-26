@@ -156,21 +156,28 @@ enum TranscriptExporter {
         return formatTimestamp(seconds)
     }
 
+    /// Splits a duration into whole milliseconds once, then derives the parts.
+    ///
+    /// The obvious `Int((total - floor(total)) * 1000)` loses a millisecond on
+    /// values that binary floating point cannot hold exactly: 13.04 - 13.0 is
+    /// 0.03999999999999915, so the subtitle stamped 13.040 came out 13,039.
+    private static func hmsMillis(_ seconds: Double) -> (h: Int, m: Int, s: Int, ms: Int) {
+        let totalMS = Int((max(0, seconds) * 1000).rounded())
+        return (
+            totalMS / 3_600_000,
+            (totalMS % 3_600_000) / 60_000,
+            (totalMS % 60_000) / 1000,
+            totalMS % 1000
+        )
+    }
+
     private static func srtTime(_ seconds: Double) -> String {
-        let total = max(0, seconds)
-        let h = Int(total) / 3600
-        let m = (Int(total) % 3600) / 60
-        let s = Int(total) % 60
-        let ms = Int((total - floor(total)) * 1000)
-        return String(format: "%02d:%02d:%02d,%03d", h, m, s, ms)
+        let p = hmsMillis(seconds)
+        return String(format: "%02d:%02d:%02d,%03d", p.h, p.m, p.s, p.ms)
     }
 
     private static func vttTime(_ seconds: Double) -> String {
-        let total = max(0, seconds)
-        let h = Int(total) / 3600
-        let m = (Int(total) % 3600) / 60
-        let s = Int(total) % 60
-        let ms = Int((total - floor(total)) * 1000)
-        return String(format: "%02d:%02d:%02d.%03d", h, m, s, ms)
+        let p = hmsMillis(seconds)
+        return String(format: "%02d:%02d:%02d.%03d", p.h, p.m, p.s, p.ms)
     }
 }
