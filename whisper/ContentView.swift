@@ -77,6 +77,9 @@ struct ContentView: View {
     /// exactly what the user would want to copy or export.
     @State private var transcript: String = ""
     @State private var transcriptMeta: TranscriptMeta? = nil
+    /// Envelope of the audio just transcribed, so the result screen shows the
+    /// same waveform the library will.
+    @State private var transcriptWaveform: [Float]? = nil
     @State private var errorMessage: String? = nil
     @State private var streamingTranscript: String = ""
     @State private var isProcessing = false
@@ -259,6 +262,7 @@ struct ContentView: View {
                 removeRetiredModelDownloads()
                 sanitiseStoredSegmentsIfNeeded()
                 createDebugFiles()
+                await backfillWaveformsIfNeeded()
             }
             monitor.initializeGPUMonitoring()
             monitor.onSample = {
@@ -289,52 +293,21 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Palette (warm-paper aesthetic)
+    // MARK: - Palette
     //
-    // Light is warm paper; dark is the same page under lamplight — warm
-    // near-black stock with off-white ink, so the editorial feel survives the
-    // switch instead of turning into generic gray-on-black.
+    // The warm-paper tokens now resolve to the Studio system (StudioTheme.swift).
+    // Kept as `paper*` aliases rather than renamed at 100+ call sites: the roles
+    // map one-to-one, and a mechanical rename would have buried the actual
+    // design changes in the diff.
 
-    /// Builds a color that resolves per trait collection, so every call site
-    /// stays a plain `Self.paperInk` while still following the system appearance.
-    private static func adaptive(
-        light: (r: Double, g: Double, b: Double, a: Double),
-        dark: (r: Double, g: Double, b: Double, a: Double)
-    ) -> Color {
-        Color(UIColor { traits in
-            let c = traits.userInterfaceStyle == .dark ? dark : light
-            return UIColor(red: c.r, green: c.g, blue: c.b, alpha: c.a)
-        })
-    }
-
-    static let paperBG = adaptive(
-        light: (0.980, 0.965, 0.940, 1.0),   // #FAF6F0 warm paper
-        dark:  (0.075, 0.068, 0.059, 1.0)    // warm near-black stock
-    )
-    static let paperInk = adaptive(
-        light: (0.110, 0.095, 0.080, 1.0),   // warm near-black
-        dark:  (0.949, 0.929, 0.894, 1.0)    // warm off-white
-    )
-    static let paperMute = adaptive(
-        light: (0.520, 0.495, 0.460, 1.0),   // warm gray
-        dark:  (0.620, 0.592, 0.548, 1.0)
-    )
-    static let paperRule = adaptive(
-        light: (0.000, 0.000, 0.000, 0.10),
-        dark:  (1.000, 0.980, 0.940, 0.16)
-    )
-    static let paperAccent = adaptive(
-        light: (0.780, 0.290, 0.180, 1.0),   // terracotta
-        dark:  (0.910, 0.450, 0.320, 1.0)    // lifted to carry on dark stock
-    )
-    static let paperCard = adaptive(
-        light: (1.000, 1.000, 1.000, 0.55),
-        dark:  (1.000, 0.960, 0.900, 0.06)
-    )
-    static let paperAccentSoft = adaptive(
-        light: (0.940, 0.825, 0.770, 1.0),   // pale terracotta
-        dark:  (0.310, 0.150, 0.110, 1.0)    // deep terracotta wash
-    )
+    static let paperBG = Studio.bg
+    static let paperInk = Studio.ink
+    static let paperMute = Studio.mute
+    static let paperRule = Studio.rule
+    static let paperAccent = Studio.accent
+    /// Was a pale terracotta wash; now a tint of the blue accent.
+    static let paperAccentSoft = Studio.accent.opacity(0.16)
+    static let paperCard = Studio.panel
 
     // MARK: - Adaptive metrics (compact iPhone vs regular iPad)
 
@@ -384,10 +357,10 @@ struct ContentView: View {
     var editorialTopBar: some View {
         HStack(alignment: .center, spacing: 0) {
             (Text("Whisper")
-                .font(.system(size: 28, weight: .semibold, design: .serif))
+                .font(.system(size: 28, weight: .semibold))
                 .foregroundColor(Self.paperInk)
              + Text(".")
-                .font(.system(size: 28, weight: .semibold, design: .serif))
+                .font(.system(size: 28, weight: .semibold))
                 .foregroundColor(Self.paperAccent))
 
             Spacer()
@@ -483,12 +456,12 @@ struct ContentView: View {
                 .foregroundColor(Self.paperMute)
 
             Text("A quiet place\nfor your voice.")
-                .font(.system(size: isRegularWidth ? 44 : 36, weight: .semibold, design: .serif))
+                .font(.system(size: isRegularWidth ? 44 : 36, weight: .semibold))
                 .foregroundColor(Self.paperInk)
                 .lineSpacing(2)
 
             Text(emptyStateBlurb)
-                .font(.system(size: 16, design: .serif))
+                .font(.system(size: 16))
                 .foregroundColor(Self.paperInk.opacity(0.65))
                 .lineSpacing(4)
 
@@ -579,7 +552,7 @@ struct ContentView: View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(t.title)
-                    .font(.system(size: 15, weight: .medium, design: .serif))
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundColor(Self.paperInk)
                     .lineLimit(1)
                     .multilineTextAlignment(.leading)
@@ -651,7 +624,7 @@ struct ContentView: View {
                          : (downloadStatus[selectedModel] ?? false
                             ? "Reload \(selectedModel.displayName)"
                             : "Download \(selectedModel.displayName) · \(selectedModel.sizeLabel)"))
-                        .font(.system(size: 14, weight: .semibold, design: .serif))
+                        .font(.system(size: 14, weight: .semibold))
                 }
                 .foregroundColor(Self.paperBG)
                 .frame(maxWidth: .infinity)
@@ -690,7 +663,7 @@ struct ContentView: View {
                         .foregroundColor(Self.paperMute)
                     if isOptimizingModel {
                         Text("iOS compiles each model for this specific chip the first time it runs. This happens once per model — afterwards it loads in a moment.")
-                            .font(.system(size: 11, design: .serif))
+                            .font(.system(size: 11))
                             .foregroundColor(Self.paperMute)
                             .lineSpacing(2)
                             .fixedSize(horizontal: false, vertical: true)
@@ -755,7 +728,7 @@ struct ContentView: View {
                 ProgressView()
                     .tint(Self.paperInk.opacity(0.5))
                 Text(phase.heading)
-                    .font(.system(size: 22, weight: .regular, design: .serif).italic())
+                    .font(.system(size: 22, weight: .regular).italic())
                     .foregroundColor(Self.paperInk.opacity(0.75))
             }
 
@@ -788,9 +761,9 @@ struct ContentView: View {
     // sparkline below, peak dotted line.
 
     // Channel accent colors — pulled from the warm-paper palette
-    static let perfCPU    = Color(red: 0.780, green: 0.290, blue: 0.180) // terracotta
-    static let perfMem    = Color(red: 0.470, green: 0.380, blue: 0.220) // umber
-    static let perfNPU    = Color(red: 0.180, green: 0.380, blue: 0.580) // deep ink-blue
+    static let perfCPU    = Studio.hot
+    static let perfMem    = Studio.mute
+    static let perfNPU    = Studio.accent
 
 
     // Catmull-Rom-ish smooth path through points (with optional fill close)
@@ -808,7 +781,7 @@ struct ContentView: View {
             }
 
             Text(streamingTranscript)
-                .font(.system(size: bodyTextSize + 1, weight: .regular, design: .serif))
+                .font(.system(size: bodyTextSize + 1, weight: .regular))
                 .foregroundColor(Self.paperInk)
                 .lineSpacing(7)
 
@@ -857,12 +830,20 @@ struct ContentView: View {
                 .accessibilityLabel(showCopySuccess ? "Transcript copied" : "Copy transcript")
             }
 
+            if let env = transcriptWaveform, !env.isEmpty {
+                WaveformView(buckets: env, progress: nil, idleColor: Studio.mute.opacity(0.55))
+                    .frame(height: isRegularWidth ? 68 : 54)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(RoundedRectangle(cornerRadius: Studio.corner).fill(Studio.sunk))
+            }
+
             if let meta = transcriptMeta {
                 transcriptMetaStrip(meta)
             }
 
             Text(transcript)
-                .font(.system(size: bodyTextSize, weight: .regular, design: .serif))
+                .font(.system(size: bodyTextSize, weight: .regular))
                 .foregroundColor(Self.paperInk)
                 .lineSpacing(8)
                 .textSelection(.enabled)
@@ -923,7 +904,7 @@ struct ContentView: View {
             .foregroundColor(Self.paperAccent)
 
             Text(message)
-                .font(.system(size: 16, design: .serif))
+                .font(.system(size: 16))
                 .foregroundColor(Self.paperInk.opacity(0.8))
                 .lineSpacing(4)
                 .fixedSize(horizontal: false, vertical: true)
@@ -965,16 +946,16 @@ struct ContentView: View {
             // Recording timer pill — only when capturing
             if isRecording {
                 HStack(spacing: 6) {
-                    Circle().fill(Self.paperAccent).frame(width: 6, height: 6)
+                    Circle().fill(Studio.hot).frame(width: 6, height: 6)
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         Text(formatDuration(context.date.timeIntervalSince(recordingStartTime ?? context.date)))
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .foregroundColor(Self.paperAccent)
+                            .foregroundColor(Studio.hot)
                     }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(Capsule().fill(Self.paperAccentSoft.opacity(0.5)))
+                .background(Capsule().fill(Studio.hot.opacity(0.14)))
                 .padding(.bottom, 10)
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
@@ -1001,14 +982,14 @@ struct ContentView: View {
                             .frame(width: 76, height: 76)
 
                         Circle()
-                            .fill(isRecording ? Self.paperInk : Self.paperAccent)
+                            .fill(Studio.hot)
                             .frame(width: 64, height: 64)
-                            .shadow(color: (isRecording ? Self.paperInk : Self.paperAccent).opacity(0.30), radius: 16, y: 6)
+                            .shadow(color: Studio.hot.opacity(0.30), radius: 16, y: 6)
 
                         if isRecording {
                             // Pulse
                             Circle()
-                                .stroke(Self.paperAccent.opacity(0.5), lineWidth: 2)
+                                .stroke(Studio.hot.opacity(0.5), lineWidth: 2)
                                 .frame(width: 84, height: 84)
                                 .scaleEffect(isRecording ? 1.18 : 1.0)
                                 .opacity(isRecording ? 0 : 1)
@@ -1135,7 +1116,7 @@ struct ContentView: View {
             modelPreparationStatus
 
             Text("Each model is downloaded once and runs on this device's Neural Engine. Larger models are slower but more accurate, especially across languages.")
-                .font(.system(size: 13, design: .serif))
+                .font(.system(size: 13))
                 .foregroundColor(Self.paperInk.opacity(0.6))
                 .lineSpacing(3)
 
@@ -1169,7 +1150,7 @@ struct ContentView: View {
                          : (downloadStatus[selectedModel] ?? false
                             ? "Reload \(selectedModel.displayName)"
                             : "Download \(selectedModel.displayName) · \(selectedModel.sizeLabel)"))
-                        .font(.system(size: 15, weight: .semibold, design: .serif))
+                        .font(.system(size: 15, weight: .semibold))
                 }
                 .foregroundColor(Self.paperBG)
                 .frame(maxWidth: .infinity)
@@ -1194,7 +1175,7 @@ struct ContentView: View {
                     .foregroundColor(Self.paperMute)
                     .padding(.top, 2)
                 Text("Models are fetched from Hugging Face once and cached on this device. Your audio never leaves the phone.")
-                    .font(.system(size: 11, design: .serif).italic())
+                    .font(.system(size: 11).italic())
                     .foregroundColor(Self.paperMute)
                     .lineSpacing(2)
             }
@@ -1233,10 +1214,10 @@ struct ContentView: View {
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text(mode.displayName)
-                                .font(.system(size: 14, weight: .semibold, design: .serif))
+                                .font(.system(size: 14, weight: .semibold))
                                 .foregroundColor(Self.paperInk)
                             Text(mode.detail)
-                                .font(.system(size: 11, design: .serif))
+                                .font(.system(size: 11))
                                 .foregroundColor(Self.paperInk.opacity(0.55))
                                 .multilineTextAlignment(.leading)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1265,7 +1246,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 6) {
                     Text(model.displayName)
-                        .font(.system(size: 16, weight: .semibold, design: .serif))
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(Self.paperInk)
                     Spacer()
                     if isActive {
@@ -1280,7 +1261,7 @@ struct ContentView: View {
                 }
 
                 Text(model.tagline)
-                    .font(.system(size: 12, design: .serif))
+                    .font(.system(size: 12))
                     .foregroundColor(Self.paperInk.opacity(0.55))
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
@@ -1645,6 +1626,7 @@ struct ContentView: View {
     func resetResult() {
         transcript = ""
         transcriptMeta = nil
+        transcriptWaveform = nil
         errorMessage = nil
     }
 
@@ -1653,6 +1635,7 @@ struct ContentView: View {
     func showError(_ message: String) {
         transcript = ""
         transcriptMeta = nil
+        transcriptWaveform = nil
         errorMessage = message
     }
 
@@ -1972,6 +1955,39 @@ struct ContentView: View {
             // Ours if the watchdog fired; the caller's otherwise.
             if Task.isCancelled { throw CancellationError() }
             throw ModelLoadTimeout()
+        }
+    }
+
+    /// Fills in envelopes for transcripts saved before waveforms existed.
+    ///
+    /// Without this the library shows one recording with a shape and the rest
+    /// blank, which reads as broken rather than as history. Each file is a
+    /// single decode — ~18 ms for a short clip — done off the main actor and
+    /// yielding between items so a large library never blocks the UI.
+    func backfillWaveformsIfNeeded() async {
+        let candidates = (try? modelContext.fetch(FetchDescriptor<SavedTranscript>()))?
+            .filter { $0.waveform == nil && $0.audioFilePath != nil } ?? []
+        guard !candidates.isEmpty else { return }
+
+        var filled = 0
+        for transcript in candidates {
+            guard let relative = transcript.audioFilePath else { continue }
+            let url = AudioFiles.urlForRelativePath(relative)
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+
+            let buckets = await Task.detached(priority: .utility) {
+                AudioConverter.peakEnvelope(of: url)?.buckets
+            }.value
+
+            guard let buckets, !buckets.isEmpty else { continue }
+            transcript.waveform = buckets
+            filled += 1
+            await Task.yield()
+        }
+
+        if filled > 0 {
+            try? modelContext.save()
+            print("Backfilled \(filled) waveform(s)")
         }
     }
 
@@ -2573,12 +2589,14 @@ struct ContentView: View {
             throw error
         }
 
-        // One pass over the converted WAV yields both the level (so a failure can
-        // say which thing went wrong) and the waveform envelope. Measured on
-        // workURL, not the original: an import from Photos is an .mp4, and
-        // AVAudioFile cannot open a video container — reading the original would
-        // silently leave every such transcript without a waveform.
-        let envelope = AudioConverter.peakEnvelope(of: workURL)
+        // The envelope is measured from the ORIGINAL file, because that is what
+        // gets kept for playback and what the backfill pass reads — computing it
+        // from the converted 16 kHz mono copy would give the same recording two
+        // slightly different shapes depending on which path produced it.
+        // Falls back to the converted WAV, which is always readable, if the
+        // source turns out to be a container AVAudioFile will not open.
+        let envelope = AudioConverter.peakEnvelope(of: url)
+            ?? AudioConverter.peakEnvelope(of: workURL)
         let peakLevel = envelope?.peak
 
         let languageCode = selectedLanguage == "auto" ? nil : selectedLanguage
@@ -2723,6 +2741,7 @@ struct ContentView: View {
                     let selectedLangName = supportedLanguages.first(where: { $0.code == selectedLanguage })?.name ?? "Auto Detect"
 
                     transcript = fullText
+                    transcriptWaveform = envelope?.buckets
                     transcriptMeta = TranscriptMeta(
                         detectedLanguage: detectedLanguage == "Unknown" ? nil : detectedLanguage,
                         selectedLanguageName: selectedLangName,

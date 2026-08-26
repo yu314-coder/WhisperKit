@@ -16,18 +16,28 @@ enum ExportFormat: String, CaseIterable, Identifiable {
 }
 
 enum TranscriptExporter {
-    static func export(_ transcript: SavedTranscript, as format: ExportFormat) -> String {
+    /// - Parameter includeSpeakers: when false, speaker labels are omitted from
+    ///   every format. Exposed so the export screen can preview both.
+    static func export(
+        _ transcript: SavedTranscript,
+        as format: ExportFormat,
+        includeSpeakers: Bool = true
+    ) -> String {
         switch format {
-        case .txt: return exportTXT(transcript)
-        case .srt: return exportSRT(transcript)
-        case .vtt: return exportVTT(transcript)
-        case .markdown: return exportMarkdown(transcript)
-        case .json: return exportJSON(transcript)
+        case .txt: return exportTXT(transcript, includeSpeakers)
+        case .srt: return exportSRT(transcript, includeSpeakers)
+        case .vtt: return exportVTT(transcript, includeSpeakers)
+        case .markdown: return exportMarkdown(transcript, includeSpeakers)
+        case .json: return exportJSON(transcript, includeSpeakers)
         }
     }
 
-    static func write(_ transcript: SavedTranscript, as format: ExportFormat) throws -> URL {
-        let body = export(transcript, as: format)
+    static func write(
+        _ transcript: SavedTranscript,
+        as format: ExportFormat,
+        includeSpeakers: Bool = true
+    ) throws -> URL {
+        let body = export(transcript, as: format, includeSpeakers: includeSpeakers)
         let safeTitle = transcript.title
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
@@ -39,18 +49,18 @@ enum TranscriptExporter {
 
     // MARK: - Formatters
 
-    private static func exportTXT(_ t: SavedTranscript) -> String {
+    private static func exportTXT(_ t: SavedTranscript, _ includeSpeakers: Bool = true) -> String {
         let sorted = t.segments.sorted { $0.startTime < $1.startTime }
         if sorted.isEmpty { return t.fullText }
         return sorted.map { seg in
-            if let speaker = seg.speaker, !speaker.isEmpty {
+            if includeSpeakers, let speaker = seg.speaker, !speaker.isEmpty {
                 return "\(speaker): \(seg.text)"
             }
             return seg.text
         }.joined(separator: "\n")
     }
 
-    private static func exportMarkdown(_ t: SavedTranscript) -> String {
+    private static func exportMarkdown(_ t: SavedTranscript, _ includeSpeakers: Bool = true) -> String {
         let df = DateFormatter()
         df.dateStyle = .medium
         df.timeStyle = .short
@@ -65,7 +75,7 @@ enum TranscriptExporter {
         let sorted = t.segments.sorted { $0.startTime < $1.startTime }
         for seg in sorted {
             let stamp = "`[\(formatTimestamp(seg.startTime))]`"
-            if let speaker = seg.speaker, !speaker.isEmpty {
+            if includeSpeakers, let speaker = seg.speaker, !speaker.isEmpty {
                 out += "\(stamp) **\(speaker):** \(seg.text)\n\n"
             } else {
                 out += "\(stamp) \(seg.text)\n\n"
@@ -74,13 +84,13 @@ enum TranscriptExporter {
         return out
     }
 
-    private static func exportSRT(_ t: SavedTranscript) -> String {
+    private static func exportSRT(_ t: SavedTranscript, _ includeSpeakers: Bool = true) -> String {
         let sorted = t.segments.sorted { $0.startTime < $1.startTime }
         var out = ""
         for (idx, seg) in sorted.enumerated() {
             out += "\(idx + 1)\n"
             out += "\(srtTime(seg.startTime)) --> \(srtTime(seg.endTime))\n"
-            if let speaker = seg.speaker, !speaker.isEmpty {
+            if includeSpeakers, let speaker = seg.speaker, !speaker.isEmpty {
                 out += "\(speaker): \(seg.text)\n\n"
             } else {
                 out += "\(seg.text)\n\n"
@@ -89,12 +99,12 @@ enum TranscriptExporter {
         return out
     }
 
-    private static func exportVTT(_ t: SavedTranscript) -> String {
+    private static func exportVTT(_ t: SavedTranscript, _ includeSpeakers: Bool = true) -> String {
         let sorted = t.segments.sorted { $0.startTime < $1.startTime }
         var out = "WEBVTT\n\n"
         for seg in sorted {
             out += "\(vttTime(seg.startTime)) --> \(vttTime(seg.endTime))\n"
-            if let speaker = seg.speaker, !speaker.isEmpty {
+            if includeSpeakers, let speaker = seg.speaker, !speaker.isEmpty {
                 out += "<v \(speaker)>\(seg.text)\n\n"
             } else {
                 out += "\(seg.text)\n\n"
@@ -103,7 +113,7 @@ enum TranscriptExporter {
         return out
     }
 
-    private static func exportJSON(_ t: SavedTranscript) -> String {
+    private static func exportJSON(_ t: SavedTranscript, _ includeSpeakers: Bool = true) -> String {
         struct Seg: Encodable {
             let start: Double
             let end: Double
@@ -130,7 +140,7 @@ enum TranscriptExporter {
             text: t.fullText,
             segments: t.segments
                 .sorted { $0.startTime < $1.startTime }
-                .map { Seg(start: $0.startTime, end: $0.endTime, text: $0.text, speaker: $0.speaker) }
+                .map { Seg(start: $0.startTime, end: $0.endTime, text: $0.text, speaker: includeSpeakers ? $0.speaker : nil) }
         )
 
         let enc = JSONEncoder()

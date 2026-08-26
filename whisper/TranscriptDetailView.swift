@@ -11,7 +11,6 @@ struct TranscriptDetailView: View {
     @State private var editingSpeakerForSegment: SavedSegment?
     @State private var speakerDraft: String = ""
     @State private var showExportPicker = false
-    @State private var pendingShare: ShareItem?
     @State private var renamingTitle = false
     @State private var titleDraft: String = ""
 
@@ -48,11 +47,12 @@ struct TranscriptDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             headerCard
-            Divider()
+            Rectangle().fill(Studio.rule).frame(height: 1)
+            waveformWell
             segmentList
             playerBar
         }
-        .background(Color(.systemGroupedBackground).ignoresSafeArea())
+        .background(Studio.bg.ignoresSafeArea())
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
@@ -85,14 +85,8 @@ struct TranscriptDetailView: View {
             }
             Button("Cancel", role: .cancel) { editingSpeakerForSegment = nil }
         }
-        .sheet(item: $pendingShare) { item in
-            ShareSheet(activityItems: [item.url])
-        }
-        .confirmationDialog("Export Transcript", isPresented: $showExportPicker, titleVisibility: .visible) {
-            ForEach(ExportFormat.allCases) { fmt in
-                Button(fmt.displayName) { exportAs(fmt) }
-            }
-            Button("Cancel", role: .cancel) {}
+        .sheet(isPresented: $showExportPicker) {
+            ExportView(transcript: transcript)
         }
         .alert("Rename Transcript", isPresented: $renamingTitle) {
             TextField("Title", text: $titleDraft)
@@ -135,6 +129,43 @@ struct TranscriptDetailView: View {
     }
 
     // MARK: - Segment list
+
+    /// The waveform, drawn from the stored peak envelope. Scrubbing it seeks
+    /// the player, which is the whole point of having measured amplitude
+    /// rather than a decorative squiggle: you can see where the speech is.
+    private var waveformWell: some View {
+        VStack(spacing: 7) {
+            Group {
+                if let env = transcript.envelope(limit: 160) {
+                    WaveformView(
+                        buckets: env,
+                        progress: player.duration > 0 ? player.currentTime / player.duration : nil,
+                        onScrub: { f in
+                            guard player.duration > 0 else { return }
+                            player.seek(to: f * player.duration)
+                        }
+                    )
+                } else {
+                    WaveformPlaceholder()
+                }
+            }
+            .frame(height: 64)
+
+            HStack {
+                Text(TranscriptExporter.formatTimestamp(player.currentTime))
+                    .font(Studio.mono(9))
+                    .foregroundColor(Studio.accent)
+                Spacer()
+                Text(TranscriptExporter.formatTimestamp(transcript.duration))
+                    .font(Studio.mono(9))
+                    .foregroundColor(Studio.mute)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Studio.sunk)
+        .overlay(alignment: .bottom) { Rectangle().fill(Studio.rule).frame(height: 1) }
+    }
 
     private var segmentList: some View {
         SegmentListView(
@@ -233,20 +264,15 @@ struct TranscriptDetailView: View {
         }
     }
 
-    private func exportAs(_ fmt: ExportFormat) {
-        do {
-            let url = try TranscriptExporter.write(transcript, as: fmt)
-            pendingShare = ShareItem(url: url)
-        } catch {
-            print("Export error: \(error)")
-        }
-    }
-
-    private func formatDate(_ d: Date) -> String {
+    private static let dateFormatter: DateFormatter = {
         let df = DateFormatter()
         df.dateStyle = .medium
         df.timeStyle = .short
-        return df.string(from: d)
+        return df
+    }()
+
+    private func formatDate(_ d: Date) -> String {
+        Self.dateFormatter.string(from: d)
     }
 }
 

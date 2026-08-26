@@ -41,6 +41,7 @@ struct TranscriptLibraryView: View {
                     list
                 }
             }
+            .background(Studio.bg.ignoresSafeArea())
             .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.large)
             .searchable(text: $searchText, prompt: "Search transcripts and text")
@@ -60,49 +61,82 @@ struct TranscriptLibraryView: View {
     private var list: some View {
         List {
             ForEach(filtered) { t in
-                NavigationLink {
-                    TranscriptDetailView(transcript: t)
-                } label: {
+                ZStack {
+                    NavigationLink {
+                        TranscriptDetailView(transcript: t)
+                    } label: { EmptyView() }
+                    .opacity(0)
+
                     row(t)
                 }
+                .listRowInsets(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
+                .listRowBackground(Studio.bg)
+                .listRowSeparatorTint(Studio.rule)
             }
             .onDelete(perform: delete)
         }
-        .listStyle(.insetGrouped)
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Studio.bg)
     }
 
+    /// Each row carries its own measured envelope, so the library reads as a
+    /// set of recordings with distinct shapes rather than a wall of text. The
+    /// envelope is stored on the transcript, so nothing is decoded here.
     private func row(_ t: SavedTranscript) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(t.title)
-                .font(.headline)
-                .lineLimit(1)
-            Text(t.fullText)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .lineLimit(2)
-            HStack(spacing: 10) {
-                Label(TranscriptExporter.formatTimestamp(t.duration), systemImage: "clock")
-                if let lang = t.languageCode {
-                    Label(lang.uppercased(), systemImage: "globe")
+        HStack(spacing: 14) {
+            Group {
+                if let env = t.envelope(limit: 34) {
+                    WaveformView(buckets: env, progress: nil, idleColor: Studio.mute.opacity(0.55))
+                } else {
+                    WaveformPlaceholder()
                 }
-                Text(relativeDate(t.createdAt))
             }
-            .font(.caption2)
-            .foregroundColor(.secondary)
+            .frame(width: 96, height: 34)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(t.title)
+                    .font(Studio.text(15, weight: .medium))
+                    .foregroundColor(Studio.ink)
+                    .lineLimit(1)
+                Text(t.fullText)
+                    .font(Studio.text(12))
+                    .foregroundColor(Studio.mute)
+                    .lineLimit(1)
+                HStack(spacing: 8) {
+                    Text(TranscriptExporter.formatTimestamp(t.duration))
+                    if let lang = t.languageCode, !lang.isEmpty {
+                        Text(lang.uppercased())
+                    }
+                    if let model = t.modelName {
+                        Text(model)
+                    }
+                    Text(relativeDate(t.createdAt))
+                }
+                .font(Studio.mono(9))
+                .foregroundColor(Studio.mute)
+            }
+
+            Spacer(minLength: 4)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(Studio.mute.opacity(0.7))
         }
-        .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: "text.bubble")
-                .font(.system(size: 44))
-                .foregroundStyle(.secondary)
-            Text("No saved transcripts yet")
-                .font(.headline)
-            Text("Record audio or import a file from the main screen. Transcripts will be saved here automatically.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+            Image(systemName: "waveform")
+                .font(.system(size: 40, weight: .light))
+                .foregroundColor(Studio.mute)
+            Text("No sessions yet")
+                .font(Studio.text(17, weight: .semibold))
+                .foregroundColor(Studio.ink)
+            Text("Record audio or import a file from the main screen. Everything you transcribe is kept here.")
+                .font(Studio.text(13))
+                .foregroundColor(Studio.mute)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
         }
