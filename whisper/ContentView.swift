@@ -80,6 +80,10 @@ struct ContentView: View {
     /// Envelope of the audio just transcribed, so the result screen shows the
     /// same waveform the library will.
     @State private var transcriptWaveform: [Float]? = nil
+    /// 0...1 while the source file is being decoded to PCM. The decode is the
+    /// longest phase for a big import and the only one that can say how far
+    /// along it is.
+    @State private var conversionProgress: Double? = nil
     /// The record just written for this run. Held so the result screen can show
     /// real segments and play the audio back, rather than only flat text.
     @State private var currentTranscript: SavedTranscript?
@@ -819,7 +823,7 @@ struct ContentView: View {
             switch self {
             case .downloading:    return "Downloading the model…"
             case .loadingModel:   return "Warming up the model…"
-            case .importingAudio: return "Reading audio…"
+            case .importingAudio: return "Decoding the audio…"
             case .transcribing:   return "Listening to the words…"
             }
         }
@@ -829,7 +833,8 @@ struct ContentView: View {
         let s = statusMessage.lowercased()
         if s.contains("download")     { return .downloading }
         if s.contains("load") && s.contains("model") { return .loadingModel }
-        if s.contains("import") || s.contains("read") || s.contains("photo") || s.contains("convert") {
+        if s.contains("import") || s.contains("read") || s.contains("photo")
+            || s.contains("convert") || s.contains("decod") {
             return .importingAudio
         }
         // Default: anything else with non-empty progress or status implies transcribing.
@@ -852,7 +857,17 @@ struct ContentView: View {
                     .foregroundColor(Self.paperInk.opacity(0.75))
             }
 
-            if transcriptionProgress > 0 {
+            if let decode = conversionProgress {
+                VStack(alignment: .leading, spacing: 5) {
+                    ProgressView(value: decode)
+                        .progressViewStyle(.linear)
+                        .tint(Self.paperAccent)
+                    Text("\(Int(decode * 100))% decoded — transcription starts when this finishes")
+                        .font(Studio.mono(10))
+                        .foregroundColor(Studio.mute)
+                }
+                .padding(.top, 2)
+            } else if transcriptionProgress > 0 {
                 ProgressView(value: transcriptionProgress)
                     .progressViewStyle(.linear)
                     .tint(Self.paperAccent)
@@ -1849,6 +1864,7 @@ struct ContentView: View {
         transcript = ""
         transcriptMeta = nil
         transcriptWaveform = nil
+        conversionProgress = nil
         currentTranscript = nil
         resultPlayer.stop()
         errorMessage = nil
@@ -1860,6 +1876,7 @@ struct ContentView: View {
         transcript = ""
         transcriptMeta = nil
         transcriptWaveform = nil
+        conversionProgress = nil
         currentTranscript = nil
         resultPlayer.stop()
         errorMessage = message
@@ -2450,27 +2467,26 @@ struct ContentView: View {
     
     func handlePhotoSelection(_ item: PhotosPickerItem) {
         isProcessing = true
-        statusMessage = "Loading from Photos..."
-        
+        statusMessage = "Copying from Photos…"
+        monitor.startSystemMonitoring()
+
         Task {
             do {
-                guard let movie = try await item.loadTransferable(type: Data.self) else {
+                // MovieFile transfers a URL, so this is a filesystem copy rather
+                // than loading the whole video into memory as Data first.
+                guard let movie = try await item.loadTransferable(type: MovieFile.self) else {
                     await MainActor.run {
                         showError("Couldn't load that video from Photos.")
                         isProcessing = false
+                        monitor.stopSystemMonitoring()
                         selectedPhotoItem = nil
                     }
                     return
                 }
-                
-                let tempURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(UUID().uuidString)
-                    .appendingPathExtension("mp4")
-                
-                try movie.write(to: tempURL)
-                await importAndTranscribeFile(from: tempURL)
-                try? FileManager.default.removeItem(at: tempURL)
-                
+
+                await importAndTranscribeFile(from: movie.url)
+                try? FileManager.default.removeItem(at: movie.url)
+
                 await MainActor.run {
                     selectedPhotoItem = nil
                 }
@@ -2478,6 +2494,7 @@ struct ContentView: View {
                 await MainActor.run {
                     showError("Photo import failed: \(error.localizedDescription)")
                     isProcessing = false
+                    monitor.stopSystemMonitoring()
                     selectedPhotoItem = nil
                 }
             }
@@ -2489,10 +2506,14 @@ struct ContentView: View {
         endLiveActivity()
 
         await MainActor.run {
-            statusMessage = "Importing file..."
+            statusMessage = "Reading file…"
             isProcessing = true
             streamingTranscript = ""
             resetResult()
+            // Start sampling here rather than in transcribeAudio: copying and
+            // decoding a large file is most of the wait, and the meters were
+            // flat for all of it.
+            monitor.startSystemMonitoring()
             transcriptionProgress = 0.0
             currentSegment = 0
             totalSegments = 0
@@ -2812,10 +2833,19 @@ struct ContentView: View {
         // ExtAudioFile's broken AAC decoder on Designed-for-iPad-on-Mac
         // (error 1685348671 = 'dta?') and is what Whisper consumes
         // internally anyway, so no quality loss and faster startup.
+        await MainActor.run {
+            statusMessage = "Decoding audio…"
+            conversionProgress = 0
+        }
+
         let workURL: URL
         do {
-            workURL = try await AudioConverter.convertToWhisperReadableWAV(url)
+            workURL = try await AudioConverter.convertToWhisperReadableWAV(url) { p in
+                Task { @MainActor in conversionProgress = p }
+            }
+            await MainActor.run { conversionProgress = nil }
         } catch {
+            await MainActor.run { conversionProgress = nil }
             await MainActor.run {
                 statusMessage = "Audio conversion failed: \(error.localizedDescription)"
             }
@@ -2875,6 +2905,7 @@ struct ContentView: View {
         // Coalesce to 10 Hz; the final state is written after transcribe()
         // returns, so dropping trailing intermediate frames costs nothing.
         let throttle = ProgressThrottle(interval: 0.1)
+        let stream = StreamingTranscriptBuffer()
 
         let results = try await whisper.transcribe(
             audioPath: workURL.path,
@@ -2902,9 +2933,10 @@ struct ContentView: View {
                         }
                     }
                     
-                    // Update streaming text
+                    // Update streaming text. Merged across windows so the live
+                    // view accumulates rather than resetting each window.
                     if !text.isEmpty {
-                        self.streamingTranscript = text
+                        self.streamingTranscript = stream.update(window: windowId, text: text)
                     }
 
                     // Segments per second, measured on actual decode windows
@@ -3030,6 +3062,29 @@ final class ProgressThrottle: @unchecked Sendable {
         guard now.timeIntervalSince(lastPush) >= interval else { return false }
         lastPush = now
         return true
+    }
+}
+
+// MARK: - Streaming Transcript Buffer
+
+/// Accumulates decode windows so the live view grows as the audio is read.
+///
+/// `TranscriptionProgress.text` carries only the CURRENT window's tokens, so
+/// assigning it straight to the view replaced everything every 30 seconds — on
+/// a long recording you only ever saw the last half-minute. Keyed by
+/// `windowId`, because later callbacks refine a window already seen and
+/// windows can complete out of order when several workers run at once.
+final class StreamingTranscriptBuffer: @unchecked Sendable {
+    private var windows: [Int: String] = [:]
+
+    func update(window: Int, text: String) -> String {
+        windows[window] = text
+        return windows
+            .sorted { $0.key < $1.key }
+            .map(\.value)
+            .joined(separator: " ")
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

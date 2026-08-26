@@ -13,7 +13,15 @@ import Accelerate
 enum AudioConverter {
     /// Returns either the original URL (if already a usable 16 kHz mono WAV)
     /// or a path to a freshly-written converted file in the temp directory.
-    static func convertToWhisperReadableWAV(_ inputURL: URL) async throws -> URL {
+    ///
+    /// - Parameter onProgress: called with 0...1 as the decode advances, off
+    ///   the main actor. Decoding an hour-long recording takes real time and
+    ///   this is the only phase that can report how far along it is; without it
+    ///   the UI could only show an indeterminate spinner.
+    static func convertToWhisperReadableWAV(
+        _ inputURL: URL,
+        onProgress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> URL {
         // Skip conversion if file is already a WAV — assume it's compatible.
         // If a WAV file still fails downstream we can tighten this check.
         if inputURL.pathExtension.lowercased() == "wav" {
@@ -21,6 +29,7 @@ enum AudioConverter {
         }
 
         let asset = AVURLAsset(url: inputURL)
+        let assetDuration = (try? await asset.load(.duration).seconds) ?? 0
         let tracks = try await asset.loadTracks(withMediaType: .audio)
         guard let audioTrack = tracks.first else {
             throw NSError(
@@ -99,6 +108,12 @@ enum AudioConverter {
                     }
 
                     if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+                        if let onProgress, assetDuration > 0 {
+                            let at = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+                            if at.isFinite {
+                                onProgress(min(1, max(0, at / assetDuration)))
+                            }
+                        }
                         if !writerInput.append(sampleBuffer) {
                             // Append failed — surface the writer error.
                             assetReader.cancelReading()
