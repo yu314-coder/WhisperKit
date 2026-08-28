@@ -190,6 +190,14 @@ struct ContentView: View {
             }
         }
 
+        /// Whether this model has to be brought up one sub-model at a time.
+        ///
+        /// Loading the encoder, decoder and mel graph together spikes memory to
+        /// roughly the sum of all three; staging keeps only one in flight. Small
+        /// fits either way, but Turbo and the large models are what iOS was
+        /// killing on iPhone — the iPad has the headroom to get away with it.
+        var needsStagedLoad: Bool { sizeMB >= 600 }
+
         var sizeLabel: String {
             sizeMB >= 1000
                 ? String(format: "%.1f GB", Double(sizeMB) / 1000)
@@ -239,6 +247,16 @@ struct ContentView: View {
     
     var body: some View {
         editorialLayout
+            // A loaded model is several hundred megabytes that nothing is using
+            // between transcriptions. Handing it back when iOS asks is the
+            // difference between reloading it later and being killed now; it
+            // reloads on the next transcription anyway.
+            .onReceive(NotificationCenter.default.publisher(
+                for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+                guard !isProcessing, !isRecording, !isPreparingModel else { return }
+                whisperKit = nil
+                isModelLoaded = false
+            }
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isProcessing)
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isModelLoaded)
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isRecording)
@@ -2107,7 +2125,10 @@ struct ContentView: View {
                 clearPrewarmed(model)
             }
 
-            let needsPrewarm = crashedLastLoad || !hasBeenPrewarmed(model)
+            // Staging is not just a first-run optimisation for the large
+            // models: every one-shot load of Turbo risks the same kill, so the
+            // prewarm marker only gets to skip staging for models that fit.
+            let needsPrewarm = crashedLastLoad || !hasBeenPrewarmed(model) || model.needsStagedLoad
             isOptimizingModel = needsPrewarm
             modelLoadInFlight = true
             statusMessage = needsPrewarm
