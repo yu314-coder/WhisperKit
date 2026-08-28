@@ -16,9 +16,15 @@ enum AudioFiles {
         try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
     }
 
-    /// Copies a source audio file into the saved-audio folder and returns
-    /// the *relative* path stored on the SavedTranscript model.
-    static func saveAudio(from sourceURL: URL, suggestedName: String) throws -> String {
+    /// Places a source audio file into the saved-audio folder and returns the
+    /// *relative* path stored on the SavedTranscript model.
+    ///
+    /// - Parameter movingSource: pass `true` when the caller owns the source and
+    ///   is going to discard it. A move is a rename — no bytes are written — so
+    ///   this avoids duplicating the whole recording on disk. An import used to
+    ///   write the same audio three times over plus a converted WAV, which is
+    ///   how a single large video could dirty a gigabyte.
+    static func saveAudio(from sourceURL: URL, suggestedName: String, movingSource: Bool = false) throws -> String {
         ensureFolderExists()
         let ext = sourceURL.pathExtension.isEmpty ? "m4a" : sourceURL.pathExtension
         let base = suggestedName.replacingOccurrences(of: "/", with: "-")
@@ -29,7 +35,11 @@ enum AudioFiles {
             counter += 1
         }
         let dest = folderURL.appendingPathComponent(candidate)
-        try FileManager.default.copyItem(at: sourceURL, to: dest)
+        if movingSource {
+            try FileManager.default.moveItem(at: sourceURL, to: dest)
+        } else {
+            try FileManager.default.copyItem(at: sourceURL, to: dest)
+        }
         return "\(folderName)/\(candidate)"
     }
 

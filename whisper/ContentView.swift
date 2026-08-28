@@ -71,7 +71,6 @@ struct ContentView: View {
     @State private var showLibrary: Bool = false
     @State private var showModelPicker: Bool = false
     @State private var showLanguagePicker: Bool = false
-    @State private var lastTranscribedAudioURL: URL? = nil
     @State private var lastTranscriptionResults: [TranscriptionResult] = []
     @State private var showModelDetails: Bool = false
     @State private var detectedLanguageCode: String? = nil
@@ -277,6 +276,7 @@ struct ContentView: View {
             Task { @MainActor in
                 removeRetiredModelDownloads()
                 sanitiseStoredSegmentsIfNeeded()
+                cleanupOrphanedImports()
                 createDebugFiles()
                 await backfillWaveformsIfNeeded()
             }
@@ -2202,6 +2202,28 @@ struct ContentView: View {
         }
     }
 
+    /// Clears the Imports scratch folder.
+    ///
+    /// Every import was copied there and never removed, while a second copy was
+    /// made in SavedAudio — so each imported file was kept twice, forever.
+    /// Transcripts only ever reference SavedAudio, so anything left here is
+    /// dead weight from an interrupted run or an older version.
+    func cleanupOrphanedImports() {
+        let imports = getImportsDirectory()
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: imports, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
+        ), !files.isEmpty else { return }
+
+        var reclaimed = 0
+        for file in files {
+            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            if (try? FileManager.default.removeItem(at: file)) != nil { reclaimed += size }
+        }
+        if reclaimed > 0 {
+            print("Reclaimed \(reclaimed / 1_048_576) MB of orphaned imports")
+        }
+    }
+
     /// Fills in envelopes for transcripts saved before waveforms existed.
     ///
     /// Without this the library shows one recording with a shape and the rest
@@ -2722,7 +2744,13 @@ struct ContentView: View {
         stampFormatter.dateFormat = "yyyy-MM-dd_HHmm"
         let stamp = stampFormatter.string(from: Date())
         do {
-            savedRelativePath = try AudioFiles.saveAudio(from: audioURL, suggestedName: "Recording_\(stamp)")
+            // The file at audioURL lives in our own Imports folder and is not
+            // needed afterwards, so hand it over rather than duplicating it.
+            savedRelativePath = try AudioFiles.saveAudio(
+                from: audioURL,
+                suggestedName: "Recording_\(stamp)",
+                movingSource: true
+            )
         } catch {
             print("⚠️ Could not persist audio file: \(error)")
         }
@@ -2993,7 +3021,6 @@ struct ContentView: View {
                     }
 
                     // Persist to SwiftData library
-                    self.lastTranscribedAudioURL = url
                     self.lastTranscriptionResults = results
                     self.saveTranscriptToLibrary(audioURL: url, results: results, fullText: fullText, waveform: envelope?.buckets)
                     
