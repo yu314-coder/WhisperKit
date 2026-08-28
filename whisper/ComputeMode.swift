@@ -1,5 +1,6 @@
 import Foundation
 import CoreML
+import UIKit
 import WhisperKit
 
 
@@ -29,6 +30,28 @@ enum ComputeMode: String, CaseIterable, Identifiable {
         case .gpu:          return "Loads in seconds. Best for getting started quickly."
         case .neuralEngine: return "Uses less battery, but the first load after each update takes minutes."
         }
+    }
+
+    /// The options to actually load with, which are not always the ones the
+    /// user picked.
+    ///
+    /// Turbo and the large models kill the app on iPhone in GPU mode, during
+    /// whatever happens to be running when the encoder's weights are resident.
+    /// Confirmed on device: the same model, same build, transcribes fine on
+    /// the Neural Engine, and fine over GPU on iPad. The encoder simply does
+    /// not fit a phone GPU's working set. Rather than offer a setting that
+    /// terminates the app, GPU quietly resolves to the Neural Engine there —
+    /// `gpuIsUnavailable(for:)` lets the UI say so.
+    func computeOptions(for model: ContentView.WhisperModel) -> ModelComputeOptions {
+        Self.gpuIsUnavailable(for: model, requested: self) ? Self.neuralEngine.computeOptions : computeOptions
+    }
+
+    /// Whether the user asked for the GPU on a device that cannot host this
+    /// model there. Drives both the fallback and the explanation next to it.
+    static func gpuIsUnavailable(for model: ContentView.WhisperModel, requested: ComputeMode) -> Bool {
+        requested == .gpu
+            && model.exceedsPhoneGPU
+            && UIDevice.current.userInterfaceIdiom == .phone
     }
 
     var computeOptions: ModelComputeOptions {

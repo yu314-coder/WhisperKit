@@ -190,13 +190,12 @@ struct ContentView: View {
             }
         }
 
-        /// Whether this model has to be brought up one sub-model at a time.
+        /// Whether this model's audio encoder is too big for a phone GPU.
         ///
-        /// Loading the encoder, decoder and mel graph together spikes memory to
-        /// roughly the sum of all three; staging keeps only one in flight. Small
-        /// fits either way, but Turbo and the large models are what iOS was
-        /// killing on iPhone — the iPad has the headroom to get away with it.
-        var needsStagedLoad: Bool { sizeMB >= 600 }
+        /// Turbo (646 MB) and up terminate the app on iPhone when Core ML is
+        /// asked to host them on the GPU; the same models run on the Neural
+        /// Engine on iPhone, and on the GPU on iPad. Small is fine either way.
+        var exceedsPhoneGPU: Bool { sizeMB >= 600 }
 
         var sizeLabel: String {
             sizeMB >= 1000
@@ -447,7 +446,7 @@ struct ContentView: View {
                     Circle()
                         .fill(isModelLoaded ? Studio.ok : Studio.mute.opacity(0.5))
                         .frame(width: 6, height: 6)
-                    Text("\(selectedModel.displayName) · \(computeMode.shortName)")
+                    Text("\(selectedModel.displayName) · \(effectiveMode(for: selectedModel).shortName)")
                         .font(Studio.mono(11))
                         .foregroundColor(Studio.ink.opacity(0.82))
                 }
@@ -649,7 +648,7 @@ struct ContentView: View {
             return "Press the round button below to start a new recording, or pull in an audio file. Everything you transcribe stays on this device — every page is kept in your library."
         }
         if isReloadingKnownModel {
-            return "\(selectedModel.displayName) is loading onto the \(computeMode.shortName) — this happens once each time you open the app. Go ahead and record; it will transcribe as soon as the model is ready."
+            return "\(selectedModel.displayName) is loading onto the \(effectiveMode(for: selectedModel).shortName) — this happens once each time you open the app. Go ahead and record; it will transcribe as soon as the model is ready."
         }
         return "First, choose a transcription model. It downloads once and runs entirely on this device. Larger models are slower but more accurate."
     }
@@ -1491,6 +1490,17 @@ struct ContentView: View {
                                 .foregroundColor(Self.paperInk.opacity(0.55))
                                 .multilineTextAlignment(.leading)
                                 .fixedSize(horizontal: false, vertical: true)
+
+                            // Say it rather than silently doing something else.
+                            if mode == .gpu,
+                               ComputeMode.gpuIsUnavailable(for: selectedModel, requested: .gpu) {
+                                Text("\(selectedModel.displayName) is too large for this iPhone's GPU — it will run on the Neural Engine instead.")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Studio.hot)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.top, 2)
+                            }
                         }
                         Spacer(minLength: 0)
                     }
@@ -1987,8 +1997,14 @@ struct ContentView: View {
     /// Core ML specialises per compute-unit configuration, so a model prewarmed
     /// for the Neural Engine is *not* warm for the GPU. The mode belongs in the
     /// key, or switching would skip a prewarm that had never actually happened.
+    /// What `model` will actually run on, which differs from `computeMode`
+    /// wherever the GPU cannot host it.
+    func effectiveMode(for model: WhisperModel) -> ComputeMode {
+        ComputeMode.gpuIsUnavailable(for: model, requested: computeMode) ? .neuralEngine : computeMode
+    }
+
     private func prewarmKey(_ model: WhisperModel) -> String {
-        "\(model.rawValue)@\(ProcessInfo.processInfo.operatingSystemVersionString)#\(computeMode.rawValue)"
+        "\(model.rawValue)@\(ProcessInfo.processInfo.operatingSystemVersionString)#\(effectiveMode(for: model).rawValue)"
     }
 
     private func hasBeenPrewarmed(_ model: WhisperModel) -> Bool {
@@ -2125,14 +2141,11 @@ struct ContentView: View {
                 clearPrewarmed(model)
             }
 
-            // Staging is not just a first-run optimisation for the large
-            // models: every one-shot load of Turbo risks the same kill, so the
-            // prewarm marker only gets to skip staging for models that fit.
-            let needsPrewarm = crashedLastLoad || !hasBeenPrewarmed(model) || model.needsStagedLoad
+            let needsPrewarm = crashedLastLoad || !hasBeenPrewarmed(model)
             isOptimizingModel = needsPrewarm
             modelLoadInFlight = true
             statusMessage = needsPrewarm
-                ? "Optimising \(model.displayName) for the \(computeMode.shortName)…"
+                ? "Optimising \(model.displayName) for the \(effectiveMode(for: model).shortName)…"
                 : "Loading \(model.displayName)…"
 
             // A load that never returns used to leave the UI on "Loading"
@@ -2144,7 +2157,7 @@ struct ContentView: View {
                 try await WhisperKit(
                     model: model.rawValue,
                     downloadBase: modelsDir,
-                    computeOptions: computeMode.computeOptions,
+                    computeOptions: computeMode.computeOptions(for: model),
                     verbose: false,
                     logLevel: .error,
                     prewarm: needsPrewarm,
