@@ -188,9 +188,11 @@ func startSystemMonitoring() {
     // Attach to .common mode so the timer keeps firing while the user is
     // scrolling / pressing buttons (the default mode pauses during touch
     // tracking, which makes the chart look frozen on iPhone).
-    let timer = Timer(timeInterval: 1.0, repeats: true) { _ in
-        // Capture nothing problematic — read @State through the wrapper.
-        self.updateSystemStats()
+    // [weak self]: the timer block is retained by the run loop and `self`
+    // retains the timer, so a strong capture here is a cycle — the monitor
+    // would never deinit and its 1 Hz sampling would outlive the screen.
+    let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+        self?.updateSystemStats()
     }
     RunLoop.main.add(timer, forMode: .common)
     monitoringTimer = timer

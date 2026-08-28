@@ -473,12 +473,17 @@ struct ContentView: View {
     var editorialTopBar: some View {
         HStack(alignment: .center, spacing: 0) {
             if !isRegularWidth {
-                (Text("Whisper")
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundColor(Self.paperInk)
-                 + Text(".")
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundColor(Self.paperAccent))
+                // Same wordmark as the iPad rail header. This used to be a 28pt
+                // system-font "Whisper." left over from the pre-Studio design,
+                // which made the two idioms look like different apps.
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(Studio.accent)
+                    Text("whisper")
+                        .font(Studio.mono(13, weight: .semibold))
+                        .foregroundColor(Studio.ink)
+                }
             } else if let record = currentTranscript {
                 Text(record.title)
                     .font(Studio.text(17, weight: .semibold))
@@ -499,11 +504,11 @@ struct ContentView: View {
                 } label: {
                     HStack(spacing: 5) {
                         Circle()
-                            .fill(isModelLoaded ? Color(red: 0.30, green: 0.65, blue: 0.40) : Self.paperMute.opacity(0.4))
+                            .fill(isModelLoaded ? Studio.ok : Studio.mute.opacity(0.5))
                             .frame(width: 6, height: 6)
                         Text(selectedModel.displayName)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(Self.paperInk.opacity(0.75))
+                            .font(Studio.mono(11))
+                            .foregroundColor(Studio.ink.opacity(0.82))
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
@@ -2880,6 +2885,11 @@ struct ContentView: View {
             }
             throw error
         }
+
+        // The converted copy is scratch: it exists only to feed Whisper, and
+        // the original is what gets kept for playback. Without this the WAVs
+        // piled up in tmp — one per transcription, never reclaimed.
+        defer { try? FileManager.default.removeItem(at: workURL) }
 
         // The envelope is measured from the ORIGINAL file, because that is what
         // gets kept for playback and what the backfill pass reads — computing it
