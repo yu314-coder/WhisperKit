@@ -34,6 +34,9 @@ struct ContentView: View {
     /// Which variant the in-flight preparation is for, so tapping the same
     /// model again doesn't cancel and restart a download that's already going.
     @State private var preparingVariant: WhisperModel?
+    /// Guards the one-shot launch work in `.onAppear`, which SwiftUI calls
+    /// again every time a sheet closes.
+    @State private var didRunLaunchSetup = false
     /// 0...1 while downloading; nil once we're loading into the Neural Engine
     /// (that phase reports no progress).
     @State private var downloadProgress: Double?
@@ -262,6 +265,11 @@ struct ContentView: View {
             handleFileImport(result)
         }
         .onAppear {
+            // Fires again whenever a sheet is dismissed, so everything here
+            // must be safe to repeat.
+            guard !didRunLaunchSetup else { return }
+            didRunLaunchSetup = true
+
             // Start the model loading first — it is the long pole on launch.
             // The one-time maintenance below walks every stored segment, which
             // on a large library is slow enough to visibly delay it.
@@ -280,7 +288,9 @@ struct ContentView: View {
             }
             setupBackgroundAudio()
             requestNotificationPermissions()
-            registerBackgroundTasks()
+            AppDelegate.transcriptionHandler = { task in
+                handleBackgroundTranscription(task: task)
+            }
             cleanupStaleActivities()
         }
         .onDisappear {
@@ -1707,15 +1717,6 @@ struct ContentView: View {
     
     // MARK: - Background Processing
 
-    func registerBackgroundTasks() {
-        // Register for iOS 26+ BGContinuedProcessingTask
-        if #available(iOS 16.0, *) {
-            BGTaskScheduler.shared.register(forTaskWithIdentifier: "com.whisper.transcription", using: nil) { task in
-                // This will be called when iOS 26+ uses BGContinuedProcessingTask
-                self.handleBackgroundTranscription(task: task)
-            }
-        }
-    }
 
     func handleBackgroundTranscription(task: BGTask) {
         // Setup progress reporting for BGContinuedProcessingTask

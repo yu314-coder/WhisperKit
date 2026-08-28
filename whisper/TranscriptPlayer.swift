@@ -81,7 +81,10 @@ final class TranscriptPlayer: ObservableObject {
         // the playhead keeps moving while the user scrolls the segment list —
         // the default mode stalls during touch tracking.
         let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
+            // Hop rather than assert. MainActor.assumeIsolated traps if the
+            // assumption is ever wrong, which turns a timing quirk into a
+            // crash; nothing here is hot enough to need the saved hop.
+            Task { @MainActor in
                 guard let self, let p = self.player else { return }
                 // Only publish when the value actually moved, so a paused or
                 // stalled player stops waking every observing view.
@@ -104,6 +107,8 @@ final class TranscriptPlayer: ObservableObject {
     }
 
     deinit {
-        timer?.invalidate()
+        // `timer` is main-actor isolated and deinit is not, so it cannot be
+        // touched here. The timer holds only a weak self and stops itself once
+        // playback ends, and stop() invalidates it on every normal path.
     }
 }
