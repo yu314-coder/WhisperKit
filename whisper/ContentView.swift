@@ -65,6 +65,12 @@ struct ContentView: View {
     /// killed part-way, which on iOS almost always means it was jetsammed for
     /// memory while Core ML specialised the model.
     @AppStorage("modelLoadInFlight") private var modelLoadInFlight = false
+    /// Which model `modelLoadInFlight` refers to. Empty on installs that set
+    /// the flag before this existed; those are read as the selected model.
+    @AppStorage("modelLoadInFlightVariant") private var modelLoadInFlightVariant = ""
+    /// A model the app was terminated while loading. It is not loaded again
+    /// automatically until a load of it completes — see `checkModelStatus()`.
+    @AppStorage("crashedModelVariant") private var crashedModelVariant = ""
     // Previous tick counters for instantaneous CPU & task time deltas.
     // Without this baseline the sampler returns the cumulative since-boot
     // average, which is nearly constant — making the chart look frozen.
@@ -2136,7 +2142,7 @@ struct ContentView: View {
             // this time regardless of what our notes say: it loads one
             // sub-model at a time instead of all at once, which is the
             // difference between fitting in memory and being killed again.
-            let crashedLastLoad = modelLoadInFlight
+            let crashedLastLoad = (crashedModelVariant == model.rawValue)
             if crashedLastLoad {
                 clearPrewarmed(model)
             }
@@ -2144,6 +2150,7 @@ struct ContentView: View {
             let needsPrewarm = crashedLastLoad || !hasBeenPrewarmed(model)
             isOptimizingModel = needsPrewarm
             modelLoadInFlight = true
+            modelLoadInFlightVariant = model.rawValue
             statusMessage = needsPrewarm
                 ? "Optimising \(model.displayName) for the \(effectiveMode(for: model).shortName)…"
                 : "Loading \(model.displayName)…"
@@ -2166,6 +2173,8 @@ struct ContentView: View {
             }
             try Task.checkCancellation()
             modelLoadInFlight = false
+            modelLoadInFlightVariant = ""
+            if crashedModelVariant == model.rawValue { crashedModelVariant = "" }
             markPrewarmed(model)
             isOptimizingModel = false
 
@@ -2179,6 +2188,7 @@ struct ContentView: View {
             downloadProgress = nil
             // Cleared on failure too — only an outright kill should leave it set.
             modelLoadInFlight = false
+            modelLoadInFlightVariant = ""
             throw error
         }
     }
@@ -2453,9 +2463,39 @@ struct ContentView: View {
             downloadStatus[model] = findModelDirectory(for: model) != nil
         }
 
-        if downloadStatus[selectedModel] == true && !isModelLoaded && !isProcessing && !isPreparingModel {
-            prepareModel(selectedModel)
+        // A load still marked in flight never finished: iOS terminated the app
+        // part-way through it. This used to be answered by loading the same
+        // model again at launch, which on a device that cannot hold it meant
+        // being terminated at the same point on every single open, with no
+        // chance to pick something smaller first.
+        if modelLoadInFlight {
+            crashedModelVariant = (WhisperModel(rawValue: modelLoadInFlightVariant) ?? selectedModel).rawValue
+            modelLoadInFlight = false
+            modelLoadInFlightVariant = ""
         }
+
+        guard downloadStatus[selectedModel] == true, !isModelLoaded, !isProcessing, !isPreparingModel else { return }
+
+        // Loading it is still one tap away; it just is not automatic any more.
+        if selectedModel.rawValue == crashedModelVariant {
+            showError(loadTerminatedNotice(for: selectedModel))
+            return
+        }
+        prepareModel(selectedModel)
+    }
+
+    private func loadTerminatedNotice(for model: WhisperModel) -> String {
+        let intro = "Whisper closed while \(model.displayName) was loading last time, so it hasn't been loaded automatically."
+        if model == .small {
+            return intro + "\n\nClosing other apps and then tapping Load usually gives it enough room."
+        }
+        return intro + """
+
+
+        \(model.displayName) can need more memory than iOS allows on some devices. \
+        Small (\(WhisperModel.small.sizeLabel)) is far lighter — choose it from the model menu, \
+        or tap Load to try \(model.displayName) again.
+        """
     }
     
     // MARK: - File Import
