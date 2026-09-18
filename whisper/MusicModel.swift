@@ -68,8 +68,7 @@ enum MusicModel: String, CaseIterable, Identifiable {
         case .stableAudio3Small:
             return .ready
         case .stableAudio3Medium:
-            return .weightsPublished(
-                note: "Uses the same pipeline as Small-Music with a larger DiT. Untested on iOS.")
+            return .ready
         case .magentaRealtime2:
             return .weightsPublished(
                 note: "Core ML graphs are published, but text prompting needs MusicCoCa, which runs on a Mac today.")
@@ -84,16 +83,17 @@ enum MusicModel: String, CaseIterable, Identifiable {
 
     var isRunnable: Bool { availability == .ready }
 
-    /// Hugging Face repository the weights come from, where one is published.
-    var weightsRepo: String? {
-        switch self {
-        case .stableAudio3Small, .stableAudio3Medium:
-            return "stabilityai/stable-audio-3-optimized"
-        case .magentaRealtime2:
-            return "mattmireles/magenta-realtime-2-iphone"
-        case .aceStep15, .musicGenSmall:
-            return nil
-        }
+    /// Where the app fetches weights from.
+    ///
+    /// Not Hugging Face directly: MLX reads `safetensors` and the published
+    /// files are `npz`, so they are converted first and the conversions are
+    /// hosted as a release. Stability's licence and a notice of exactly what
+    /// was changed sit alongside them.
+    static let releaseBase =
+        "https://github.com/yu314-coder/WhisperKit/releases/download/sa3-small-weights-v1"
+
+    func downloadURL(for fileName: String) -> URL? {
+        URL(string: "\(Self.releaseBase)/\(fileName)")
     }
 
     /// Files to fetch from `weightsRepo`, with their published sizes in MB.
@@ -102,15 +102,24 @@ enum MusicModel: String, CaseIterable, Identifiable {
     /// bundle: a shared text encoder, a diffusion transformer that differs per
     /// variant, and the SAME decoder that turns latents into audio.
     var weightFiles: [(path: String, megabytes: Int)] {
+        // Text encoder, decoder and tokenizer are shared by both Stable Audio
+        // variants, so switching between them only fetches a different DiT.
+        let shared: [(String, Int)] = [
+            ("t5gemma_f16.safetensors", 567),
+            ("same_s_decoder_f32.safetensors", 218),
+            ("t5gemma_tokenizer.model", 4),
+        ]
         switch self {
         case .stableAudio3Small:
-            return [("MLX/t5gemma_f16.npz", 567),
-                    ("MLX/dit_sm-music_f16.npz", 919),
-                    ("MLX/same_s_decoder_f32.npz", 218)]
+            return (shared + [("dit_sm-music_f16.safetensors", 919),
+                              ("sa3_conditioner_sm-music.safetensors", 1)])
+                .map { (path: $0.0, megabytes: $0.1) }
         case .stableAudio3Medium:
-            return [("MLX/t5gemma_f16.npz", 567),
-                    ("MLX/dit_medium_f16.npz", 2910),
-                    ("MLX/same_s_decoder_f32.npz", 218)]
+            // Two shards: one 2.9 GB file exceeds the 2 GB release-asset cap.
+            return (shared + [("dit_medium_f16.part1.safetensors", 1454),
+                              ("dit_medium_f16.part2.safetensors", 1454),
+                              ("sa3_conditioner_medium.safetensors", 1)])
+                .map { (path: $0.0, megabytes: $0.1) }
         case .magentaRealtime2, .aceStep15, .musicGenSmall:
             return []
         }
