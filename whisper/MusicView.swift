@@ -105,18 +105,36 @@ struct MusicView: View {
         }
     }
 
+    /// 384 seconds is the model's own ceiling, not an arbitrary cap: the
+    /// conditioner clamps seconds_total to 0...384, so asking for more would
+    /// feed it out-of-range conditioning and still produce 6:24 of audio.
+    /// Memory does not grow with length — a 6-minute render peaks no higher
+    /// than a 10-second one — but time does, roughly in proportion.
+    private static let maximumSeconds: Double = 384
+
     private var lengthCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 StudioLabel(text: "Length")
                 Spacer()
-                Text("\(Int(durationSeconds))s")
+                Text(Self.formatLength(durationSeconds))
                     .font(Studio.mono(11, weight: .semibold))
                     .foregroundColor(Studio.accent)
             }
-            Slider(value: $durationSeconds, in: 5...30, step: 1)
+            Slider(value: $durationSeconds, in: 5...Self.maximumSeconds, step: 1)
                 .tint(Studio.accent)
+            HStack {
+                Text("5s").font(Studio.mono(9)).foregroundColor(Studio.mute)
+                Spacer()
+                Text("6:24 max").font(Studio.mono(9)).foregroundColor(Studio.mute)
+            }
         }
+    }
+
+    private static func formatLength(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        guard total >= 60 else { return "\(total)s" }
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     /// What the selected model can actually do on this device, stated plainly.
