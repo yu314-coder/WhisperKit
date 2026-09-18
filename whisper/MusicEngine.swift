@@ -11,7 +11,8 @@ import Observation
 final class MusicEngine {
     enum Phase: Equatable {
         case idle
-        case downloading(file: String, completed: Int, total: Int, fraction: Double)
+        case downloading(file: String, completed: Int, total: Int,
+                         fraction: Double, received: Int64, expected: Int64)
         case generating(stage: String)
         case failed(String)
     }
@@ -83,34 +84,35 @@ final class MusicEngine {
             guard let remote = model.downloadURL(for: file.path) else {
                 throw MusicEngineError.badURL(file.path)
             }
-            phase = .downloading(file: file.path, completed: index, total: files.count, fraction: 0)
+            phase = .downloading(file: file.path, completed: index, total: files.count,
+                                 fraction: 0, received: 0, expected: file.bytes)
             let destination = directory.appendingPathComponent(file.path)
-            try await download(from: remote, to: destination) { [weak self] fraction in
-                self?.phase = .downloading(file: file.path, completed: index,
-                                           total: files.count, fraction: fraction)
+
+            let report: @Sendable (MusicDownloader.Progress) -> Void = { [weak self] progress in
+                Task { @MainActor in
+                    self?.phase = .downloading(file: file.path, completed: index,
+                                               total: files.count, fraction: progress.fraction,
+                                               received: progress.received, expected: progress.expected)
+                }
+            }
+
+            do {
+                _ = try await MusicDownloader().download(from: remote, to: destination, onProgress: report)
+            } catch let error as MusicDownloaderError {
+                // One retry, resuming from where it stopped when the server
+                // gave us the means to. A dropped connection part-way through
+                // a gigabyte should not start again from zero.
+                try Task.checkCancellation()
+                _ = try await MusicDownloader().download(from: remote, to: destination,
+                                                         resumeData: error.resumeData,
+                                                         onProgress: report)
+            }
+
+            let written = (try? destination.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            guard Int64(written) == file.bytes else {
+                throw MusicEngineError.wrongSize(file.path, Int64(written), file.bytes)
             }
         }
-    }
-
-    /// A download task rather than an `AsyncBytes` loop.
-    ///
-    /// Iterating `URLSession.bytes` yields one `UInt8` at a time, which for a
-    /// 919 MB weight file is 919 million iterations — far too slow to finish.
-    /// `URLSessionDownloadTask` streams to disk itself and reports progress.
-    private func download(from remote: URL, to destination: URL,
-                          onProgress: @escaping @MainActor (Double) -> Void) async throws {
-        let delegate = DownloadProgressDelegate { fraction in
-            Task { @MainActor in onProgress(fraction) }
-        }
-        let (temporary, response) = try await URLSession.shared.download(from: remote, delegate: delegate)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            try? FileManager.default.removeItem(at: temporary)
-            throw MusicEngineError.http((response as? HTTPURLResponse)?.statusCode ?? -1)
-        }
-        // Moved into place only once complete, so an interrupted transfer can
-        // never be mistaken for a finished model on the next launch.
-        try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.moveItem(at: temporary, to: destination)
     }
 
     // MARK: - Generation
@@ -150,12 +152,15 @@ enum MusicEngineError: LocalizedError {
     case http(Int)
     case notImplemented(String)
     case simulatorUnsupported
+    case wrongSize(String, Int64, Int64)
 
     var errorDescription: String? {
         switch self {
         case .badURL(let name):     return "No download address for \(name)."
         case .http(let code):       return "Download failed (HTTP \(code))."
         case .notImplemented(let n): return "\(n) has no on-device implementation yet."
+        case .wrongSize(let name, let got, let want):
+            return "\(name) downloaded \(got) bytes, expected \(want). The file is incomplete."
         case .simulatorUnsupported:
             return """
             Music generation needs a real device. The Simulator's Metal \
@@ -174,37 +179,5 @@ extension MusicModel {
         case .stableAudio3Medium: return .medium
         default:                  return nil
         }
-    }
-}
-
-
-/// Reports download progress. `URLSession`'s async `download(from:delegate:)`
-/// has no progress callback of its own; this supplies one.
-private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    private let onProgress: @Sendable (Double) -> Void
-    private var lastReported = 0.0
-
-    init(onProgress: @escaping @Sendable (Double) -> Void) {
-        self.onProgress = onProgress
-    }
-
-    func urlSession(_ session: URLSession,
-                    downloadTask: URLSessionDownloadTask,
-                    didWriteData bytesWritten: Int64,
-                    totalBytesWritten: Int64,
-                    totalBytesExpectedToWrite: Int64) {
-        guard totalBytesExpectedToWrite > 0 else { return }
-        let fraction = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        // A gigabyte file would otherwise post thousands of updates a second.
-        guard fraction - lastReported >= 0.005 else { return }
-        lastReported = fraction
-        onProgress(fraction)
-    }
-
-    func urlSession(_ session: URLSession,
-                    downloadTask: URLSessionDownloadTask,
-                    didFinishDownloadingTo location: URL) {
-        // The async form of `download` takes ownership of the file; nothing to
-        // do here, but the delegate protocol requires the method.
     }
 }

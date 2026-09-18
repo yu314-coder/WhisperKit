@@ -142,13 +142,24 @@ struct MusicView: View {
     private var progressCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             switch engine.phase {
-            case .downloading(let file, let completed, let total, let fraction):
-                StudioLabel(text: "Downloading \(completed + 1) of \(total)")
+            case .downloading(let file, let completed, let total, let fraction, let received, let expected):
+                HStack {
+                    StudioLabel(text: "Downloading \(completed + 1) of \(total)")
+                    Spacer()
+                    // A number, not just a bar: a stalled download and a slow
+                    // one look identical otherwise.
+                    Text("\(Int(fraction * 100))%")
+                        .font(Studio.mono(11, weight: .semibold))
+                        .foregroundColor(Studio.accent)
+                }
                 ProgressView(value: fraction).tint(Studio.accent)
-                Text(file)
-                    .font(Studio.mono(10))
-                    .foregroundColor(Studio.mute)
-                    .lineLimit(1)
+                HStack {
+                    Text(file).font(Studio.mono(10)).foregroundColor(Studio.mute).lineLimit(1)
+                    Spacer()
+                    Text("\(received / 1_000_000) / \(expected / 1_000_000) MB")
+                        .font(Studio.mono(10))
+                        .foregroundColor(Studio.mute)
+                }
             case .generating(let stage):
                 StudioLabel(text: "Generating")
                 ProgressView().tint(Studio.accent)
