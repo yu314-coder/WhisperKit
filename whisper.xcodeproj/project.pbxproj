@@ -167,6 +167,10 @@
 			name = whisper;
 			packageProductDependencies = (
 				4B2061772E9282B400055AFA /* WhisperKit */,
+				4B3001772E9282B400055AFA /* MLX */,
+				4B3001782E9282B400055AFA /* MLXNN */,
+				4B3001792E9282B400055AFA /* MLXRandom */,
+				4B30017A2E9282B400055AFA /* MLXFast */,
 			);
 			productName = whisper;
 			productReference = 4B2061672E92821800055AFA /* whisper.app */;
@@ -223,6 +227,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				4B2061762E9282B400055AFA /* XCRemoteSwiftPackageReference "WhisperKit" */,
+				4B3001762E9282B400055AFA /* XCRemoteSwiftPackageReference "mlx-swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 4B2061682E92821800055AFA /* Products */;
@@ -568,6 +573,14 @@
 				minimumVersion = 1.1.0;
 			};
 		};
+		4B3001762E9282B400055AFA /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.31.6;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -575,6 +588,26 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 4B2061762E9282B400055AFA /* XCRemoteSwiftPackageReference "WhisperKit" */;
 			productName = WhisperKit;
+		};
+		4B3001772E9282B400055AFA /* MLX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4B3001762E9282B400055AFA /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLX;
+		};
+		4B3001782E9282B400055AFA /* MLXNN */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4B3001762E9282B400055AFA /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLXNN;
+		};
+		4B3001792E9282B400055AFA /* MLXRandom */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4B3001762E9282B400055AFA /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLXRandom;
+		};
+		4B30017A2E9282B400055AFA /* MLXFast */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4B3001762E9282B400055AFA /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLXFast;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

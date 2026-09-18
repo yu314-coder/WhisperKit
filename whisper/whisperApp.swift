@@ -63,8 +63,22 @@ struct whisperApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
         }
         .modelContainer(sharedModelContainer)
+    }
+}
+
+/// Transcription and music generation are separate enough to be separate
+/// tabs: they share the library and the audio stack, but nothing on screen.
+struct RootView: View {
+    var body: some View {
+        TabView {
+            ContentView()
+                .tabItem { Label("Transcribe", systemImage: "waveform") }
+            MusicView()
+                .tabItem { Label("Music", systemImage: "music.note") }
+        }
+        .tint(Studio.accent)
     }
 }
