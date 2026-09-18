@@ -203,6 +203,8 @@ struct MusicView: View {
                 noteRow(icon: "wrench.and.screwdriver", tint: Studio.mute, text: note)
             case .licenceRestricted(let note):
                 noteRow(icon: "hand.raised", tint: Studio.mute, text: note)
+            case .needsMoreMemory(let note):
+                noteRow(icon: "memorychip", tint: Studio.hot, text: note)
             }
         }
     }
@@ -390,6 +392,7 @@ struct MusicModelPicker: View {
                 case .weightsPublished:    chip("UNTESTED", tint: Studio.hot)
                 case .needsConversion:     chip("NEEDS CONVERSION", tint: Studio.mute)
                 case .licenceRestricted:   chip("LICENCE", tint: Studio.mute)
+                case .needsMoreMemory:     chip("NEEDS MORE RAM", tint: Studio.hot)
                 }
                 chip(model.engine == .coreML ? "CORE ML" : "MLX", tint: Studio.mute)
             }

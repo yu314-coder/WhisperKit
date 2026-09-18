@@ -63,6 +63,25 @@ enum MusicModel: String, CaseIterable, Identifiable {
         case needsConversion(note: String)
         /// Ported and working, but the weights may not be distributed here.
         case licenceRestricted(note: String)
+        /// Runs, but not on a device with this much memory.
+        case needsMoreMemory(note: String)
+    }
+
+    /// Physical memory this model needs, in gigabytes.
+    ///
+    /// Measured, not guessed: Medium peaks at 3.5 GB generating, which an 8 GB
+    /// iPad Air cannot survive — iOS killed it mid-generation in testing. A
+    /// 12 GB device has the headroom. Small peaks near 1.8 GB and runs
+    /// anywhere.
+    var minimumPhysicalMemoryGB: Double {
+        switch self {
+        case .stableAudio3Medium: return 10
+        default:                  return 0
+        }
+    }
+
+    static var physicalMemoryGB: Double {
+        Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
     }
 
     var availability: Availability {
@@ -70,6 +89,10 @@ enum MusicModel: String, CaseIterable, Identifiable {
         case .stableAudio3Small:
             return .ready
         case .stableAudio3Medium:
+            guard Self.physicalMemoryGB >= minimumPhysicalMemoryGB else {
+                return .needsMoreMemory(
+                    note: String(format: "Medium peaks around 3.5 GB while generating, which is more than iOS allows an app on a %.0f GB device — it is killed part-way. Small runs comfortably here.", Self.physicalMemoryGB))
+            }
             return .ready
         case .magentaRealtime2:
             return .weightsPublished(
