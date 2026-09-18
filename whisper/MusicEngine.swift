@@ -24,6 +24,15 @@ final class MusicEngine {
     private let pipeline = StableAudioPipeline()
     private var work: Task<Void, Never>?
 
+    /// The message from a failed run, if the last attempt failed. The view
+    /// needs this to decide whether to show the progress area at all: a
+    /// failure leaves `isBusy` false and `lastResult` nil, so without it the
+    /// explanation had nowhere to appear and the button just reset itself.
+    var failureMessage: String? {
+        if case .failed(let message) = phase { return message }
+        return nil
+    }
+
     var isBusy: Bool {
         switch phase {
         case .idle, .failed: return false
@@ -65,9 +74,7 @@ final class MusicEngine {
         let missing = files.enumerated().filter { _, file in
             let url = directory.appendingPathComponent(file.path)
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            // Sizes are approximate megabytes, so allow a margin rather than
-            // demanding an exact match.
-            return Int64(size) < Int64(Double(file.megabytes) * 900_000)
+            return Int64(size) != file.bytes
         }
         guard !missing.isEmpty else { return }
 
@@ -85,46 +92,25 @@ final class MusicEngine {
         }
     }
 
+    /// A download task rather than an `AsyncBytes` loop.
+    ///
+    /// Iterating `URLSession.bytes` yields one `UInt8` at a time, which for a
+    /// 919 MB weight file is 919 million iterations — far too slow to finish.
+    /// `URLSessionDownloadTask` streams to disk itself and reports progress.
     private func download(from remote: URL, to destination: URL,
                           onProgress: @escaping @MainActor (Double) -> Void) async throws {
-        let (stream, response) = try await URLSession.shared.bytes(from: remote)
+        let delegate = DownloadProgressDelegate { fraction in
+            Task { @MainActor in onProgress(fraction) }
+        }
+        let (temporary, response) = try await URLSession.shared.download(from: remote, delegate: delegate)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            try? FileManager.default.removeItem(at: temporary)
             throw MusicEngineError.http((response as? HTTPURLResponse)?.statusCode ?? -1)
         }
-        let expected = response.expectedContentLength
-
-        // Written to a partial file and moved into place at the end, so an
-        // interrupted download never looks like a complete one.
-        let partial = destination.appendingPathExtension("partial")
-        FileManager.default.createFile(atPath: partial.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: partial)
-        defer { try? handle.close() }
-
-        var buffer = Data()
-        buffer.reserveCapacity(1 << 20)
-        var received: Int64 = 0
-        var lastReported = 0.0
-
-        for try await byte in stream {
-            buffer.append(byte)
-            if buffer.count >= (1 << 20) {
-                try handle.write(contentsOf: buffer)
-                received += Int64(buffer.count)
-                buffer.removeAll(keepingCapacity: true)
-                if expected > 0 {
-                    let fraction = Double(received) / Double(expected)
-                    if fraction - lastReported >= 0.01 {
-                        lastReported = fraction
-                        onProgress(fraction)
-                    }
-                }
-                try Task.checkCancellation()
-            }
-        }
-        if !buffer.isEmpty { try handle.write(contentsOf: buffer) }
-        try handle.close()
+        // Moved into place only once complete, so an interrupted transfer can
+        // never be mistaken for a finished model on the next launch.
         try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.moveItem(at: partial, to: destination)
+        try FileManager.default.moveItem(at: temporary, to: destination)
     }
 
     // MARK: - Generation
@@ -133,6 +119,14 @@ final class MusicEngine {
         guard let kind = model.stableAudioKind else {
             throw MusicEngineError.notImplemented(model.displayName)
         }
+        // MLX asks the Metal device for its architecture and the Simulator's
+        // MTLSimDevice returns null, which MLX turns straight into a
+        // std::string — strlen(NULL), a hard crash inside the library before
+        // any of our code runs. Downloading is worth testing here; generating
+        // is not, so refuse it with an explanation instead of segfaulting.
+        #if targetEnvironment(simulator)
+        throw MusicEngineError.simulatorUnsupported
+        #else
         phase = .generating(stage: "Starting")
         let result = try await pipeline.generate(
             model: kind,
@@ -147,6 +141,7 @@ final class MusicEngine {
         lastDuration = Double(result.duration)
         elapsedMilliseconds = Int(result.elapsedSeconds * 1000)
         phase = .idle
+        #endif
     }
 }
 
@@ -154,12 +149,19 @@ enum MusicEngineError: LocalizedError {
     case badURL(String)
     case http(Int)
     case notImplemented(String)
+    case simulatorUnsupported
 
     var errorDescription: String? {
         switch self {
         case .badURL(let name):     return "No download address for \(name)."
         case .http(let code):       return "Download failed (HTTP \(code))."
         case .notImplemented(let n): return "\(n) has no on-device implementation yet."
+        case .simulatorUnsupported:
+            return """
+            Music generation needs a real device. The Simulator's Metal \
+            device cannot run MLX. Downloading models works here; generating \
+            does not.
+            """
         }
     }
 }
@@ -172,5 +174,37 @@ extension MusicModel {
         case .stableAudio3Medium: return .medium
         default:                  return nil
         }
+    }
+}
+
+
+/// Reports download progress. `URLSession`'s async `download(from:delegate:)`
+/// has no progress callback of its own; this supplies one.
+private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let onProgress: @Sendable (Double) -> Void
+    private var lastReported = 0.0
+
+    init(onProgress: @escaping @Sendable (Double) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func urlSession(_ session: URLSession,
+                    downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let fraction = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        // A gigabyte file would otherwise post thousands of updates a second.
+        guard fraction - lastReported >= 0.005 else { return }
+        lastReported = fraction
+        onProgress(fraction)
+    }
+
+    func urlSession(_ session: URLSession,
+                    downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        // The async form of `download` takes ownership of the file; nothing to
+        // do here, but the delegate protocol requires the method.
     }
 }

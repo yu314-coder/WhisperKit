@@ -101,38 +101,45 @@ enum MusicModel: String, CaseIterable, Identifiable {
     /// Stable Audio 3 is assembled from four separate graphs rather than one
     /// bundle: a shared text encoder, a diffusion transformer that differs per
     /// variant, and the SAME decoder that turns latents into audio.
-    var weightFiles: [(path: String, megabytes: Int)] {
+    /// Exact byte counts, read from the hosted assets.
+    ///
+    /// Exact rather than rounded because these double as the "already
+    /// downloaded" test. An earlier version compared against megabytes scaled
+    /// by 900,000, which made the 792,862-byte conditioner look perpetually
+    /// missing and re-downloaded it on every run.
+    var weightFiles: [(path: String, bytes: Int64)] {
         // Text encoder, decoder and tokenizer are shared by both Stable Audio
         // variants, so switching between them only fetches a different DiT.
-        let shared: [(String, Int)] = [
-            ("t5gemma_f16.safetensors", 567),
-            ("same_s_decoder_f32.safetensors", 218),
-            ("t5gemma_tokenizer.model", 4),
+        let shared: [(String, Int64)] = [
+            ("t5gemma_f16.safetensors", 567_416_533),
+            ("same_s_decoder_f32.safetensors", 218_069_578),
+            ("t5gemma_tokenizer.model", 4_241_003),
         ]
         switch self {
         case .stableAudio3Small:
-            return (shared + [("dit_sm-music_f16.safetensors", 919),
-                              ("sa3_conditioner_sm-music.safetensors", 1)])
-                .map { (path: $0.0, megabytes: $0.1) }
+            return (shared + [("dit_sm-music_f16.safetensors", 919_104_895),
+                              ("sa3_conditioner_sm-music.safetensors", 792_862)])
+                .map { (path: $0.0, bytes: $0.1) }
         case .stableAudio3Medium:
             // Two shards: one 2.9 GB file exceeds the 2 GB release-asset cap.
-            return (shared + [("dit_medium_f16.part1.safetensors", 1454),
-                              ("dit_medium_f16.part2.safetensors", 1454),
-                              ("sa3_conditioner_medium.safetensors", 1)])
-                .map { (path: $0.0, megabytes: $0.1) }
+            return (shared + [("dit_medium_f16.part1.safetensors", 1_445_754_371),
+                              ("dit_medium_f16.part2.safetensors", 1_461_439_235),
+                              ("sa3_conditioner_medium.safetensors", 792_862)])
+                .map { (path: $0.0, bytes: $0.1) }
         case .magentaRealtime2, .aceStep15, .musicGenSmall:
             return []
         }
     }
 
-    var downloadMegabytes: Int { weightFiles.reduce(0) { $0 + $1.megabytes } }
+    var downloadBytes: Int64 { weightFiles.reduce(0) { $0 + $1.bytes } }
 
     /// Download size for the picker. Unconverted models have no honest number
     /// to show, because nothing has been built to measure.
     var sizeLabel: String {
-        let mb = downloadMegabytes
-        guard mb > 0 else { return "—" }
-        return mb >= 1000 ? String(format: "%.1f GB", Double(mb) / 1000) : "\(mb) MB"
+        let bytes = downloadBytes
+        guard bytes > 0 else { return "—" }
+        let mb = Double(bytes) / 1_000_000
+        return mb >= 1000 ? String(format: "%.1f GB", mb / 1000) : String(format: "%.0f MB", mb)
     }
 
     var tagline: String {

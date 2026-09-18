@@ -24,7 +24,9 @@ struct MusicView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     promptCard
                     lengthCard
-                    if engine.isBusy || engine.lastResult != nil { progressCard }
+                    if engine.isBusy || engine.lastResult != nil || engine.failureMessage != nil {
+                        progressCard
+                    }
                     statusCard
                 }
                 .padding(18)
