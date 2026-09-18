@@ -35,6 +35,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         }
         return true
     }
+
+    /// iOS relaunched (or resumed) the app because a background weight
+    /// download finished. The session's delegate does the work; this hands
+    /// back the completion handler it must call once every event has been
+    /// delivered, or the system counts the wake-up as a hang.
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        WeightDownloadService.backgroundCompletionHandler = completionHandler
+        _ = WeightDownloadService.shared   // recreates the session to receive events
+    }
 }
 
 @main

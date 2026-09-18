@@ -88,24 +88,22 @@ final class MusicEngine {
                                  fraction: 0, received: 0, expected: file.bytes)
             let destination = directory.appendingPathComponent(file.path)
 
-            let report: @Sendable (MusicDownloader.Progress) -> Void = { [weak self] progress in
+            // Progress arrives from the shared background session, so it is
+            // pointed at the file being fetched right now.
+            WeightDownloadService.shared.onProgress = { [weak self] progress in
                 Task { @MainActor in
                     self?.phase = .downloading(file: file.path, completed: index,
                                                total: files.count, fraction: progress.fraction,
                                                received: progress.received, expected: progress.expected)
                 }
             }
-
             do {
-                _ = try await MusicDownloader().download(from: remote, to: destination, onProgress: report)
-            } catch let error as MusicDownloaderError {
-                // One retry, resuming from where it stopped when the server
-                // gave us the means to. A dropped connection part-way through
-                // a gigabyte should not start again from zero.
+                try await WeightDownloadService.shared.download(from: remote, to: destination)
+            } catch {
+                // A background transfer that fails is retried once; iOS has
+                // already done its own reconnection attempts by this point.
                 try Task.checkCancellation()
-                _ = try await MusicDownloader().download(from: remote, to: destination,
-                                                         resumeData: error.resumeData,
-                                                         onProgress: report)
+                try await WeightDownloadService.shared.download(from: remote, to: destination)
             }
 
             let written = (try? destination.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
