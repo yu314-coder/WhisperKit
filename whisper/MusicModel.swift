@@ -61,6 +61,8 @@ enum MusicModel: String, CaseIterable, Identifiable {
         case weightsPublished(note: String)
         /// No Apple-silicon build exists; the weights must be converted first.
         case needsConversion(note: String)
+        /// Ported and working, but the weights may not be distributed here.
+        case licenceRestricted(note: String)
     }
 
     var availability: Availability {
@@ -73,8 +75,11 @@ enum MusicModel: String, CaseIterable, Identifiable {
             return .weightsPublished(
                 note: "Core ML graphs are published, but text prompting needs MusicCoCa, which runs on a Mac today.")
         case .musicGenSmall:
-            return .needsConversion(
-                note: "An MLX port exists for macOS in Python. Needs porting to MLX Swift, with an EnCodec decoder.")
+            // Ported and verified against the reference (187 of 188 tokens
+            // identical), but Meta releases the weights under CC-BY-NC 4.0 —
+            // non-commercial only — so they are not shipped with this app.
+            return .licenceRestricted(
+                note: "Ported and working, but Meta licenses these weights for non-commercial use only (CC-BY-NC 4.0), so they are not distributed with this app.")
         case .aceStep15:
             return .needsConversion(
                 note: "Desktop GPU builds only. Needs an MLX conversion and a Swift implementation of the planner and renderer.")
