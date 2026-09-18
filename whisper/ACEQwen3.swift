@@ -1,3 +1,6 @@
+//  Ported from ACE-Step 1.5 (https://huggingface.co/ACE-Step/Ace-Step1.5), MIT.
+//  Verified against the PyTorch reference stage by stage; see ports/README.md.
+
 import Foundation
 import MLX
 

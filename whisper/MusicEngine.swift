@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import SwiftData
+import MLX
 
 /// Fetches model weights and runs generation for the Music tab.
 ///
@@ -72,7 +73,7 @@ final class MusicEngine {
     // MARK: - Weights
 
     private func fetchWeightsIfNeeded(for model: MusicModel) async throws {
-        let directory = SA3Weights.directory
+        let directory = model.weightsDirectory
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let files = model.weightFiles
@@ -132,6 +133,10 @@ final class MusicEngine {
         throw MusicEngineError.simulatorUnsupported
         #else
         phase = .generating(stage: "Starting")
+        if model == .aceStep15 {
+            try await runACEStep(prompt: prompt, seconds: seconds, model: model)
+            return
+        }
         let result = try await pipeline.generate(
             model: kind,
             prompt: prompt,
@@ -151,6 +156,63 @@ final class MusicEngine {
 }
 
 extension MusicEngine {
+    /// ACE-Step's text-only path: prompt to 48 kHz stereo in eight steps.
+    ///
+    /// Loaded per run rather than cached. The weights are 3.7 GB and a stale
+    /// copy held between generations is the difference between fitting and
+    /// being killed — the same failure Stable Audio 3 Medium hits on an 8 GB
+    /// device.
+    func runACEStep(prompt: String, seconds: Double, model: MusicModel) async throws {
+        let directory = model.weightsDirectory
+        func url(_ name: String) -> URL { directory.appendingPathComponent(name) }
+
+        phase = .generating(stage: "Loading weights")
+        let ditWeights = try loadArrays(url: url("ace_dit_q8.part1.safetensors"), stream: .cpu)
+            .merging(try loadArrays(url: url("ace_dit_q8.part2.safetensors"), stream: .cpu)) { a, _ in a }
+        let qwenWeights = try loadArrays(url: url("ace_qwen_q8.safetensors"), stream: .cpu)
+        let vaeWeights = try loadArrays(url: url("ace_vae_f16.safetensors"), stream: .cpu)
+        let silence = try loadArrays(url: url("ace_silence.safetensors"), stream: .cpu)["silence"]!
+
+        phase = .generating(stage: "Reading prompt")
+        let tokenizer = try ACETokenizer(vocabularyURL: url("ace_vocab.json"),
+                                         mergesURL: url("ace_merges.txt"))
+        let ids = tokenizer.encode(prompt)
+        guard !ids.isEmpty else { throw MusicEngineError.notImplemented("empty prompt") }
+
+        var encoder = ACEQwen3(weights: qwenWeights, config: .embedder, prefix: "")
+        encoder.quantizationBits = 8
+        var dit = ACEDiT(weights: ditWeights)
+        dit.quantizationBits = 8
+
+        let projectionKey = "encoder.text_projector.weight"
+        let projection = ditWeights[projectionKey] ?? dequantized(
+            ditWeights["\(projectionKey).wq"]!,
+            scales: ditWeights["\(projectionKey).scales"]!,
+            biases: ditWeights["\(projectionKey).biases"]!,
+            groupSize: 64, bits: 8)
+
+        let acePipeline = ACEPipeline(textEncoder: encoder, dit: dit,
+                                      vae: ACEVAE(weights: vaeWeights),
+                                      silence: silence, textProjection: projection)
+        let started = Date()
+        let audio = acePipeline.generate(tokenIDs: MLXArray(ids, [1, ids.count]),
+                                         seconds: seconds) { step, total in
+            Task { @MainActor [weak self] in
+                self?.phase = .generating(stage: "Step \(step) of \(total)")
+            }
+        }
+        eval(audio)
+
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acestep-\(Int(Date().timeIntervalSince1970)).wav")
+        try ACEWAVWriter.write(audio, to: destination)
+        lastResult = destination
+        lastDuration = seconds
+        elapsedMilliseconds = Int(Date().timeIntervalSince(started) * 1000)
+        save(destination, model: model, prompt: prompt, seconds: seconds)
+        phase = .idle
+    }
+
     /// Moves the finished clip out of the temporary directory into the app's
     /// audio folder and records it, so it survives the app being closed.
     /// A failure here must not lose the generated audio, so `lastResult` keeps

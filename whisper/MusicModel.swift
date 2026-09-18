@@ -104,8 +104,10 @@ enum MusicModel: String, CaseIterable, Identifiable {
             return .licenceRestricted(
                 note: "Ported and working, but Meta licenses these weights for non-commercial use only (CC-BY-NC 4.0), so they are not distributed with this app.")
         case .aceStep15:
-            return .needsConversion(
-                note: "Desktop GPU builds only. Needs an MLX conversion and a Swift implementation of the planner and renderer.")
+            // Quantized to int8 and stripped to the text-only path, this peaks
+            // around 1.8 GB — far below Medium, which 8 GB devices cannot
+            // survive. Measured on a Mac; untested on device.
+            return .ready
         }
     }
 
@@ -117,11 +119,32 @@ enum MusicModel: String, CaseIterable, Identifiable {
     /// files are `npz`, so they are converted first and the conversions are
     /// hosted as a release. Stability's licence and a notice of exactly what
     /// was changed sit alongside them.
-    static let releaseBase =
-        "https://github.com/yu314-coder/WhisperKit/releases/download/sa3-small-weights-v1"
+    private static let releaseRoot =
+        "https://github.com/yu314-coder/WhisperKit/releases/download"
+
+    /// Each model family has its own release, so they can be re-cut
+    /// independently.
+    var releaseTag: String {
+        switch self {
+        case .aceStep15: return "acestep-int8-v1"
+        default:         return "sa3-small-weights-v1"
+        }
+    }
+
+    /// Weights live in their own folder per family; switching models does not
+    /// disturb another family's download.
+    var weightsDirectory: URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let folder: String
+        switch self {
+        case .aceStep15: folder = "MusicModels/ace-step"
+        default:         folder = "MusicModels/stable-audio-3"
+        }
+        return documents.appendingPathComponent(folder, isDirectory: true)
+    }
 
     func downloadURL(for fileName: String) -> URL? {
-        URL(string: "\(Self.releaseBase)/\(fileName)")
+        URL(string: "\(Self.releaseRoot)/\(releaseTag)/\(fileName)")
     }
 
     /// Files to fetch from `weightsRepo`, with their published sizes in MB.
@@ -154,7 +177,18 @@ enum MusicModel: String, CaseIterable, Identifiable {
                               ("dit_medium_f16.part2.safetensors", 1_461_439_235),
                               ("sa3_conditioner_medium.safetensors", 792_862)])
                 .map { (path: $0.0, bytes: $0.1) }
-        case .magentaRealtime2, .aceStep15, .musicGenSmall:
+        case .aceStep15:
+            // int8 projections, fp16 elsewhere. The DiT is sharded because
+            // 2.69 GB exceeds the 2 GB cap on a release asset.
+            return [("ace_dit_q8.part1.safetensors", 1_265_350_530),
+                    ("ace_dit_q8.part2.safetensors", 1_429_400_896),
+                    ("ace_qwen_q8.safetensors", 670_383_070),
+                    ("ace_vae_f16.safetensors", 337_352_796),
+                    ("ace_silence.safetensors", 192_101),
+                    ("ace_vocab.json", 2_776_833),
+                    ("ace_merges.txt", 1_671_853)]
+                .map { (path: $0.0, bytes: $0.1) }
+        case .magentaRealtime2, .musicGenSmall:
             return []
         }
     }
