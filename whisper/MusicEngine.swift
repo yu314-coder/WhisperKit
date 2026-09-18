@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftData
 
 /// Fetches model weights and runs generation for the Music tab.
 ///
@@ -24,6 +25,9 @@ final class MusicEngine {
 
     private let pipeline = StableAudioPipeline()
     private var work: Task<Void, Never>?
+
+    /// Set by the view so a finished clip can be filed in the library.
+    var modelContext: ModelContext?
 
     /// The message from a failed run, if the last attempt failed. The view
     /// needs this to decide whether to show the progress area at all: a
@@ -140,8 +144,36 @@ final class MusicEngine {
         lastResult = result.url
         lastDuration = Double(result.duration)
         elapsedMilliseconds = Int(result.elapsedSeconds * 1000)
+        save(result.url, model: model, prompt: prompt, seconds: Double(result.duration))
         phase = .idle
         #endif
+    }
+}
+
+extension MusicEngine {
+    /// Moves the finished clip out of the temporary directory into the app's
+    /// audio folder and records it, so it survives the app being closed.
+    /// A failure here must not lose the generated audio, so `lastResult` keeps
+    /// pointing at whatever the caller can still play.
+    func save(_ url: URL, model: MusicModel, prompt: String, seconds: Double) {
+        guard let modelContext else { return }
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let name = "Music_\(Int(Date().timeIntervalSince1970)).wav"
+            let relative = try AudioFiles.saveAudio(from: url, suggestedName: name, movingSource: true)
+            let stored = AudioFiles.urlForRelativePath(relative)
+            let envelope = AudioConverter.peakEnvelope(of: stored, bucketCount: 120)
+            let clip = SavedMusic(prompt: trimmed.isEmpty ? "Untitled" : trimmed,
+                                  duration: seconds,
+                                  modelName: model.displayName,
+                                  audioFilePath: relative,
+                                  waveform: envelope?.buckets)
+            modelContext.insert(clip)
+            try modelContext.save()
+            lastResult = stored
+        } catch {
+            print("Could not file generated clip: \(error)")
+        }
     }
 }
 

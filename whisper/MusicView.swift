@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import AVFoundation
 
 /// The Music tab: a prompt, a model, and a generated clip.
@@ -13,8 +14,12 @@ struct MusicView: View {
     @State private var showModelPicker = false
     @State private var durationSeconds: Double = 10
     @State private var engine = MusicEngine()
+    @State private var showLibrary = false
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \SavedMusic.createdAt, order: .reverse) private var clips: [SavedMusic]
     @State private var player: AVAudioPlayer?
     @State private var isPlaying = false
+    @State private var playingClipID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,15 +33,20 @@ struct MusicView: View {
                         progressCard
                     }
                     statusCard
+                    if !clips.isEmpty { recentSection }
                 }
                 .padding(18)
             }
             generateBar
         }
         .background(Studio.bg.ignoresSafeArea())
+        .onAppear { engine.modelContext = modelContext }
         .sheet(isPresented: $showModelPicker) {
             MusicModelPicker(selected: $selectedModel)
                 .presentationSizing(.page)
+        }
+        .sheet(isPresented: $showLibrary) {
+            MusicLibraryView().presentationSizing(.page)
         }
     }
 
@@ -68,9 +78,50 @@ struct MusicView: View {
                 .overlay(Capsule().strokeBorder(Studio.rule, lineWidth: 0.5))
             }
             .buttonStyle(PressableButtonStyle())
+
+            Button { showLibrary = true } label: {
+                Image(systemName: "music.note.list")
+                    .font(.system(size: 16))
+                    .foregroundColor(Studio.ink.opacity(0.75))
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(PressableButtonStyle())
+            .padding(.leading, 8)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
+    }
+
+    /// The last few clips, so a generated piece is one tap away rather than
+    /// behind a sheet.
+    private var recentSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                StudioLabel(text: "Generated")
+                Spacer()
+                Button { showLibrary = true } label: {
+                    Text("All \(clips.count) \u{2192}")
+                        .font(Studio.mono(9, weight: .semibold))
+                        .foregroundColor(Studio.accent)
+                }
+            }
+            ForEach(clips.prefix(3)) { clip in
+                MusicRow(clip: clip, isPlaying: playingClipID == clip.id) { toggleClip(clip) }
+            }
+        }
+    }
+
+    private func toggleClip(_ clip: SavedMusic) {
+        if playingClipID == clip.id {
+            player?.stop(); playingClipID = nil; return
+        }
+        guard let url = clip.audioURL, FileManager.default.fileExists(atPath: url.path) else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        player = try? AVAudioPlayer(contentsOf: url)
+        player?.play()
+        playingClipID = clip.id
+        isPlaying = false
     }
 
     // MARK: - Cards

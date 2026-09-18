@@ -53,7 +53,7 @@ struct whisperApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var sharedModelContainer: ModelContainer = {
-        let schema = Schema([SavedTranscript.self, SavedSegment.self])
+        let schema = Schema([SavedTranscript.self, SavedSegment.self, SavedMusic.self])
         let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
             return try ModelContainer(for: schema, configurations: [config])
