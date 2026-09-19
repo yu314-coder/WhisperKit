@@ -23,6 +23,7 @@ struct MusicView: View {
     @State private var player: AVAudioPlayer?
     @State private var isPlaying = false
     @State private var playingClipID: UUID?
+    @State private var memory = MusicMemoryMonitor()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,6 +36,11 @@ struct MusicView: View {
                     lengthCard
                     if engine.isBusy || engine.lastResult != nil || engine.failureMessage != nil {
                         progressCard
+                    }
+                    // Shown while working and kept afterwards, so the peak a
+                    // run reached is still readable once it finishes.
+                    if engine.isBusy || memory.peakMB > 0 {
+                        MusicMemoryGauge(monitor: memory)
                     }
                     statusCard
                     if !clips.isEmpty { recentSection }
@@ -55,6 +61,10 @@ struct MusicView: View {
             }
         }
         .onAppear { engine.modelContext = modelContext }
+        .onDisappear { memory.stop() }
+        .onChange(of: engine.isBusy) { _, busy in
+            if !busy { memory.stop() }
+        }
         .sheet(isPresented: $showModelPicker) {
             MusicModelPicker(selected: $selectedModel)
                 .presentationSizing(.page)
@@ -375,6 +385,10 @@ struct MusicView: View {
                 } else {
                     isPlaying = false
                     player?.stop()
+                    // Started here rather than from a change in `isBusy`: a run
+                    // that fails immediately never lets the view observe the
+                    // busy state, and the gauge would never appear.
+                    memory.start()
                     engine.generate(model: selectedModel, prompt: prompt,
                                     lyrics: selectedModel.supportsLyrics ? lyrics : "",
                                     seconds: durationSeconds)
