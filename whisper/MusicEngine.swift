@@ -54,14 +54,15 @@ final class MusicEngine {
 
     /// Downloads whatever is missing, then generates. Both phases report into
     /// `phase` so the view can show one continuous progress story.
-    func generate(model: MusicModel, prompt: String, seconds: Double) {
+    func generate(model: MusicModel, prompt: String, lyrics: String = "", seconds: Double) {
         guard !isBusy else { return }
         work = Task { [weak self] in
             guard let self else { return }
             do {
                 try await self.fetchWeightsIfNeeded(for: model)
                 try Task.checkCancellation()
-                try await self.runGeneration(model: model, prompt: prompt, seconds: seconds)
+                try await self.runGeneration(model: model, prompt: prompt,
+                                             lyrics: lyrics, seconds: seconds)
             } catch is CancellationError {
                 self.phase = .idle
             } catch {
@@ -120,7 +121,8 @@ final class MusicEngine {
 
     // MARK: - Generation
 
-    private func runGeneration(model: MusicModel, prompt: String, seconds: Double) async throws {
+    private func runGeneration(model: MusicModel, prompt: String,
+                               lyrics: String, seconds: Double) async throws {
         guard let kind = model.stableAudioKind else {
             throw MusicEngineError.notImplemented(model.displayName)
         }
@@ -134,7 +136,7 @@ final class MusicEngine {
         #else
         phase = .generating(stage: "Starting")
         if model == .aceStep15 {
-            try await runACEStep(prompt: prompt, seconds: seconds, model: model)
+            try await runACEStep(prompt: prompt, lyrics: lyrics, seconds: seconds, model: model)
             return
         }
         let result = try await pipeline.generate(
@@ -162,7 +164,7 @@ extension MusicEngine {
     /// copy held between generations is the difference between fitting and
     /// being killed — the same failure Stable Audio 3 Medium hits on an 8 GB
     /// device.
-    func runACEStep(prompt: String, seconds: Double, model: MusicModel) async throws {
+    func runACEStep(prompt: String, lyrics: String, seconds: Double, model: MusicModel) async throws {
         let directory = model.weightsDirectory
         func url(_ name: String) -> URL { directory.appendingPathComponent(name) }
 
@@ -178,6 +180,8 @@ extension MusicEngine {
                                          mergesURL: url("ace_merges.txt"))
         let ids = tokenizer.encode(prompt)
         guard !ids.isEmpty else { throw MusicEngineError.notImplemented("empty prompt") }
+        let trimmedLyrics = lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lyricIDs = trimmedLyrics.isEmpty ? nil : tokenizer.encode(trimmedLyrics)
 
         var encoder = ACEQwen3(weights: qwenWeights, config: .embedder, prefix: "")
         encoder.quantizationBits = 8
@@ -196,6 +200,7 @@ extension MusicEngine {
                                       silence: silence, textProjection: projection)
         let started = Date()
         let audio = acePipeline.generate(tokenIDs: MLXArray(ids, [1, ids.count]),
+                                         lyricIDs: lyricIDs.map { MLXArray($0, [1, $0.count]) },
                                          seconds: seconds) { step, total in
             Task { @MainActor [weak self] in
                 self?.phase = .generating(stage: "Step \(step) of \(total)")

@@ -10,6 +10,9 @@ import AVFoundation
 /// that actually settles these questions — a run on real hardware.
 struct MusicView: View {
     @State private var prompt: String = ""
+    @State private var lyrics: String = ""
+    @FocusState private var promptFocused: Bool
+    @FocusState private var lyricsFocused: Bool
     @State private var selectedModel: MusicModel = .stableAudio3Small
     @State private var showModelPicker = false
     @State private var durationSeconds: Double = 10
@@ -28,6 +31,7 @@ struct MusicView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     promptCard
+                    if selectedModel.supportsLyrics { lyricsCard }
                     lengthCard
                     if engine.isBusy || engine.lastResult != nil || engine.failureMessage != nil {
                         progressCard
@@ -37,9 +41,19 @@ struct MusicView: View {
                 }
                 .padding(18)
             }
+            // Two text fields now sit above Generate, and the keyboard covers
+            // it. Dragging the content dismisses the keyboard, and the
+            // toolbar gives a deliberate way out.
+            .scrollDismissesKeyboard(.interactively)
             generateBar
         }
         .background(Studio.bg.ignoresSafeArea())
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { promptFocused = false; lyricsFocused = false }
+            }
+        }
         .onAppear { engine.modelContext = modelContext }
         .sheet(isPresented: $showModelPicker) {
             MusicModelPicker(selected: $selectedModel)
@@ -139,6 +153,7 @@ struct MusicView: View {
                         .allowsHitTesting(false)
                 }
                 TextEditor(text: $prompt)
+                    .focused($promptFocused)
                     .font(Studio.text(15))
                     .foregroundColor(Studio.ink)
                     .scrollContentBackground(.hidden)
@@ -153,6 +168,41 @@ struct MusicView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(Studio.rule, lineWidth: 0.5)
             )
+        }
+    }
+
+    /// Lyrics are conditioning, not a caption: the model sings them, so an
+    /// empty box means an instrumental rather than a missing field.
+    private var lyricsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                StudioLabel(text: "Lyrics")
+                Spacer()
+                Text("optional")
+                    .font(Studio.mono(9))
+                    .foregroundColor(Studio.mute)
+            }
+            ZStack(alignment: .topLeading) {
+                if lyrics.isEmpty {
+                    Text("Leave empty for an instrumental, or write a verse to be sung")
+                        .font(Studio.text(14))
+                        .foregroundColor(Studio.mute.opacity(0.7))
+                        .padding(.top, 8)
+                        .padding(.horizontal, 12)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: $lyrics)
+                    .focused($lyricsFocused)
+                    .font(Studio.text(14))
+                    .foregroundColor(Studio.ink)
+                    .scrollContentBackground(.hidden)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .frame(minHeight: 78)
+            }
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Studio.sunk))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Studio.rule, lineWidth: 0.5))
         }
     }
 
@@ -325,7 +375,9 @@ struct MusicView: View {
                 } else {
                     isPlaying = false
                     player?.stop()
-                    engine.generate(model: selectedModel, prompt: prompt, seconds: durationSeconds)
+                    engine.generate(model: selectedModel, prompt: prompt,
+                                    lyrics: selectedModel.supportsLyrics ? lyrics : "",
+                                    seconds: durationSeconds)
                 }
             } label: {
                 Text(buttonTitle)

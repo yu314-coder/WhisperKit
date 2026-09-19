@@ -115,6 +115,9 @@ enum MusicModel: String, CaseIterable, Identifiable {
 
     var isRunnable: Bool { availability == .ready }
 
+    /// Only ACE-Step has a lyric encoder; the others take a prompt alone.
+    var supportsLyrics: Bool { self == .aceStep15 }
+
     /// Shown under a runnable model when it is close to what the device can
     /// hold. ACE-Step peaks at 2.7 GB for a prompt and 3.2 GB with lyrics;
     /// Medium needs 3.5 GB and is killed on 8 GB hardware, so the margin here
