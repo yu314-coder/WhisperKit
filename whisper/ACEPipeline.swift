@@ -33,14 +33,24 @@ struct ACEPipeline {
     /// encoder.text_projector.weight — 1024 to 2048, no bias.
     let textProjection: MLXArray
 
+    /// - Parameter lyricIDs: tokens for lyrics to sing, or nil for an
+    ///   instrumental. They run through the same text encoder as the prompt
+    ///   and then a dedicated 8-layer lyric encoder.
     func generate(tokenIDs: MLXArray,
+                  lyricIDs: MLXArray? = nil,
                   seconds: Double,
                   seed: UInt64 = 1234,
                   onStep: ((Int, Int) -> Void)? = nil) -> MLXArray {
         let frames = min(Int(seconds * Double(Self.framesPerSecond)), silence.dim(1))
 
         let text = textEncoder(inputIDs: tokenIDs)
-        let conditioning = matmul(text, textProjection.asType(.float32).T)
+        let lyricEmbeddings = lyricIDs.map { textEncoder(inputIDs: $0) }
+        var packer = ACEConditioning(weights: dit.weights)
+        packer.quantizationBits = dit.quantizationBits
+        let (conditioning, _) = packer.encode(text: text,
+                                              textProjection: textProjection,
+                                              lyric: lyricEmbeddings,
+                                              reference: nil)
 
         // Context is the silence bed plus an all-zero chunk mask: nothing is
         // being continued or covered, so every frame is free to be generated.

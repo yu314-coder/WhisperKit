@@ -104,14 +104,25 @@ enum MusicModel: String, CaseIterable, Identifiable {
             return .licenceRestricted(
                 note: "Ported and working, but Meta licenses these weights for non-commercial use only (CC-BY-NC 4.0), so they are not distributed with this app.")
         case .aceStep15:
-            // Quantized to int8 and stripped to the text-only path, this peaks
-            // around 1.8 GB — far below Medium, which 8 GB devices cannot
-            // survive. Measured on a Mac; untested on device.
+            // Measured on a Mac: 2.7 GB for a prompt alone, 3.2 GB with
+            // lyrics. Medium needs 3.5 GB and an 8 GB iPad cannot survive it,
+            // so this sits just under a line known to fail. Offered anyway
+            // rather than fenced off — it may well fit where Medium does not
+            // — but the note says plainly what the risk is.
             return .ready
         }
     }
 
     var isRunnable: Bool { availability == .ready }
+
+    /// Shown under a runnable model when it is close to what the device can
+    /// hold. ACE-Step peaks at 2.7 GB for a prompt and 3.2 GB with lyrics;
+    /// Medium needs 3.5 GB and is killed on 8 GB hardware, so the margin here
+    /// is real but thin.
+    var memoryCaution: String? {
+        guard self == .aceStep15, Self.physicalMemoryGB < 10 else { return nil }
+        return String(format: "Peaks near 3 GB while generating. On this %.0f GB device that is close to the limit, so it may be stopped part-way — more likely with lyrics than without.", Self.physicalMemoryGB)
+    }
 
     /// Where the app fetches weights from.
     ///

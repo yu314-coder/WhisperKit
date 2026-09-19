@@ -197,6 +197,9 @@ struct MusicView: View {
                 noteRow(icon: "checkmark.circle",
                         tint: Studio.ok,
                         text: "\(selectedModel.displayName) runs on this device. Weights are \(selectedModel.sizeLabel), downloaded once.")
+                if let caution = selectedModel.memoryCaution {
+                    noteRow(icon: "exclamationmark.triangle", tint: Studio.hot, text: caution)
+                }
             case .weightsPublished(let note):
                 noteRow(icon: "exclamationmark.triangle", tint: Studio.hot, text: note)
             case .needsConversion(let note):
