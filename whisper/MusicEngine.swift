@@ -123,9 +123,6 @@ final class MusicEngine {
 
     private func runGeneration(model: MusicModel, prompt: String,
                                lyrics: String, seconds: Double) async throws {
-        guard let kind = model.stableAudioKind else {
-            throw MusicEngineError.notImplemented(model.displayName)
-        }
         // MLX asks the Metal device for its architecture and the Simulator's
         // MTLSimDevice returns null, which MLX turns straight into a
         // std::string — strlen(NULL), a hard crash inside the library before
@@ -135,9 +132,16 @@ final class MusicEngine {
         throw MusicEngineError.simulatorUnsupported
         #else
         phase = .generating(stage: "Starting")
+
+        // Routing comes before the Stable Audio check, not after it.
+        // ACE-Step has no Stable Audio variant, so asking for one first threw
+        // "no on-device implementation" and never reached this branch.
         if model == .aceStep15 {
             try await runACEStep(prompt: prompt, lyrics: lyrics, seconds: seconds, model: model)
             return
+        }
+        guard let kind = model.stableAudioKind else {
+            throw MusicEngineError.notImplemented(model.displayName)
         }
         let result = try await pipeline.generate(
             model: kind,
