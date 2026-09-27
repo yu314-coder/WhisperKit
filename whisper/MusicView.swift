@@ -60,7 +60,16 @@ struct MusicView: View {
                 Button("Done") { promptFocused = false; lyricsFocused = false }
             }
         }
-        .onAppear { engine.modelContext = modelContext }
+        .onAppear {
+            engine.modelContext = modelContext
+            #if DEBUG
+            // For testing downloads in the Simulator, whose keyboard covers
+            // Generate: launch with `-MusicPromptPreset "…"`.
+            if prompt.isEmpty, let preset = UserDefaults.standard.string(forKey: "MusicPromptPreset") {
+                prompt = preset
+            }
+            #endif
+        }
         .onDisappear { memory.stop() }
         .onChange(of: engine.isBusy) { _, busy in
             if !busy { memory.stop() }
@@ -292,6 +301,12 @@ struct MusicView: View {
         }
     }
 
+    private static func formatBytes(_ bytes: Int64) -> String {
+        bytes >= 1_000_000_000
+            ? String(format: "%.2f GB", Double(bytes) / 1_000_000_000)
+            : "\(bytes / 1_000_000) MB"
+    }
+
     private static func formatLength(_ seconds: Double) -> String {
         let total = Int(seconds.rounded())
         guard total >= 60 else { return "\(total)s" }
@@ -321,7 +336,9 @@ struct MusicView: View {
             switch engine.phase {
             case .downloading(let file, let completed, let total, let fraction, let received, let expected):
                 HStack {
-                    StudioLabel(text: "Downloading \(completed + 1) of \(total)")
+                    // What is missing, not everything the model uses: files
+                    // already here from an earlier version are not counted.
+                    StudioLabel(text: total == 1 ? "Downloading" : "Downloading file \(completed + 1) of \(total)")
                     Spacer()
                     // A number, not just a bar: a stalled download and a slow
                     // one look identical otherwise.
@@ -333,12 +350,12 @@ struct MusicView: View {
                 HStack {
                     Text(file).font(Studio.mono(10)).foregroundColor(Studio.mute).lineLimit(1)
                     Spacer()
-                    Text("\(received / 1_000_000) / \(expected / 1_000_000) MB")
+                    Text("\(Self.formatBytes(received)) / \(Self.formatBytes(expected))")
                         .font(Studio.mono(10))
                         .foregroundColor(Studio.mute)
                 }
                 if let note = engine.downloadNote {
-                    Label(note, systemImage: "arrow.clockwise")
+                    Label(note, systemImage: note == "Unpacking" ? "shippingbox" : "arrow.clockwise")
                         .font(Studio.mono(10))
                         .foregroundColor(Studio.hot)
                 }

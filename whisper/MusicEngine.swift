@@ -89,17 +89,19 @@ final class MusicEngine {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         removeSupersededFiles(in: directory)
 
-        let files = model.weightFiles
-        let missing = files.enumerated().filter { _, file in
-            let url = directory.appendingPathComponent(file.path)
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            return Int64(size) != file.bytes
-        }
+        // Only what is missing is counted and fetched: a model already in
+        // place from an earlier version is not downloaded again, and the
+        // progress shown is for this download alone, by bytes across all of
+        // it rather than file by file.
+        let missing = model.weightFiles.filter { !$0.isPresent(in: directory) }
         guard !missing.isEmpty else { return }
+        let totalBytes = missing.reduce(Int64(0)) { $0 + $1.bytes }
 
         // Checked up front: a download that fills the disk does not fail, it
-        // stalls, with nothing on screen to say why.
-        let needed = missing.reduce(Int64(0)) { $0 + $1.element.bytes } + 300_000_000
+        // stalls, with nothing on screen to say why. An archive and what it
+        // unpacks to are both on disk for a moment.
+        let needed = missing.reduce(Int64(0)) { $0 + $1.bytes + ($1.isArchive ? $1.installedBytes : 0) }
+            + 300_000_000
         if let available = (try? directory.resourceValues(
                 forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage,
            available < needed {
@@ -114,17 +116,20 @@ final class MusicEngine {
             currentDownload = nil
         }
 
-        for (index, file) in missing {
+        var done: Int64 = 0
+        for (index, file) in missing.enumerated() {
             try Task.checkCancellation()
             guard let remote = model.downloadURL(for: file) else {
                 throw MusicEngineError.badURL(file.path)
             }
-            phase = .downloading(file: file.path, completed: index, total: files.count,
-                                 fraction: 0, received: 0, expected: file.bytes)
+            let before = done
+            func show(_ received: Int64) {
+                phase = .downloading(file: file.path, completed: index, total: missing.count,
+                                     fraction: Double(before + received) / Double(max(totalBytes, 1)),
+                                     received: before + received, expected: totalBytes)
+            }
+            show(0)
             let destination = directory.appendingPathComponent(file.path)
-            // The Neural Engine models are folders of files.
-            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
-                                                    withIntermediateDirectories: true)
 
             // Progress arrives from the shared background session, so it is
             // pointed at the file being fetched right now.
@@ -136,9 +141,7 @@ final class MusicEngine {
             WeightDownloadService.shared.onProgress = { [weak self] progress in
                 Task { @MainActor in
                     guard let self, self.currentDownload == file.path else { return }
-                    self.phase = .downloading(file: file.path, completed: index,
-                                              total: files.count, fraction: progress.fraction,
-                                              received: progress.received, expected: progress.expected)
+                    show(progress.received)
                 }
             }
             // Interruptions are resumed inside the service; what reaches here
@@ -149,6 +152,16 @@ final class MusicEngine {
             guard Int64(written) == file.bytes else {
                 throw MusicEngineError.wrongSize(file.path, Int64(written), file.bytes)
             }
+            if file.isArchive {
+                downloadNote = "Unpacking"
+                try await Task.detached(priority: .userInitiated) {
+                    try WeightArchive.unpack(destination, into: directory)
+                }.value
+                try? FileManager.default.removeItem(at: destination)
+                downloadNote = nil
+                guard file.isPresent(in: directory) else { throw MusicEngineError.unpackFailed(file.path) }
+            }
+            done += file.bytes
         }
     }
 
@@ -281,12 +294,15 @@ enum MusicEngineError: LocalizedError {
     case notImplemented(String)
     case simulatorUnsupported
     case wrongSize(String, Int64, Int64)
+    case unpackFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .badURL(let name):     return "No download address for \(name)."
         case .http(let code):       return "Download failed (HTTP \(code))."
         case .notImplemented(let n): return "\(n) has no on-device implementation yet."
+        case .unpackFailed(let name):
+            return "\(name) downloaded but did not unpack completely. Generate again to fetch it anew."
         case .wrongSize(let name, let got, let want):
             return "\(name) downloaded \(got) bytes, expected \(want). The file is incomplete."
         case .simulatorUnsupported:

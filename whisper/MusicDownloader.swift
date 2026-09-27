@@ -1,4 +1,6 @@
+import AppleArchive
 import Foundation
+import System
 import UIKit
 
 /// Downloads model weights, continuing while the app is in the background.
@@ -300,5 +302,41 @@ enum MusicDownloaderError: LocalizedError {
             return String(format: "Not enough storage: this needs %.1f GB free and %.1f GB is available. Free some space and try again — finished files are kept.",
                           Double(needed) / 1e9, Double(available) / 1e9)
         }
+    }
+}
+
+/// Apple Archives the weights are published in, unpacked where they land.
+enum WeightArchive {
+    enum Failure: LocalizedError {
+        case unreadable(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unreadable(let name): return "Could not unpack \(name)."
+            }
+        }
+    }
+
+    /// Unpacks `archive` into `directory`, creating what it holds there.
+    static func unpack(_ archive: URL, into directory: URL) throws {
+        let name = archive.lastPathComponent
+        guard let file = ArchiveByteStream.fileStream(path: FilePath(archive.path), mode: .readOnly,
+                                                      options: [], permissions: FilePermissions(rawValue: 0o644))
+        else { throw Failure.unreadable(name) }
+        defer { try? file.close() }
+        guard let decompressed = ArchiveByteStream.decompressionStream(readingFrom: file) else {
+            throw Failure.unreadable(name)
+        }
+        defer { try? decompressed.close() }
+        guard let decoded = ArchiveStream.decodeStream(readingFrom: decompressed) else {
+            throw Failure.unreadable(name)
+        }
+        defer { try? decoded.close() }
+        guard let extractor = ArchiveStream.extractStream(extractingTo: FilePath(directory.path),
+                                                          flags: [.ignoreOperationNotPermitted]) else {
+            throw Failure.unreadable(name)
+        }
+        defer { try? extractor.close() }
+        _ = try ArchiveStream.process(readingFrom: decoded, writingTo: extractor)
     }
 }

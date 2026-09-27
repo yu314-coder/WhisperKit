@@ -108,12 +108,29 @@ enum MusicModel: String, CaseIterable, Identifiable {
     }
 
     struct WeightFile {
-        /// Relative to `weightsDirectory`; may name a subfolder.
+        /// Relative to `weightsDirectory`.
         let path: String
         /// Exact, read from the hosted asset: it doubles as the "already
         /// downloaded" test.
         let bytes: Int64
         let release: String
+        /// For an Apple Archive: the files it unpacks to, relative to
+        /// `weightsDirectory`, with their sizes. The archive is deleted once
+        /// unpacked, so these are what show it was downloaded.
+        var contents: [(path: String, bytes: Int64)] = []
+
+        var isArchive: Bool { !contents.isEmpty }
+
+        /// Bytes on disk once in place.
+        var installedBytes: Int64 { isArchive ? contents.reduce(0) { $0 + $1.bytes } : bytes }
+
+        func isPresent(in directory: URL) -> Bool {
+            func size(_ path: String) -> Int64 {
+                Int64((try? directory.appendingPathComponent(path)
+                    .resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1)
+            }
+            return isArchive ? contents.allSatisfy { size($0.path) == $0.bytes } : size(path) == bytes
+        }
     }
 
     /// The files every version reads: from release acestep-v2, and the
@@ -139,29 +156,27 @@ enum MusicModel: String, CaseIterable, Identifiable {
         }
     }
 
-    static let neuralEngineFiles: [WeightFile] = ([
-        ("ace_dit_ane_c0.mlmodelc/model.mil", 8_262_897),
-        ("ace_dit_ane_c0.mlmodelc/coremldata.bin", 8_186),
-        ("ace_dit_ane_c0.mlmodelc/metadata.json", 122_343),
-        ("ace_dit_ane_c0.mlmodelc/analytics/coremldata.bin", 243),
-        ("ace_dit_ane_c0.mlmodelc/weights/weight.bin", 755_752_384),
-        ("ace_dit_ane_c1.mlmodelc/model.mil", 8_266_317),
-        ("ace_dit_ane_c1.mlmodelc/coremldata.bin", 8_186),
-        ("ace_dit_ane_c1.mlmodelc/metadata.json", 122_343),
-        ("ace_dit_ane_c1.mlmodelc/analytics/coremldata.bin", 243),
-        ("ace_dit_ane_c1.mlmodelc/weights/weight.bin", 755_752_384),
-        ("ace_dit_ane_c2.mlmodelc/model.mil", 8_273_157),
-        ("ace_dit_ane_c2.mlmodelc/coremldata.bin", 8_186),
-        ("ace_dit_ane_c2.mlmodelc/metadata.json", 122_343),
-        ("ace_dit_ane_c2.mlmodelc/analytics/coremldata.bin", 243),
-        ("ace_dit_ane_c2.mlmodelc/weights/weight.bin", 755_752_384),
-        ("ace_dit_ane_c3.mlmodelc/model.mil", 8_273_157),
-        ("ace_dit_ane_c3.mlmodelc/coremldata.bin", 8_186),
-        ("ace_dit_ane_c3.mlmodelc/metadata.json", 122_343),
-        ("ace_dit_ane_c3.mlmodelc/analytics/coremldata.bin", 243),
-        ("ace_dit_ane_c3.mlmodelc/weights/weight.bin", 755_752_384),
-        ("ace_dit_outer_f16.safetensors", 130_111_616),
-    ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v3") }
+    /// The 2B transformer's four Core ML programs, one archive each — a
+    /// compiled model is a folder of five files, and publishing them loose
+    /// made a first download 30 files long. Compressed, too: 589 MB each
+    /// against 764 MB unpacked.
+    static let neuralEngineFiles: [WeightFile] = [
+        chunk(0, archive: 588_836_198, program: 8_262_897),
+        chunk(1, archive: 588_541_722, program: 8_266_317),
+        chunk(2, archive: 588_400_835, program: 8_273_157),
+        chunk(3, archive: 588_489_231, program: 8_273_157),
+        WeightFile(path: "ace_dit_outer_f16.safetensors", bytes: 130_111_616, release: "acestep-v3"),
+    ]
+
+    private static func chunk(_ index: Int, archive: Int64, program: Int64) -> WeightFile {
+        let folder = ACENeuralTransformer.chunkDirectory(index)
+        return WeightFile(path: "\(folder).aar", bytes: archive, release: "acestep-v3",
+                          contents: [("\(folder)/model.mil", program),
+                                     ("\(folder)/coremldata.bin", 8_186),
+                                     ("\(folder)/metadata.json", 122_343),
+                                     ("\(folder)/analytics/coremldata.bin", 243),
+                                     ("\(folder)/weights/weight.bin", 755_752_384)])
+    }
 
     static let xlFiles: [WeightFile] = ([
         ("ace_xl_decoder_q8.part1.safetensors", 1_895_498_560),
@@ -170,10 +185,8 @@ enum MusicModel: String, CaseIterable, Identifiable {
     ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v3") }
         + [WeightFile(path: "ace_xl_cond_f16.safetensors", bytes: 8_672_128, release: "acestep-v4")]
 
-    /// Release assets are flat, so a file in a subfolder is published with
-    /// its slashes as "__".
     func downloadURL(for file: WeightFile) -> URL? {
-        let asset = file.path.replacingOccurrences(of: "/", with: "__")
+        let asset = file.path
         #if DEBUG
         // For testing interrupted downloads against a local server:
         // launch with `-MusicWeightsRootOverride http://127.0.0.1:8765`.
@@ -194,7 +207,10 @@ enum MusicModel: String, CaseIterable, Identifiable {
     /// Top-level names under `weightsDirectory` that any version uses; the
     /// rest are left over from earlier builds.
     static var expectedTopLevelNames: Set<String> {
-        Set(allCases.flatMap { $0.weightFiles.map { String($0.path.split(separator: "/")[0]) } })
+        Set(allCases.flatMap { model in
+            model.weightFiles.flatMap { file in ([file.path] + file.contents.map(\.path)) }
+                .map { String($0.split(separator: "/")[0]) }
+        })
     }
 
     /// Stable Audio 3, which earlier builds offered, left 1.7 to 3.7 GB here.
