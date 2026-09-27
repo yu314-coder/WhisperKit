@@ -9,11 +9,12 @@ Output:
     ace_cond_f16            condition encoder, float16
     ace_hints_f16           FSQ codebook (float32) and detokenizer, float16
     ace_xl_cond_f16         the encoder tensors XL retrained, float16
+    ace_xl_decoder_f16.partN  the 4B XL transformer, float16 (8.1 GB)
 
 The planner runs in bfloat16, as upstream does: Qwen3's activations
-overflow float16. The two transformers are float16 already where they fit —
-the 2B on the Neural Engine — and XL's stays int8 (ace_xl_decoder_q8): at
-float16 it is 8.1 GB, more than an 8 GB device holds.
+overflow float16. The 2B transformer is float16 on the Neural Engine
+(convert_neural_engine.py); XL's is float16 here. At 8.1 GB it is more than
+an 8 GB device holds, so there it is read from storage as it runs.
 """
 import glob
 import os
@@ -53,6 +54,14 @@ def main(turbo, lm, xl, out):
         retrained.update({k: v.astype(mx.float16) for k, v in mx.load(path).items() if k in RETRAINED})
     assert sorted(retrained) == sorted(RETRAINED)
     save_aligned(f"{out}/ace_xl_cond_f16.safetensors", retrained)
+    del retrained
+
+    decoder = {}
+    for path in sorted(glob.glob(f"{xl}/*.safetensors")):
+        part = {k: v.astype(mx.float16) for k, v in mx.load(path).items() if k.startswith("decoder.")}
+        mx.eval(part)
+        decoder.update(part)
+    print("XL decoder parts:", save_parts(f"{out}/ace_xl_decoder_f16", decoder))
 
 
 if __name__ == "__main__":

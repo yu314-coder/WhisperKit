@@ -1516,8 +1516,8 @@ struct ContentView: View {
 
                             // Say it rather than silently doing something else.
                             if mode == .gpu,
-                               ComputeMode.gpuIsUnavailable(for: selectedModel, requested: .gpu) {
-                                Text("\(selectedModel.displayName) is too large for this iPhone's GPU — it will run on the Neural Engine instead.")
+                               ComputeMode.gpuMayFail(for: selectedModel, requested: .gpu) {
+                                Text("\(selectedModel.displayName) has closed the app on iPhone GPUs — it may not fit. The Neural Engine is the safe choice.")
                                     .font(.system(size: 11))
                                     .foregroundColor(Studio.hot)
                                     .multilineTextAlignment(.leading)
@@ -2047,10 +2047,10 @@ struct ContentView: View {
     /// Core ML specialises per compute-unit configuration, so a model prewarmed
     /// for the Neural Engine is *not* warm for the GPU. The mode belongs in the
     /// key, or switching would skip a prewarm that had never actually happened.
-    /// What `model` will actually run on, which differs from `computeMode`
-    /// wherever the GPU cannot host it.
+    /// What `model` will run on: the chosen mode. (It once differed where
+    /// an iPhone GPU could not host the model; that is now a warning.)
     func effectiveMode(for model: WhisperModel) -> ComputeMode {
-        ComputeMode.gpuIsUnavailable(for: model, requested: computeMode) ? .neuralEngine : computeMode
+        computeMode
     }
 
     private func prewarmKey(_ model: WhisperModel) -> String {

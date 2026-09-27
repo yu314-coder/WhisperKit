@@ -99,7 +99,7 @@ struct MusicView: View {
             Button { showModelPicker = true } label: {
                 HStack(spacing: 5) {
                     Circle()
-                        .fill(selectedModel.isRunnable ? Studio.ok : Studio.mute.opacity(0.5))
+                        .fill(selectedModel.memoryWarning == nil ? Studio.ok : Studio.hot)
                         .frame(width: 6, height: 6)
                     Text(selectedModel.displayName)
                         .font(Studio.mono(11))
@@ -317,13 +317,11 @@ struct MusicView: View {
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             StudioLabel(text: "Model")
-            switch selectedModel.availability {
-            case .ready:
-                noteRow(icon: "checkmark.circle",
-                        tint: Studio.ok,
-                        text: "\(selectedModel.displayName) runs on this device. Weights are \(selectedModel.sizeLabel), downloaded once; versions share most of them.")
-            case .needsMoreMemory(let note):
-                noteRow(icon: "memorychip", tint: Studio.hot, text: note)
+            noteRow(icon: "checkmark.circle",
+                    tint: Studio.ok,
+                    text: "\(selectedModel.displayName) runs on this device. Weights are \(selectedModel.sizeLabel), downloaded once; versions share most of them.")
+            if let warning = selectedModel.memoryWarning {
+                noteRow(icon: "memorychip", tint: Studio.hot, text: warning)
             }
         }
     }
@@ -430,13 +428,11 @@ struct MusicView: View {
 
     private var canGenerate: Bool {
         engine.isBusy
-            || (selectedModel.isRunnable && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var buttonTitle: String {
-        if engine.isBusy { return "Cancel" }
-        guard selectedModel.isRunnable else { return "\(selectedModel.displayName) needs more memory" }
-        return "Generate"
+        engine.isBusy ? "Cancel" : "Generate"
     }
 
     private var generateBar: some View {
@@ -520,10 +516,8 @@ struct MusicModelPicker: View {
 
             HStack(spacing: 7) {
                 chip(model.sizeLabel, tint: Studio.mute)
-                switch model.availability {
-                case .ready:           chip("RUNS ON DEVICE", tint: Studio.ok)
-                case .needsMoreMemory: chip("NEEDS 8 GB", tint: Studio.hot)
-                }
+                chip("RUNS ON DEVICE", tint: Studio.ok)
+                if model.memoryWarning != nil { chip("SLOWER HERE", tint: Studio.hot) }
                 chip(model.engineLabel, tint: Studio.mute)
             }
         }

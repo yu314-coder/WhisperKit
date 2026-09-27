@@ -56,45 +56,85 @@ enum StageMemory {
     }
 }
 
-/// Stereo 16-bit WAV, written as the decoder produces it.
+/// Stereo 16-bit WAV, written as the decoder produces it, peak-normalised.
 ///
 /// Streaming matters at length: six minutes of stereo float is 147 MB, and
 /// building it whole before writing — then again as Swift arrays, then again
 /// as `Data` — tripled that at the very end of a run that had already used
 /// the most memory it would.
+///
+/// The decoder's output runs past full scale on loud passages, and it was
+/// written clipped: every song peaked at exactly 0 dBFS, and a 1:52 one had
+/// 5,843 clipped samples, heard as crackle. Upstream scales every song so
+/// its peak sits at -1 dBFS (`normalize_audio`, on by default), which also
+/// brings quiet ones up. The peak is only known at the end, so samples go to
+/// a scratch file as float and are scaled into the WAV on `finish`.
 final class StreamingWAVWriter {
-    private let handle: FileHandle
+    static let peakDecibels: Float = -1
+
+    private let url: URL
+    private let scratchURL: URL
+    private let scratch: FileHandle
     private let expectedFrames: Int
+    private let sampleRate: Int
     private var writtenFrames = 0
+    private var peak: Float = 0
 
     init(url: URL, frames: Int, sampleRate: Int) throws {
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        handle = try FileHandle(forWritingTo: url)
-        expectedFrames = frames
+        self.url = url
+        self.expectedFrames = frames
+        self.sampleRate = sampleRate
+        scratchURL = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.deletingPathExtension().lastPathComponent).f32")
+        FileManager.default.createFile(atPath: scratchURL.path, contents: nil)
+        scratch = try FileHandle(forWritingTo: scratchURL)
+    }
 
-        var header = Data()
-        func string(_ s: String) { header.append(s.data(using: .ascii)!) }
-        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { header.append(contentsOf: $0) } }
-        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { header.append(contentsOf: $0) } }
-        string("RIFF"); u32(UInt32(36 + frames * 4)); string("WAVE")
-        string("fmt "); u32(16); u16(1); u16(2)
-        u32(UInt32(sampleRate)); u32(UInt32(sampleRate * 4)); u16(4); u16(16)
-        string("data"); u32(UInt32(frames * 4))
-        try handle.write(contentsOf: header)
+    deinit {
+        try? scratch.close()
+        try? FileManager.default.removeItem(at: scratchURL)
     }
 
     /// - Parameter audio: (1, samples, 2) — already interleaved, which is
     ///   exactly WAV's sample order.
     func append(_ audio: MLXArray) throws {
-        let pcm = (clip(audio, min: -1, max: 1) * 32767).asType(.int16)
-        let samples = pcm.asArray(Int16.self)
-        try samples.withUnsafeBytes { try handle.write(contentsOf: Data($0)) }
+        let samples = audio.asType(.float32)
+        peak = max(peak, abs(samples).max().item(Float.self))
+        try samples.asArray(Float.self).withUnsafeBytes { try scratch.write(contentsOf: Data($0)) }
         writtenFrames += audio.dim(1)
     }
 
     func finish() throws {
         precondition(writtenFrames == expectedFrames, "wrote \(writtenFrames) of \(expectedFrames) frames")
-        try handle.close()
+        try scratch.close()
+        // Silence stays silence rather than being blown up to full scale.
+        let gain = peak > 1e-6 ? pow(10, Self.peakDecibels / 20) / peak : 1
+
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let output = try FileHandle(forWritingTo: url)
+        defer { try? output.close() }
+        var header = Data()
+        func string(_ s: String) { header.append(s.data(using: .ascii)!) }
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { header.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { header.append(contentsOf: $0) } }
+        let frames = writtenFrames
+        string("RIFF"); u32(UInt32(36 + frames * 4)); string("WAVE")
+        string("fmt "); u32(16); u16(1); u16(2)
+        u32(UInt32(sampleRate)); u32(UInt32(sampleRate * 4)); u16(4); u16(16)
+        string("data"); u32(UInt32(frames * 4))
+        try output.write(contentsOf: header)
+
+        let input = try FileHandle(forReadingFrom: scratchURL)
+        defer { try? input.close() }
+        while let block = try input.read(upToCount: 1 << 22), !block.isEmpty {
+            let pcm: [Int16] = block.withUnsafeBytes { raw in
+                raw.bindMemory(to: Float.self).map { sample in
+                    Int16(max(-1, min(1, sample * gain)) * 32767)
+                }
+            }
+            try pcm.withUnsafeBytes { try output.write(contentsOf: Data($0)) }
+        }
+        try? FileManager.default.removeItem(at: scratchURL)
     }
 }
 

@@ -32,23 +32,21 @@ enum ComputeMode: String, CaseIterable, Identifiable {
         }
     }
 
-    /// The options to actually load with, which are not always the ones the
-    /// user picked.
+    /// The options to load with: the ones the user picked.
     ///
-    /// Turbo and the large models kill the app on iPhone in GPU mode, during
-    /// whatever happens to be running when the encoder's weights are resident.
-    /// Confirmed on device: the same model, same build, transcribes fine on
-    /// the Neural Engine, and fine over GPU on iPad. The encoder simply does
-    /// not fit a phone GPU's working set. Rather than offer a setting that
-    /// terminates the app, GPU quietly resolves to the Neural Engine there —
-    /// `gpuIsUnavailable(for:)` lets the UI say so.
+    /// Turbo and the large models have closed the app on iPhone in GPU mode —
+    /// the encoder does not fit a phone GPU's working set, while the same
+    /// model runs on the Neural Engine, and over the GPU on iPad. This used
+    /// to switch such a choice to the Neural Engine without asking. The
+    /// choice is now kept and `gpuMayFail(for:requested:)` warns beside it;
+    /// if a load is cut short anyway, the next launch does not retry it
+    /// (`crashedModelVariant`) and says why.
     func computeOptions(for model: ContentView.WhisperModel) -> ModelComputeOptions {
-        Self.gpuIsUnavailable(for: model, requested: self) ? Self.neuralEngine.computeOptions : computeOptions
+        computeOptions
     }
 
-    /// Whether the user asked for the GPU on a device that cannot host this
-    /// model there. Drives both the fallback and the explanation next to it.
-    static func gpuIsUnavailable(for model: ContentView.WhisperModel, requested: ComputeMode) -> Bool {
+    /// Whether the GPU is a risky choice for this model on this device.
+    static func gpuMayFail(for model: ContentView.WhisperModel, requested: ComputeMode) -> Bool {
         requested == .gpu
             && model.exceedsPhoneGPU
             && UIDevice.current.userInterfaceIdiom == .phone

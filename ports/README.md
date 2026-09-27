@@ -204,6 +204,25 @@ same output and speed; the 6:24 maximum peaks at 1.6 GB.
 stays float16: Qwen3's outlier channels made it the largest single source of
 drift at int8 (final latent 0.960 with it quantized, 0.983 without).
 
+**Against the official pipeline, run on the same Mac** (`generate_music` at
+its defaults: planner rewriting the caption, plan throughout, peak
+normalisation) on the seven prompts at 81 s:
+
+| | own prompt | margin | neighbours | abrupt | 15 s+ apart | silent tail |
+|---|---|---|---|---|---|---|
+| official, 2B | 0.556 | +0.061 | 0.877 | 30/182 | 0.716 | 6/7 |
+| app, 2B (Neural Engine) | 0.594 | +0.140 | 0.914 | 11/182 | 0.863 | 0/7 |
+| app, XL float16 | 0.608 | +0.125 | 0.916 | 12/182 | 0.870 | 0/7 |
+
+**XL** was checked against the official XL (bfloat16, on the Mac GPU) on
+the same inputs: packed conditioning cosine 0.999995; one velocity
+prediction 0.99918 at float16, 0.99878 at int8. It ships at float16.
+
+**Loudness.** The decoder's output runs past full scale on loud passages and
+was written clipped (every song peaked at 0 dBFS; 5,843 clipped samples in
+one 1:52 song). As upstream does by default, every song is now scaled to a
+-1 dBFS peak before it is written.
+
 **Versions.** Both share every file but the transformer:
 
 - *ACE-Step 1.5* runs the 2B transformer on the Neural Engine
@@ -216,7 +235,8 @@ drift at int8 (final latent 0.960 with it quantized, 0.983 without).
   in blocks of 128 queries against 384 keys. RMS norms run on a pre-scaled
   input so squaring cannot overflow float16.
 - *ACE-Step 1.5 XL* runs the 4B turbo transformer (32 layers, width 2,560)
-  on the GPU at int8 (`convert_large.py`). Of its 201 non-transformer tensors,
+  on the GPU at float16 (`convert_full.py`; the int8 set from
+  `convert_large.py` is superseded). Of its 201 non-transformer tensors,
   192 are bit-identical to the 2B's; the 9 it retrained ship as a 5 MB file
   laid over the 2B condition encoder.
 
