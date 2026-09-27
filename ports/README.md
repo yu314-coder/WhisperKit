@@ -74,6 +74,28 @@ seconds early. With it, four of four have sound to the last second.
 | Guidance pair batched vs separate | cosine 0.99997 |
 | Tokens to 25 Hz guide (FSQ + detokenizer) | cosine 0.999996 |
 
+**Following the prompt.** Scored with CLAP (laion/clap-htsat-unfused): 7
+prompts × 3 seeds, 30 s each, how well each clip matches its own prompt.
+
+| setting | clip matches own prompt best | similarity to own prompt | silent tail ≥ 3 s |
+|---|---|---|---|
+| plan followed throughout | 15/21 | 0.490 | 2/21 |
+| no planner | 17/21 | 0.559 | 15/21 |
+| plan for 2 of 8 steps | 18/21 | 0.582 | 13/21 |
+| **plan for 2 of 8, rendered 20% longer and cut** | **17/21** | **0.576** | **0/21** |
+
+The planner's tokens carry less of a description than the text does, so
+following them throughout filled the length but followed the words least.
+The structure is set in the first, noisiest steps; after two of eight the
+transformer continues as plain text-to-music (upstream's
+`audio_cover_strength`). The transformer shapes a whole piece to whatever
+window it renders, ending included, so the window is made longer than what
+is kept and the cut is faded. Stable Audio 3 Small scored 0.625 on the same
+prompts.
+
+**DCW**, upstream's default sampler correction for turbo models, is ported
+(Haar, closed form; latent matches the repository sampler at 0.9999985).
+
 Departures from upstream defaults, each deliberate:
 
 - **The caption is the user's.** Upstream lets the planner rewrite it; at its
@@ -82,8 +104,8 @@ Departures from upstream defaults, each deliberate:
   upstream's own switch for this.
 - **No planned silence.** The planner learned from recordings that end in
   silence and writes 5-15 s of it at the end of a requested length. The
-  silence token (35847, found by tokenizing the silence latent) is excluded
-  until the final second.
+  silence token (35847, found by tokenizing the silence latent) is excluded.
+- **Plan strength 0.25 and a longer render** — see above.
 - **Tempo, key and meter from the prompt** are written into the reasoning
   instead of sampled, as upstream does for its UI fields.
 - **Phase 1 without the 2,300-line state machine:** field names are forced in

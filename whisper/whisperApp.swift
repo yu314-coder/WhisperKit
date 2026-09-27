@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        _ = MusicRunMarker.wasInterrupted   // what the last run left, before anything changes it
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: Self.transcriptionTaskID,
             using: nil

@@ -107,3 +107,25 @@ final class CancellationFlag: @unchecked Sendable {
     var isCancelled: Bool { lock.withLock { cancelled } }
     func cancel() { lock.withLock { cancelled = true } }
 }
+
+/// Whether the previous run of the app was closed while generating music.
+///
+/// Set while a generation runs and cleared when it ends, so finding it set
+/// at launch means the app was closed mid-run. Read once, at launch, before
+/// anything can start a new run.
+enum MusicRunMarker {
+    private static let key = "musicGenerationInFlight"
+
+    static let wasInterrupted: Bool = {
+        let value = UserDefaults.standard.bool(forKey: key)
+        UserDefaults.standard.set(false, forKey: key)
+        return value
+    }()
+
+    static func begin() {
+        _ = wasInterrupted          // snapshot before overwriting
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    static func end() { UserDefaults.standard.set(false, forKey: key) }
+}

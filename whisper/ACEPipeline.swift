@@ -71,36 +71,91 @@ enum ACEPipeline {
     ///     noisy latent as what the result should follow.
     ///   - noise: the starting latent; drawn from `seed` when nil.
     /// - Returns: (1, frames, 64), the clean latent.
+    ///   - release: after this many steps, continue with `released` — the
+    ///     same prompt conditioned as plain text-to-music, over silence —
+    ///     instead of following the source. Upstream's audio_cover_strength.
     static func diffuse(dit: ACEDiT,
                         conditioning: MLXArray,
                         source: MLXArray,
                         frames: Int,
                         seed: UInt64,
                         noise: MLXArray? = nil,
+                        release: (afterStep: Int, conditioning: MLXArray, source: MLXArray)? = nil,
                         onStep: (Int, Int) throws -> Void = { _, _ in }) rethrows -> MLXArray {
         // Context is the source plus a chunk mask of ones: every frame is to
         // be generated. An earlier version sent zeros here — the value
         // meaning "keep this frame" — so the model was told to preserve the
         // silence it was meant to replace.
-        let bed = source[0..., 0 ..< frames, 0...].asType(.float32)
         let chunkMask = MLXArray.ones([1, frames, latentChannels], dtype: .float32)
-        let context = concatenated([bed, chunkMask], axis: -1)
+        func context(_ bed: MLXArray) -> MLXArray {
+            concatenated([bed[0..., 0 ..< frames, 0...].asType(.float32), chunkMask], axis: -1)
+        }
+        var guide = (conditioning: conditioning, context: context(source))
 
         var x = noise ?? MLXRandom.normal([1, frames, latentChannels], key: MLXRandom.key(seed))
-        eval(x, context)
+        eval(x, guide.context)
 
         for (index, t) in schedule.enumerated() {
-            let velocity = dit.forward(xt: x, context: context, encoder: conditioning, timestep: t)
+            if let release, index == release.afterStep {
+                guide = (release.conditioning, context(release.source))
+            }
+            let velocity = dit.forward(xt: x, context: guide.context, encoder: guide.conditioning, timestep: t)
+            let denoised = x - velocity * t
             if index == schedule.count - 1 {
                 // Last step solves for the clean latent rather than stepping.
-                x = x - velocity * t
+                x = denoised
             } else {
                 x = x - velocity * (t - schedule[index + 1])
+                x = waveletCorrection(x, denoised: denoised, t: t)
             }
             eval(x)
             try onStep(index + 1, schedule.count)
         }
         return x
+    }
+}
+
+extension ACEPipeline {
+    /// Whole seconds of silence at the end of a latent, read without
+    /// decoding it. Frames of music sit about 1.2 from the silence latent
+    /// (relative distance), frames of silence about 0.1; 0.3 separates them
+    /// with room to spare.
+    static func trailingSilence(_ latent: MLXArray, silence: MLXArray) -> Int {
+        let frames = latent.dim(1)
+        let bed = silence[0..., 0 ..< frames, 0...].asType(.float32)
+        let distance = sqrt(sum(square(latent - bed), axis: -1)) / sqrt(sum(square(bed), axis: -1))
+        let seconds = frames / framesPerSecond
+        guard seconds > 0 else { return 0 }
+        let perSecond = distance[0, 0 ..< seconds * framesPerSecond]
+            .reshaped(seconds, framesPerSecond).mean(axis: -1).asArray(Float.self)
+        return perSecond.reversed().prefix { $0 < 0.3 }.count
+    }
+
+    /// DCW, the correction the official sampler applies after every turbo
+    /// step by default (CVPR 2026, arXiv:2604.16044): split the latent and
+    /// the predicted clean sample into low and high bands with a one-level
+    /// Haar transform along time, and push each band of the latent away from
+    /// the prediction — the low by t × 0.05, the high by (1 − t) × 0.02.
+    ///
+    /// For Haar the transform pairs neighbouring frames, so the whole
+    /// correction is a per-pair formula: with d = x − denoised, frames 2i and
+    /// 2i+1 gain low·(d₀+d₁)/2 ± high·(d₀−d₁)/2. An odd final frame pairs
+    /// with zero, as pytorch_wavelets pads it. Checked against
+    /// pytorch_wavelets to 1e-6.
+    static func waveletCorrection(_ x: MLXArray, denoised: MLXArray, t: Float) -> MLXArray {
+        let (low, high) = (t * 0.05, (1 - t) * 0.02)
+        let (frames, channels) = (x.dim(1), x.dim(2))
+        var d = x - denoised
+        if frames % 2 == 1 {
+            d = concatenated([d, MLXArray.zeros([1, 1, channels], dtype: d.dtype)], axis: 1)
+        }
+        let pairs = d.reshaped(1, d.dim(1) / 2, 2, channels)
+        let (a, b) = (pairs[0..., 0..., 0, 0...], pairs[0..., 0..., 1, 0...])
+        let lowBand = (a + b) * (low / 2)
+        let highBand = (a - b) * (high / 2)
+        let correction = stacked([lowBand + highBand, lowBand - highBand], axis: 2)
+            .reshaped(1, -1, channels)[0..., 0 ..< frames, 0...]
+        return x + correction
     }
 }
 
@@ -114,6 +169,7 @@ enum ACEPipeline {
 /// touches — kept 3 GB resident for a job whose largest stage needs 1.7 GB.
 struct ACEGenerator {
     enum Stage {
+        case lengthening
         case planning
         case writing(Int, Int)
         case readingPrompt
@@ -144,6 +200,25 @@ struct ACEGenerator {
     /// Run the planner first, as the official pipeline does by default.
     /// Off only to compare against the transformer alone.
     var usesPlanner = true
+    /// Let the planner rewrite the caption, upstream's default. Off: the
+    /// user's words are used verbatim (see `generate`).
+    var plannerRewritesCaption = false
+    /// Fraction of the eight steps that follow the plan before the rest
+    /// continue as plain text-to-music — upstream's audio_cover_strength.
+    ///
+    /// Following the plan throughout fills the length but follows the words
+    /// less: the planner's tokens carry less of a description than the text
+    /// does. Scored with CLAP over seven prompts, the clip matched its own
+    /// prompt at 0.493 with the plan followed throughout, 0.565 with no
+    /// planner, and 0.583 following it for two steps of eight — the
+    /// structure is set in the first, noisiest steps and the words shape
+    /// the rest. When that lighter hold still lets a song stop early, the
+    /// run is rendered again at full strength; see `generate`.
+    var planStrength: Double = 0.25
+    /// Re-render at full plan strength when a song would end early.
+    var retriesEarlyEndings = true
+    /// Render past the requested length and cut; see `renderedSeconds`.
+    var rendersPastEnd = true
 
     private func load(_ name: String) throws -> [String: MLXArray] {
         let url = directory.appendingPathComponent(name)
@@ -172,6 +247,9 @@ struct ACEGenerator {
             if isCancelled() { throw CancellationError() }
         }
         let frames = max(1, Int(seconds * Double(ACEPipeline.framesPerSecond)))
+        // Rendered longer than asked, then cut: see `renderedSeconds`.
+        let rendered = rendersPastEnd ? Self.renderedSeconds(for: Int(seconds)) : Int(seconds)
+        let renderFrames = max(frames, rendered * ACEPipeline.framesPerSecond)
         let previousCacheLimit = MLX.Memory.cacheLimit
         MLX.Memory.cacheLimit = cacheLimit
         defer {
@@ -180,7 +258,7 @@ struct ACEGenerator {
         }
 
         let silenceBed = try load(File.silence)["silence"]!
-        let silence = Self.silence(silenceBed, covering: max(frames, ACEPipeline.timbreFrames))
+        let silence = Self.silence(silenceBed, covering: max(renderFrames, ACEPipeline.timbreFrames))
 
         let tokenizer = try ACETokenizer(
             vocabularyURL: directory.appendingPathComponent(File.vocabulary),
@@ -204,12 +282,13 @@ struct ACEGenerator {
                 // The vocal language is likewise the user's; an
                 // instrumental's is left to the planner, as upstream does.
                 let given = ACEPlanner.Metadata(
-                    bpm: known?.bpm, caption: caption, duration: Int(seconds),
+                    bpm: known?.bpm, caption: plannerRewritesCaption ? nil : caption, duration: rendered,
                     keyscale: known?.keyscale,
                     language: hasLyrics ? language : nil,
                     timeSignature: known?.timeSignature)
                 return try planner.plan(caption: caption, lyrics: ACEPipeline.lyricBody(lyrics),
-                                        known: given, seed: seed, isCancelled: isCancelled) { stage in
+                                        known: given, seconds: rendered, seed: seed,
+                                        isCancelled: isCancelled) { stage in
                     if case .writing(let done, let total) = stage { progress(.writing(done, total)) }
                 }
             }()
@@ -217,6 +296,10 @@ struct ACEGenerator {
             try checkCancellation()
         }
         let metadata = plan?.metadata
+
+        let releaseStep = Int(Double(ACEPipeline.schedule.count) * planStrength)
+        let releasesPlan = plan != nil && releaseStep < ACEPipeline.schedule.count
+        var plainText: MLXArray?
 
         // 1. Text encoder: caption states and lyric table rows, then gone.
         // With a plan, the transformer reads the planner's caption and
@@ -227,7 +310,7 @@ struct ACEGenerator {
             // would be conditioning the model never received.
             let captionIDs = Array(tokenizer.encode(
                 ACEPipeline.captionPrompt(
-                    metadata?.caption ?? caption, seconds: Int(seconds),
+                    metadata?.caption ?? caption, seconds: rendered,
                     instruction: plan == nil ? ACEPipeline.textInstruction : ACEPipeline.plannedInstruction,
                     bpm: metadata?.bpm, keyscale: metadata?.keyscale,
                     timeSignature: metadata?.timeSignature)).prefix(256))
@@ -240,20 +323,33 @@ struct ACEGenerator {
             let text = encoder(inputIDs: MLXArray(captionIDs, [1, captionIDs.count]))
             let lyric = encoder.embed(inputIDs: MLXArray(lyricIDs, [1, lyricIDs.count]))
             eval(text, lyric)
+            if releasesPlan {
+                let plainIDs = Array(tokenizer.encode(ACEPipeline.captionPrompt(
+                    metadata?.caption ?? caption, seconds: rendered,
+                    bpm: metadata?.bpm, keyscale: metadata?.keyscale,
+                    timeSignature: metadata?.timeSignature)).prefix(256))
+                plainText = encoder(inputIDs: MLXArray(plainIDs, [1, plainIDs.count]))
+                eval(plainText!)
+            }
             return (text, lyric)
         }()
         release()
         try checkCancellation()
+
+        var plainConditioning: MLXArray?
 
         // 2. Condition encoder: lyric and timbre stacks plus the projection.
         progress(.conditioning)
         let conditioning: MLXArray = try {
             var packer = ACEConditioning(weights: try load(File.conditioner))
             packer.quantizationBits = quantizationBits
-            let packed = packer.encode(
-                text: text, lyric: lyric,
-                timbre: silence[0..., 0 ..< ACEPipeline.timbreFrames, 0...].asType(.float32))
+            let timbre = silence[0..., 0 ..< ACEPipeline.timbreFrames, 0...].asType(.float32)
+            let packed = packer.encode(text: text, lyric: lyric, timbre: timbre)
             eval(packed)
+            if let plainText {
+                plainConditioning = packer.encode(text: plainText, lyric: lyric, timbre: timbre)
+                eval(plainConditioning!)
+            }
             return packed
         }()
         release()
@@ -267,9 +363,9 @@ struct ACEGenerator {
             let guide = hints(codes: plan.codes)
             // Tokens cover whole seconds; any remainder is silence, as the
             // reference pads it.
-            source = guide.dim(1) >= frames
+            source = guide.dim(1) >= renderFrames
                 ? guide
-                : concatenated([guide, silence[0..., 0 ..< (frames - guide.dim(1)), 0...]], axis: 1)
+                : concatenated([guide, silence[0..., 0 ..< (renderFrames - guide.dim(1)), 0...]], axis: 1)
             eval(source)
             release()
         }
@@ -278,11 +374,24 @@ struct ACEGenerator {
         let latent: MLXArray = try {
             var dit = ACEDiT(weights: try load(File.transformer))
             dit.quantizationBits = quantizationBits
-            return try ACEPipeline.diffuse(dit: dit, conditioning: conditioning, source: source,
-                                           frames: frames, seed: seed, noise: noise) { step, total in
-                progress(.step(step, total))
-                try checkCancellation()
+            func render(release: (Int, MLXArray, MLXArray)?) throws -> MLXArray {
+                try ACEPipeline.diffuse(dit: dit, conditioning: conditioning, source: source,
+                                        frames: renderFrames, seed: seed, noise: noise, release: release) { step, total in
+                    progress(.step(step, total))
+                    try checkCancellation()
+                }
             }
+            // Only the part that is kept matters.
+            func kept(_ latent: MLXArray) -> MLXArray { latent[0..., 0 ..< frames, 0...] }
+            let first = kept(try render(release: plainConditioning.map { (releaseStep, $0, silence) }))
+            // If the piece still ends inside what is kept, the same plan and
+            // seed are rendered again following the plan throughout — which
+            // fills the length, at some cost to how closely it follows the
+            // words.
+            guard retriesEarlyEndings, plainConditioning != nil,
+                  ACEPipeline.trailingSilence(first, silence: silence) >= 2 else { return first }
+            progress(.lengthening)
+            return kept(try render(release: nil))
         }()
         release()
 
@@ -292,15 +401,42 @@ struct ACEGenerator {
         // Half precision halves the decoder's working set; against float32
         // the audio agrees to cosine 0.999998.
         vae.dtype = .float16
-        let writer = try StreamingWAVWriter(url: destination, frames: frames * ACEVAE.hopLength, sampleRate: 48000)
+        let total = frames * ACEVAE.hopLength
+        let writer = try StreamingWAVWriter(url: destination, frames: total, sampleRate: 48000)
+        // The piece runs past this point, so it has not ended here; a short
+        // fade makes the cut a close.
+        let fade = min(total, Int(Self.fadeSeconds * 48000))
+        var written = 0
         try vae.decodeTiled(latent: latent) { audio, fraction in
             try checkCancellation()
-            try writer.append(audio)
+            let count = audio.dim(1)
+            var chunk = audio
+            if rendered > Int(seconds), written + count > total - fade {
+                let positions = MLXArray((written ..< written + count).map { Float($0) })
+                let gain = clip((Float(total) - positions) / Float(fade), min: 0, max: 1)
+                chunk = audio * gain.reshaped(1, count, 1)
+            }
+            try writer.append(chunk)
+            written += count
             progress(.decoding(fraction))
         }
         try writer.finish()
         return latent
     }
+
+    /// How much is generated for `seconds` of kept audio.
+    ///
+    /// The transformer shapes a whole piece to the window it renders —
+    /// intro, body, ending, and often a few seconds of silence — whatever
+    /// the metadata says the length is. At 30 seconds, 13 of 21 test runs
+    /// went quiet 3 to 5 seconds early. So the window is made longer than
+    /// what is kept, the piece's ending lands past the cut, and a short fade
+    /// closes the part that is kept.
+    static func renderedSeconds(for seconds: Int) -> Int {
+        min(600, seconds + max(8, seconds / 5))
+    }
+
+    static let fadeSeconds = 1.5
 
     /// The silence bed at least `frames` long. The shipped one is ten
     /// minutes; if a clip ever outgrows it, the reference repeats it rather

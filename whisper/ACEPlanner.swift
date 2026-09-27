@@ -65,7 +65,11 @@ struct ACEPlanner {
     /// - Parameters:
     ///   - lyrics: the lyric text, or "[Instrumental]".
     ///   - known: fields the user stated; they are written in, not sampled.
-    func plan(caption: String, lyrics: String, known: Metadata, seed: UInt64,
+    ///     `known.duration` is the length the planner is told the piece has.
+    ///   - seconds: how much of it to write — may be less than
+    ///     `known.duration`, so the piece's ending falls beyond what is
+    ///     rendered.
+    func plan(caption: String, lyrics: String, known: Metadata, seconds: Int, seed: UInt64,
               isCancelled: () -> Bool, progress: (Stage) -> Void) throws -> Plan {
         var key = MLXRandom.key(seed)
         func nextKey() -> MLXArray {
@@ -77,8 +81,8 @@ struct ACEPlanner {
 
         progress(.reasoning)
         let (metadata, reasoning) = try reason(user: user, known: known, nextKey: nextKey, isCancelled: isCancelled)
-        let codes = try writeCodes(user: user, metadata: metadata, nextKey: nextKey,
-                                   isCancelled: isCancelled, progress: progress)
+        let codes = try writeCodes(user: user, metadata: metadata, count: seconds * Self.codesPerSecond,
+                                   nextKey: nextKey, isCancelled: isCancelled, progress: progress)
         return Plan(metadata: metadata, reasoning: reasoning, codes: codes)
     }
 
@@ -172,9 +176,8 @@ struct ACEPlanner {
 
     // MARK: - Phase 2: music tokens
 
-    private func writeCodes(user: String, metadata: Metadata, nextKey: () -> MLXArray,
+    private func writeCodes(user: String, metadata: Metadata, count target: Int, nextKey: () -> MLXArray,
                             isCancelled: () -> Bool, progress: (Stage) -> Void) throws -> [Int32] {
-        let target = metadata.duration * Self.codesPerSecond
         let conditional = tokenizer.encode(
             Self.chatPrompt(user: user) + "<think>\n\(ACEPlannerYAML.cot(metadata))\n</think>\n\n",
             appendEndOfText: false)
@@ -200,12 +203,12 @@ struct ACEPlanner {
         // it plans that too — the last 5 to 15 seconds of a requested length
         // written as nothing. The silence token (35847; 32855 once in a
         // minute of it, measured by tokenizing the silence latent) is kept
-        // out of everything but the final second, so a song asked to last
-        // 81 seconds has music for 81 seconds and still gets to end.
+        // out entirely. The piece's real ending is kept out of the window by
+        // telling the planner it runs longer than what is written; see
+        // `ACEGenerator.plannedSeconds`.
         var silenceMask = [Float](repeating: 0, count: Self.codebookSize)
         for code in Self.silenceCodes { silenceMask[code] = -Float.infinity }
         let noSilence = MLXArray(silenceMask, [1, Self.codebookSize])
-        let endingStart = max(0, target - Self.codesPerSecond)
 
         var codes: [Int32] = []
         codes.reserveCapacity(target)
@@ -215,7 +218,7 @@ struct ACEPlanner {
             let scores = model.logits(last, rows: codeRows)        // (2, codes)
             let (c, u) = (scores[0 ..< 1], scores[1 ..< 2])
             var guided = u + guidance * (c - u)
-            if index < endingStart { guided = guided + noSilence }
+            guided = guided + noSilence
             let code = sample(guided, key: nextKey()).item(Int32.self)
             codes.append(code)
             let token = Int32(Self.codeBase) + code

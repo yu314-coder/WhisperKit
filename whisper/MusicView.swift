@@ -23,6 +23,7 @@ struct MusicView: View {
     @State private var isPlaying = false
     @State private var playingClipID: UUID?
     @State private var memory = MusicMemoryMonitor()
+    @State private var interruptionDismissed = false
     /// The language the lyrics are sung in. ACE-Step conditions on it; an
     /// instrumental ignores it and sends "unknown" instead.
     @AppStorage("musicVocalLanguage") private var vocalLanguage =
@@ -35,6 +36,7 @@ struct MusicView: View {
             Rectangle().fill(Studio.rule).frame(height: 1)
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
+                    if MusicRunMarker.wasInterrupted && !interruptionDismissed { interruptedCard }
                     promptCard
                     if selectedModel.supportsLyrics { lyricsCard }
                     if engine.isBusy || engine.lastResult != nil || engine.failureMessage != nil {
@@ -152,6 +154,26 @@ struct MusicView: View {
     }
 
     // MARK: - Cards
+
+    /// The last run never finished: the app was closed mid-generation. Said
+    /// here rather than on the Transcribe tab, which used to take the blame
+    /// for it when a model happened to be loading at the same time.
+    private var interruptedCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Last generation didn't finish", systemImage: "exclamationmark.triangle")
+                .font(Studio.text(14, weight: .semibold))
+                .foregroundColor(Studio.hot)
+            Text("Whisper was closed while it was generating. If you didn't close it yourself, iOS stopped it — most likely for memory. A shorter length or Stable Audio 3 Small needs less.")
+                .font(Studio.text(13))
+                .foregroundColor(Studio.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Dismiss") { interruptionDismissed = true }
+                .font(Studio.text(13, weight: .medium))
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Studio.sunk))
+    }
 
     private var promptCard: some View {
         VStack(alignment: .leading, spacing: 10) {

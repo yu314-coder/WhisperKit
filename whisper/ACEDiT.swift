@@ -30,11 +30,13 @@ struct ACEDiT {
     /// 0 when the checkpoint is dense; 4 or 8 when its projections are packed.
     var quantizationBits: Int = 0
     var evaluatesPerLayer = true
+    /// What activations are carried in; quantized scales must match it.
+    var dtype: DType = .float32
     var quantizationGroup: Int = 64
 
     private func w(_ key: String) -> MLXArray {
         guard let value = weights[key] else { fatalError("missing DiT weight: \(key)") }
-        return value.asType(.float32)
+        return value.asType(dtype)
     }
 
     /// `x @ W.T`, reading either a dense weight or a quantized triple.
@@ -166,11 +168,11 @@ extension ACEDiT {
         let temb = tembT + tembR
         let modulation = projT + projR
 
-        var h = concatenated([context, xt], axis: -1)
+        var h = concatenated([context, xt], axis: -1).asType(dtype)
         let originalLength = h.dim(1)
         if h.dim(1) % Self.patchSize != 0 {
             let pad = Self.patchSize - (h.dim(1) % Self.patchSize)
-            h = concatenated([h, MLXArray.zeros([1, pad, h.dim(2)], dtype: .float32)], axis: 1)
+            h = concatenated([h, MLXArray.zeros([1, pad, h.dim(2)], dtype: h.dtype)], axis: 1)
         }
 
         // Patch embedding: stride equals kernel, so this both projects and
@@ -179,7 +181,7 @@ extension ACEDiT {
                    stride: Self.patchSize, padding: 0)
             + w("decoder.proj_in.1.bias")
 
-        let conditioning = linear(encoder, "decoder.condition_embedder.weight")
+        let conditioning = linear(encoder.asType(dtype), "decoder.condition_embedder.weight")
             + w("decoder.condition_embedder.bias")
 
         let (cos, sin) = rotaryTable(length: h.dim(1))
@@ -203,7 +205,7 @@ extension ACEDiT {
         h = convTransposed1d(h, w("decoder.proj_out.1.weight").transposed(1, 2, 0),
                              stride: Self.patchSize, padding: 0)
             + w("decoder.proj_out.1.bias")
-        return h[0..., 0 ..< originalLength, 0...]
+        return h[0..., 0 ..< originalLength, 0...].asType(.float32)
     }
 
     /// Sinusoidal features, an MLP, and a six-way modulation projection.
@@ -216,7 +218,7 @@ extension ACEDiT {
             frequencies[i] = exp(-log(Float(10000)) * Float(i) / Float(half)) * scaled
         }
         let args = MLXArray(frequencies, [1, half])
-        let features = concatenated([cos(args), sin(args)], axis: -1)
+        let features = concatenated([cos(args), sin(args)], axis: -1).asType(dtype)
 
         var temb = linear(features, "\(prefix).linear_1.weight") + w("\(prefix).linear_1.bias")
         temb = temb * sigmoid(temb)

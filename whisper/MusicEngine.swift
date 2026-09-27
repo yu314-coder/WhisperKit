@@ -69,6 +69,7 @@ final class MusicEngine {
         guard !isBusy else { return }
         work = Task { [weak self] in
             guard let self else { return }
+            defer { MusicRunMarker.end() }
             do {
                 try await self.fetchWeightsIfNeeded(for: model)
                 try Task.checkCancellation()
@@ -180,6 +181,7 @@ final class MusicEngine {
         throw MusicEngineError.simulatorUnsupported
         #else
         phase = .generating(stage: "Starting")
+        MusicRunMarker.begin()
 
         // Routing comes before the Stable Audio check, not after it.
         // ACE-Step has no Stable Audio variant, so asking for one first threw
@@ -243,6 +245,7 @@ extension MusicEngine {
                 let label: String
                 switch stage {
                 case .planning:               label = "Planning the song"
+                case .lengthening:            label = "Filling the full length"
                 case .writing(let done, let of):
                     label = "Writing the song \(Int(Double(done) / Double(max(of, 1)) * 100))%"
                 case .readingPrompt:          label = "Reading prompt"

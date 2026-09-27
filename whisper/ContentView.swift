@@ -71,6 +71,11 @@ struct ContentView: View {
     /// A model the app was terminated while loading. It is not loaded again
     /// automatically until a load of it completes — see `checkModelStatus()`.
     @AppStorage("crashedModelVariant") private var crashedModelVariant = ""
+    /// A load that was in flight when the app went to the background. The
+    /// persisted flag is lowered for as long as the app is away and raised
+    /// again on return if the load is still going; see
+    /// `handleScenePhaseChange`.
+    @State private var loadAwayFromScreen: String?
     // Previous tick counters for instantaneous CPU & task time deltas.
     // Without this baseline the sampler returns the cumulative since-boot
     // average, which is nearly constant — making the chart look frozen.
@@ -1822,6 +1827,16 @@ struct ContentView: View {
     func handleScenePhaseChange(oldPhase: ScenePhase, newPhase: ScenePhase) {
         switch newPhase {
         case .background:
+            // Only a death on screen is the memory kill the in-flight flag
+            // exists to catch. Once the app is in the background, iOS may
+            // suspend or end it for reasons of its own — the user swiping it
+            // away, a TestFlight update, a first Neural Engine load running
+            // long — and each of those used to greet the next launch with
+            // "Whisper closed while Turbo was loading".
+            if modelLoadInFlight {
+                loadAwayFromScreen = modelLoadInFlightVariant
+                modelLoadInFlight = false
+            }
             if isProcessing {
                 // Ensure audio session is active
                 setupBackgroundAudio()
@@ -1844,6 +1859,11 @@ struct ContentView: View {
                 }
             }
         case .active:
+            if let variant = loadAwayFromScreen {
+                loadAwayFromScreen = nil
+                modelLoadInFlight = true
+                modelLoadInFlightVariant = variant
+            }
             endBackgroundTask()
             // Reactivate audio session when returning to foreground
             if isProcessing {
@@ -2186,6 +2206,7 @@ struct ContentView: View {
             try Task.checkCancellation()
             modelLoadInFlight = false
             modelLoadInFlightVariant = ""
+            loadAwayFromScreen = nil
             if crashedModelVariant == model.rawValue { crashedModelVariant = "" }
             markPrewarmed(model)
             isOptimizingModel = false
@@ -2201,6 +2222,7 @@ struct ContentView: View {
             // Cleared on failure too — only an outright kill should leave it set.
             modelLoadInFlight = false
             modelLoadInFlightVariant = ""
+            loadAwayFromScreen = nil
             throw error
         }
     }
@@ -2480,8 +2502,14 @@ struct ContentView: View {
         // model again at launch, which on a device that cannot hold it meant
         // being terminated at the same point on every single open, with no
         // chance to pick something smaller first.
+        //
+        // Unless music was being generated at the same moment: that is the
+        // far larger job, so it, not the transcription model, is the likely
+        // cause — and the Music tab says so instead.
         if modelLoadInFlight {
-            crashedModelVariant = (WhisperModel(rawValue: modelLoadInFlightVariant) ?? selectedModel).rawValue
+            if !MusicRunMarker.wasInterrupted {
+                crashedModelVariant = (WhisperModel(rawValue: modelLoadInFlightVariant) ?? selectedModel).rawValue
+            }
             modelLoadInFlight = false
             modelLoadInFlightVariant = ""
         }
