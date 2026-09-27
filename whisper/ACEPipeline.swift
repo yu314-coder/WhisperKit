@@ -2,16 +2,15 @@
 //  Verified against the PyTorch reference stage by stage; see ports/README.md.
 
 import Foundation
-import Darwin
 import MLX
 import MLXRandom
 
 /// Text prompt (and lyrics) to audio, using ACE-Step's turbo schedule.
 ///
-/// This is the text path: no reference audio and no planner. That removes
-/// three of the checkpoint's parts — the 1.7B planner (its hints are optional
-/// and this path passes none), and the FSQ tokenizer and detokenizer, which
-/// exist to condition on *supplied* audio rather than to produce it.
+/// The official pipeline, minus reference audio: the planner writes the song
+/// out as music tokens, and the diffusion transformer renders them. The FSQ
+/// audio *encoder* side is still absent — it exists to turn supplied audio
+/// into tokens, and here the planner supplies them.
 ///
 /// Sampling is flow matching: the transformer predicts a velocity and the
 /// sampler walks from noise toward data by Euler steps, solving directly for
@@ -29,44 +28,61 @@ enum ACEPipeline {
 
     // MARK: - Prompt layout
 
+    /// Instruction for a plain text-to-music run.
+    static let textInstruction = "Fill the audio semantic mask based on the given conditions:"
+    /// Instruction once planner tokens guide the run — the official pipeline
+    /// switches the task to "cover" whenever tokens are supplied.
+    static let plannedInstruction = "Generate audio semantic tokens based on the given conditions:"
+
     /// The caption as the model was trained to read it: an instruction, the
     /// caption, and a metadata block. Sending the bare caption — as this port
     /// once did — puts the text encoder's output somewhere the diffusion
     /// transformer never saw during training.
-    static func captionPrompt(_ caption: String, seconds: Int) -> String {
-        let metas = "- bpm: N/A\n- timesignature: N/A\n- keyscale: N/A\n- duration: \(seconds) seconds\n"
-        return "# Instruction\nFill the audio semantic mask based on the given conditions:\n\n"
+    static func captionPrompt(_ caption: String, seconds: Int,
+                              instruction: String = textInstruction,
+                              bpm: Int? = nil, keyscale: String? = nil, timeSignature: Int? = nil) -> String {
+        let metas = "- bpm: \(bpm.map(String.init) ?? "N/A")\n"
+            + "- timesignature: \(timeSignature.map(String.init) ?? "N/A")\n"
+            + "- keyscale: \(keyscale ?? "N/A")\n"
+            + "- duration: \(seconds) seconds\n"
+        return "# Instruction\n\(instruction)\n\n"
             + "# Caption\n\(caption)\n\n# Metas\n\(metas)<|endoftext|>\n"
     }
 
-    /// Lyrics with their language. An instrumental is not an empty lyric
-    /// slot but the literal "[Instrumental]" with language "unknown".
-    static func lyricPrompt(_ lyrics: String, language: String) -> String {
+    /// The lyric slot's text: the lyrics, or "[Instrumental]" for none.
+    static func lyricBody(_ lyrics: String) -> String {
         let trimmed = lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
-        let body = trimmed.isEmpty ? "[Instrumental]" : trimmed
-        let code = trimmed.isEmpty ? "unknown" : language
-        return "# Languages\n\(code)\n\n# Lyric\n\(body)<|endoftext|>"
+        return trimmed.isEmpty ? "[Instrumental]" : trimmed
+    }
+
+    /// Lyrics with their language. An instrumental is not an empty lyric
+    /// slot but the literal "[Instrumental]", and without a planner to say
+    /// otherwise its language is "unknown".
+    static func lyricPrompt(_ lyrics: String, language: String) -> String {
+        "# Languages\n\(language)\n\n# Lyric\n\(lyricBody(lyrics))<|endoftext|>"
     }
 
     // MARK: - Diffusion
 
     /// - Parameters:
     ///   - conditioning: the packed sequence from `ACEConditioning`.
-    ///   - silence: (1, ≥ frames, 64), the bed the generation starts from.
+    ///   - source: (1, ≥ frames, 64) — the planner's guide when there is
+    ///     one, otherwise silence. The transformer reads it alongside the
+    ///     noisy latent as what the result should follow.
     ///   - noise: the starting latent; drawn from `seed` when nil.
     /// - Returns: (1, frames, 64), the clean latent.
     static func diffuse(dit: ACEDiT,
                         conditioning: MLXArray,
-                        silence: MLXArray,
+                        source: MLXArray,
                         frames: Int,
                         seed: UInt64,
                         noise: MLXArray? = nil,
                         onStep: (Int, Int) throws -> Void = { _, _ in }) rethrows -> MLXArray {
-        // Context is the silence bed plus a chunk mask of ones: every frame
-        // is to be generated. An earlier version sent zeros here — the value
+        // Context is the source plus a chunk mask of ones: every frame is to
+        // be generated. An earlier version sent zeros here — the value
         // meaning "keep this frame" — so the model was told to preserve the
         // silence it was meant to replace.
-        let bed = silence[0..., 0 ..< frames, 0...].asType(.float32)
+        let bed = source[0..., 0 ..< frames, 0...].asType(.float32)
         let chunkMask = MLXArray.ones([1, frames, latentChannels], dtype: .float32)
         let context = concatenated([bed, chunkMask], axis: -1)
 
@@ -98,6 +114,8 @@ enum ACEPipeline {
 /// touches — kept 3 GB resident for a job whose largest stage needs 1.7 GB.
 struct ACEGenerator {
     enum Stage {
+        case planning
+        case writing(Int, Int)
         case readingPrompt
         case conditioning
         case step(Int, Int)
@@ -112,6 +130,8 @@ struct ACEGenerator {
         static let silence = "ace_silence_full.safetensors"
         static let vocabulary = "ace_vocab.json"
         static let merges = "ace_merges.txt"
+        static let planner = "ace_lm_q8.safetensors"
+        static let hints = "ace_hints_q8.safetensors"
     }
 
     let directory: URL
@@ -121,42 +141,30 @@ struct ACEGenerator {
     var mapsWeights = true
     /// How much freed memory MLX may keep for reuse while generating.
     var cacheLimit = 0
+    /// Run the planner first, as the official pipeline does by default.
+    /// Off only to compare against the transformer alone.
+    var usesPlanner = true
 
     private func load(_ name: String) throws -> [String: MLXArray] {
         let url = directory.appendingPathComponent(name)
         return mapsWeights ? try MappedWeights.load(url: url) : try loadArrays(url: url, stream: .cpu)
     }
 
-    /// Hands a finished stage's memory back before the next one starts.
-    ///
-    /// Two things delay it. Freed arrays go to MLX's buffer cache rather than
-    /// the system, so the cache is cleared. And the system takes freed GPU
-    /// memory back asynchronously — measured at a few hundred milliseconds,
-    /// during which it still counts against the app. Loading the next stage
-    /// inside that window stacks both stages' memory, which is how the
-    /// transition, not either stage, became the peak. So this waits, briefly,
-    /// for the footprint to stop falling.
-    private func release() {
-        MLX.Memory.clearCache()
-        var previous = MemoryFootprint.current
-        for _ in 0 ..< 20 {
-            usleep(50_000)
-            let now = MemoryFootprint.current
-            if previous - now < 8 * 1_048_576 { break }
-            previous = now
-        }
-    }
+    private func release() { StageMemory.release() }
 
     /// - Parameters:
     ///   - noise: a fixed starting latent, for verification only.
     ///   - isCancelled: polled between stages, steps and decoding windows;
     ///     returning true ends the run with `CancellationError`.
+    ///   - known: tempo, key and meter the prompt states; the planner
+    ///     writes these in instead of choosing its own.
     func generate(caption: String,
                   lyrics: String,
                   language: String,
                   seconds: Double,
                   seed: UInt64,
                   to destination: URL,
+                  known: PromptMetadata? = nil,
                   noise: MLXArray? = nil,
                   isCancelled: () -> Bool = { false },
                   progress: (Stage) -> Void = { _ in }) throws -> MLXArray {
@@ -174,18 +182,58 @@ struct ACEGenerator {
         let silenceBed = try load(File.silence)["silence"]!
         let silence = Self.silence(silenceBed, covering: max(frames, ACEPipeline.timbreFrames))
 
+        let tokenizer = try ACETokenizer(
+            vocabularyURL: directory.appendingPathComponent(File.vocabulary),
+            mergesURL: directory.appendingPathComponent(File.merges))
+        let hasLyrics = !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        // 0. Planner: the song's layout, five tokens a second.
+        var plan: ACEPlanner.Plan?
+        if usesPlanner {
+            progress(.planning)
+            plan = try {
+                var model = ACEQwen3(weights: try load(File.planner), config: .planner, prefix: "")
+                model.quantizationBits = quantizationBits
+                let planner = ACEPlanner(model: model, tokenizer: tokenizer)
+                // The caption is the user's, written in verbatim. Upstream
+                // lets the planner rewrite it by default, and at its sampling
+                // temperature a "restrained underscore with soft granular
+                // pads" came back as energetic synthwave with a four-on-the-
+                // floor kick — which the music then followed. Upstream offers
+                // this switch (use_cot_caption); the prompt should decide.
+                // The vocal language is likewise the user's; an
+                // instrumental's is left to the planner, as upstream does.
+                let given = ACEPlanner.Metadata(
+                    bpm: known?.bpm, caption: caption, duration: Int(seconds),
+                    keyscale: known?.keyscale,
+                    language: hasLyrics ? language : nil,
+                    timeSignature: known?.timeSignature)
+                return try planner.plan(caption: caption, lyrics: ACEPipeline.lyricBody(lyrics),
+                                        known: given, seed: seed, isCancelled: isCancelled) { stage in
+                    if case .writing(let done, let total) = stage { progress(.writing(done, total)) }
+                }
+            }()
+            release()
+            try checkCancellation()
+        }
+        let metadata = plan?.metadata
+
         // 1. Text encoder: caption states and lyric table rows, then gone.
+        // With a plan, the transformer reads the planner's caption and
+        // metadata, as the official pipeline passes them on.
         progress(.readingPrompt)
         let (text, lyric): (MLXArray, MLXArray) = try {
-            let tokenizer = try ACETokenizer(
-                vocabularyURL: directory.appendingPathComponent(File.vocabulary),
-                mergesURL: directory.appendingPathComponent(File.merges))
             // The reference truncates at these lengths, so longer input
             // would be conditioning the model never received.
             let captionIDs = Array(tokenizer.encode(
-                ACEPipeline.captionPrompt(caption, seconds: Int(seconds))).prefix(256))
+                ACEPipeline.captionPrompt(
+                    metadata?.caption ?? caption, seconds: Int(seconds),
+                    instruction: plan == nil ? ACEPipeline.textInstruction : ACEPipeline.plannedInstruction,
+                    bpm: metadata?.bpm, keyscale: metadata?.keyscale,
+                    timeSignature: metadata?.timeSignature)).prefix(256))
+            let lyricLanguage = metadata?.language ?? (hasLyrics ? language : "unknown")
             let lyricIDs = Array(tokenizer.encode(
-                ACEPipeline.lyricPrompt(lyrics, language: language)).prefix(2048))
+                ACEPipeline.lyricPrompt(lyrics, language: lyricLanguage)).prefix(2048))
 
             var encoder = ACEQwen3(weights: try load(File.textEncoder), config: .embedder, prefix: "")
             encoder.quantizationBits = quantizationBits
@@ -211,11 +259,26 @@ struct ACEGenerator {
         release()
         try checkCancellation()
 
+        // 2b. The plan as a 25 Hz guide; silence when there is none.
+        var source = silence
+        if let plan {
+            var hints = ACEHints(weights: try load(File.hints))
+            hints.quantizationBits = quantizationBits
+            let guide = hints(codes: plan.codes)
+            // Tokens cover whole seconds; any remainder is silence, as the
+            // reference pads it.
+            source = guide.dim(1) >= frames
+                ? guide
+                : concatenated([guide, silence[0..., 0 ..< (frames - guide.dim(1)), 0...]], axis: 1)
+            eval(source)
+            release()
+        }
+
         // 3. Diffusion transformer, eight steps.
         let latent: MLXArray = try {
             var dit = ACEDiT(weights: try load(File.transformer))
             dit.quantizationBits = quantizationBits
-            return try ACEPipeline.diffuse(dit: dit, conditioning: conditioning, silence: silence,
+            return try ACEPipeline.diffuse(dit: dit, conditioning: conditioning, source: source,
                                            frames: frames, seed: seed, noise: noise) { step, total in
                 progress(.step(step, total))
                 try checkCancellation()
@@ -229,7 +292,7 @@ struct ACEGenerator {
         // Half precision halves the decoder's working set; against float32
         // the audio agrees to cosine 0.999998.
         vae.dtype = .float16
-        let writer = try ACEWAVWriter(url: destination, frames: frames * ACEVAE.hopLength)
+        let writer = try StreamingWAVWriter(url: destination, frames: frames * ACEVAE.hopLength, sampleRate: 48000)
         try vae.decodeTiled(latent: latent) { audio, fraction in
             try checkCancellation()
             try writer.append(audio)
@@ -247,72 +310,4 @@ struct ACEGenerator {
         let repeats = (frames + bed.dim(1) - 1) / bed.dim(1)
         return concatenated(Array(repeating: bed, count: repeats), axis: 1)
     }
-}
-
-/// 48 kHz stereo 16-bit WAV, written as the decoder produces it.
-///
-/// Streaming matters at length: six minutes of stereo float is 147 MB, and
-/// building it whole before writing — then again as Swift arrays, then again
-/// as `Data` — tripled that at the very end of a run that had already used
-/// the most memory it would.
-final class ACEWAVWriter {
-    private let handle: FileHandle
-    private let expectedFrames: Int
-    private var writtenFrames = 0
-
-    init(url: URL, frames: Int, sampleRate: Int = 48000) throws {
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        handle = try FileHandle(forWritingTo: url)
-        expectedFrames = frames
-
-        var header = Data()
-        func string(_ s: String) { header.append(s.data(using: .ascii)!) }
-        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { header.append(contentsOf: $0) } }
-        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { header.append(contentsOf: $0) } }
-        string("RIFF"); u32(UInt32(36 + frames * 4)); string("WAVE")
-        string("fmt "); u32(16); u16(1); u16(2)
-        u32(UInt32(sampleRate)); u32(UInt32(sampleRate * 4)); u16(4); u16(16)
-        string("data"); u32(UInt32(frames * 4))
-        try handle.write(contentsOf: header)
-    }
-
-    /// - Parameter audio: (1, samples, 2) — already interleaved, which is
-    ///   exactly WAV's sample order.
-    func append(_ audio: MLXArray) throws {
-        let pcm = (clip(audio, min: -1, max: 1) * 32767).asType(.int16)
-        let samples = pcm.asArray(Int16.self)
-        try samples.withUnsafeBytes { try handle.write(contentsOf: Data($0)) }
-        writtenFrames += audio.dim(1)
-    }
-
-    func finish() throws {
-        precondition(writtenFrames == expectedFrames, "wrote \(writtenFrames) of \(expectedFrames) frames")
-        try handle.close()
-    }
-}
-
-/// The app's physical footprint — the number iOS compares against its limit
-/// when deciding what to kill.
-enum MemoryFootprint {
-    static var current: Int {
-        var info = task_vm_info_data_t()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-            }
-        }
-        return result == KERN_SUCCESS ? Int(info.phys_footprint) : 0
-    }
-}
-
-/// A cancellation request that crosses into a detached task, which does not
-/// inherit its parent's cancellation.
-final class CancellationFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var cancelled = false
-
-    var isCancelled: Bool { lock.withLock { cancelled } }
-    func cancel() { lock.withLock { cancelled = true } }
 }

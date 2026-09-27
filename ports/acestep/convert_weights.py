@@ -13,6 +13,9 @@ Output, one file per stage so the app holds only what the running stage needs:
     ace_decoder_q8    diffusion transformer only
     ace_vae_f16       VAE decoder only (the encoder half is not used)
     ace_silence_full  the ten-minute silence latent, frames-first
+    ace_lm_q8         the 1.7B planner (acestep-5Hz-lm-1.7B), int8
+    ace_hints_q8      FSQ codebook and detokenizer: planner tokens to the
+                      25 Hz guide the diffusion transformer follows
 
 In the _q8 files, 2-D projections are int8 with group size 64 and everything
 else is float16. The text encoder stays float16: Qwen3's hidden states carry
@@ -20,44 +23,16 @@ large outlier channels that int8 groups flatten, and that one stage accounted
 for most of the drift from the reference — final latent cosine 0.960 with it
 at int8, 0.983 without, against the float32 pipeline over eight steps.
 
-Every tensor starts on a 64-byte boundary. The app maps these files rather
-than reading them, and views each tensor in place, so alignment is what
-makes a view a plain offset instead of a misaligned read. The safetensors
-format forbids gaps between tensors, so alignment comes from ordering: the
-header is padded with spaces to a multiple of 64, and tensors whose sizes
-are multiples of 64 go first.
+Every tensor starts on a 64-byte boundary; see ../safetensors_aligned.py.
 """
-import json
 import os
-import struct
 import sys
 
 import mlx.core as mx
-import numpy as np
 import torch
 
-ALIGN = 64
-DTYPES = {mx.float16: "F16", mx.float32: "F32", mx.uint32: "U32", mx.bfloat16: "BF16"}
-
-
-def save_aligned(path, tensors):
-    items = sorted(tensors.items(), key=lambda kv: (kv[1].nbytes % ALIGN != 0, -kv[1].itemsize, kv[0]))
-    header, offset = {}, 0
-    for name, array in items:
-        header[name] = {"dtype": DTYPES[array.dtype], "shape": list(array.shape),
-                        "data_offsets": [offset, offset + array.nbytes]}
-        offset += array.nbytes
-    text = json.dumps(header, separators=(",", ":"))
-    text += " " * ((-(8 + len(text))) % ALIGN)
-    with open(path, "wb") as f:
-        f.write(struct.pack("<Q", len(text)))
-        f.write(text.encode())
-        for _, array in items:
-            f.write(np.array(array).tobytes())
-    misaligned = [n for n, h in header.items() if (8 + len(text) + h["data_offsets"][0]) % ALIGN]
-    print(f"{os.path.basename(path)}: {len(items)} tensors, {os.path.getsize(path):,} bytes, "
-          f"{len(misaligned)} not 64-byte aligned")
-
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from safetensors_aligned import save_aligned  # noqa: E402
 
 def quantized(weights, keep=lambda k: True):
     out = {}
@@ -72,12 +47,34 @@ def quantized(weights, keep=lambda k: True):
     return out
 
 
+def fsq_codebook(source):
+    """Every FSQ code as the 6-dim vector the quantizer sums before its
+    output projection — read from the reference implementation rather than
+    re-derived, so level offsets and scaling are exactly its own."""
+    sys.path.insert(0, f"{source}/acestep-v15-turbo")
+    from configuration_acestep_v15 import AceStepConfig
+    from vector_quantize_pytorch import ResidualFSQ
+    config = AceStepConfig.from_pretrained(f"{source}/acestep-v15-turbo")
+    fsq = ResidualFSQ(dim=config.fsq_dim, levels=config.fsq_input_levels,
+                      num_quantizers=config.fsq_input_num_quantizers)
+    with torch.no_grad():
+        codes = fsq.get_codes_from_indices(torch.arange(64000).view(1, 64000, 1))[0, 0]
+    return mx.array(codes.numpy())
+
+
 def main(source, vae_file, out):
     os.makedirs(out, exist_ok=True)
     dit = dict(mx.load(f"{source}/acestep-v15-turbo/model.safetensors"))
     save_aligned(f"{out}/ace_cond_q8.safetensors", quantized(dit, lambda k: k.startswith("encoder.")))
     save_aligned(f"{out}/ace_decoder_q8.safetensors", quantized(dit, lambda k: k.startswith("decoder.")))
+    hints = quantized(dit, lambda k: k.startswith("detokenizer.") or k.startswith("tokenizer.quantizer.project_out"))
+    hints["fsq_codebook"] = fsq_codebook(source)
+    save_aligned(f"{out}/ace_hints_q8.safetensors", hints)
     del dit
+
+    planner = mx.load(f"{source}/acestep-5Hz-lm-1.7B/model.safetensors")
+    save_aligned(f"{out}/ace_lm_q8.safetensors", quantized(planner))
+    del planner
 
     qwen = mx.load(f"{source}/Qwen3-Embedding-0.6B/model.safetensors")
     save_aligned(f"{out}/ace_qwen_f16.safetensors", {k: v.astype(mx.float16) for k, v in qwen.items()})

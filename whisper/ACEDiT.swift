@@ -29,6 +29,7 @@ struct ACEDiT {
     let weights: [String: MLXArray]
     /// 0 when the checkpoint is dense; 4 or 8 when its projections are packed.
     var quantizationBits: Int = 0
+    var evaluatesPerLayer = true
     var quantizationGroup: Int = 64
 
     private func w(_ key: String) -> MLXArray {
@@ -186,6 +187,10 @@ extension ACEDiT {
         for index in 0 ..< 24 {
             h = layer(index, hidden: h, encoder: conditioning, temb: modulation,
                       cos: cos, sin: sin, localMask: localMask)
+            // Layer by layer: left as one graph, MLX kept many layers'
+            // intermediates alive together — 1.6 GB at 81 seconds, where one
+            // layer's worth is a small fraction of that.
+            if evaluatesPerLayer { eval(h) }
         }
 
         let outParts = (w("decoder.scale_shift_table") + temb.expandedDimensions(axis: 1))

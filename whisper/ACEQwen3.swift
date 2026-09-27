@@ -41,6 +41,8 @@ struct ACEQwen3 {
     /// 0 when dense; 8 when the projections are packed to int8.
     var quantizationBits: Int = 0
     var quantizationGroup: Int = 64
+    /// What activations are carried in. Quantized scales must match it.
+    var dtype: DType = .float32
 
     private func linear(_ x: MLXArray, _ key: String) -> MLXArray {
         let full = prefix.isEmpty ? key : "\(prefix).\(key)"
@@ -59,7 +61,7 @@ struct ACEQwen3 {
         guard let value = weights[prefix.isEmpty ? key : "\(prefix).\(key)"] else {
             fatalError("missing Qwen3 weight: \(key)")
         }
-        return value.asType(.float32)
+        return value.asType(dtype)
     }
 
     /// Looks up token embeddings without the transformer — ACE-Step feeds
@@ -81,7 +83,7 @@ struct ACEQwen3 {
         } else {
             rows = take(weights[key]!, ids, axis: 0)
         }
-        return rows.asType(.float32).reshaped(1, inputIDs.dim(1), config.hiddenSize)
+        return rows.asType(dtype).reshaped(inputIDs.dim(0), inputIDs.dim(1), config.hiddenSize)
     }
 
     func callAsFunction(inputIDs: MLXArray) -> MLXArray {
@@ -107,12 +109,58 @@ struct ACEQwen3 {
         return rmsNorm(h, weight: w("norm.weight"), eps: config.epsilon)
     }
 
-    private func attention(prefix: String, x: MLXArray, mask: MLXArray) -> MLXArray {
-        let length = x.dim(1)
+    // MARK: - Incremental decoding
+
+    /// Runs `inputIDs` on top of everything `cache` has already seen and
+    /// returns the final hidden state of each new position.
+    ///
+    /// - Parameter mask: additive, (batch or 1, 1, new, seen + new); causal
+    ///   when nil. Batched callers pass their own to hide padding.
+    func callAsFunction(inputIDs: MLXArray, cache: ACEKVCache, mask explicit: MLXArray? = nil) -> MLXArray {
+        let length = inputIDs.dim(1)
+        let offset = cache.offset
+        var h = embed(inputIDs: inputIDs)
+        let mask: MLXArray? = explicit ?? (length > 1 ? causalMask(length: length, offset: offset) : nil)
+        for layer in 0 ..< config.layerCount {
+            let prefix = "layers.\(layer)"
+            h = h + attention(prefix: "\(prefix).self_attn",
+                              x: rmsNorm(h, weight: w("\(prefix).input_layernorm.weight"),
+                                         eps: config.epsilon),
+                              mask: mask, cache: (cache, layer), offset: offset)
+            h = h + feedForward(prefix: "\(prefix).mlp",
+                                x: rmsNorm(h, weight: w("\(prefix).post_attention_layernorm.weight"),
+                                           eps: config.epsilon))
+            // Prompts and forced runs a layer at a time: as one graph, a
+            // 123-token run held every layer's intermediates at once, 430 MB.
+            // Single-token steps are small and stay one graph — a sync per
+            // layer would cost more than it saves.
+            if length > 1 { eval(h) }
+        }
+        cache.advance(by: length)
+        return rmsNorm(h, weight: w("norm.weight"), eps: config.epsilon)
+    }
+
+    /// Next-token scores for `rows` of the vocabulary, through the tied
+    /// embedding. Scoring only the rows that may be chosen — 64,000 music
+    /// tokens out of 217,204 — is most of the planner's per-token work saved.
+    func logits(_ hidden: MLXArray, rows: Range<Int>) -> MLXArray {
+        let key = prefix.isEmpty ? "embed_tokens.weight" : "\(prefix).embed_tokens.weight"
+        if quantizationBits > 0, let packed = weights["\(key).wq"] {
+            return quantizedMatmul(hidden, packed[rows],
+                                   scales: weights["\(key).scales"]![rows],
+                                   biases: weights["\(key).biases"]![rows],
+                                   transpose: true, groupSize: quantizationGroup, bits: quantizationBits)
+        }
+        return matmul(hidden, weights[key]![rows].asType(dtype).T)
+    }
+
+    private func attention(prefix: String, x: MLXArray, mask: MLXArray?,
+                           cache: (ACEKVCache, Int)? = nil, offset: Int = 0) -> MLXArray {
+        let (batch, length) = (x.dim(0), x.dim(1))
 
         func project(_ key: String, heads: Int) -> MLXArray {
             linear(x, "\(prefix).\(key).weight")
-                .reshaped(1, length, heads, config.headDimension)
+                .reshaped(batch, length, heads, config.headDimension)
                 .transposed(0, 2, 1, 3)
         }
         var q = project("q_proj", heads: config.headCount)
@@ -123,17 +171,28 @@ struct ACEQwen3 {
         q = rmsNorm(q, weight: w("\(prefix).q_norm.weight"), eps: config.epsilon)
         k = rmsNorm(k, weight: w("\(prefix).k_norm.weight"), eps: config.epsilon)
         q = RoPE(q, dimensions: config.headDimension, traditional: false,
-                 base: config.ropeTheta, scale: 1, offset: 0)
+                 base: config.ropeTheta, scale: 1, offset: offset)
         k = RoPE(k, dimensions: config.headDimension, traditional: false,
-                 base: config.ropeTheta, scale: 1, offset: 0)
+                 base: config.ropeTheta, scale: 1, offset: offset)
 
         // Grouped-query attention: the fused kernel pairs each key/value head
         // with its query group itself, so k and v are passed untiled.
-        let out = scaledDotProductAttention(queries: q, keys: k, values: v,
-                                            scale: pow(Float(config.headDimension), -0.5),
-                                            mask: mask)
+        let scale = pow(Float(config.headDimension), -0.5)
+        let attended: MLXArray
+        if let (cache, layer) = cache {
+            // The cache is half precision — a six-minute song is 2,000-odd
+            // positions over 28 layers, twice over for guidance — so the
+            // attention runs in it too, with MLX's softmax in float32.
+            let (keys, values) = cache.update(layer: layer, keys: k, values: v)
+            attended = scaledDotProductAttention(queries: q.asType(.float16), keys: keys, values: values,
+                                                 scale: scale, mask: mask?.asType(.float16))
+                .asType(dtype)
+        } else {
+            attended = scaledDotProductAttention(queries: q, keys: k, values: v, scale: scale, mask: mask)
+        }
+        let out = attended
             .transposed(0, 2, 1, 3)
-            .reshaped(1, length, config.headCount * config.headDimension)
+            .reshaped(batch, length, config.headCount * config.headDimension)
         return linear(out, "\(prefix).o_proj.weight")
     }
 
@@ -143,11 +202,46 @@ struct ACEQwen3 {
         return linear(gate * sigmoid(gate) * up, "\(prefix).down_proj.weight")
     }
 
-    private func causalMask(length: Int) -> MLXArray {
-        var values = [Float](repeating: 0, count: length * length)
+    /// Each of `length` new positions sees everything before it, including
+    /// the `offset` positions already in the cache.
+    private func causalMask(length: Int, offset: Int = 0) -> MLXArray {
+        let width = offset + length
+        var values = [Float](repeating: 0, count: length * width)
         for query in 0 ..< length {
-            for key in (query + 1) ..< length { values[query * length + key] = -1e9 }
+            for key in (offset + query + 1) ..< width { values[query * width + key] = -1e9 }
         }
-        return MLXArray(values, [1, 1, length, length])
+        return MLXArray(values, [1, 1, length, width]).asType(dtype)
     }
+}
+
+/// Keys and values of every position a sequence has seen, so each new token
+/// costs one position rather than the whole prefix again.
+///
+/// Allocated once at its full length and written in place, as mlx-lm does;
+/// concatenating per token would copy the whole cache every step.
+final class ACEKVCache {
+    private(set) var offset = 0
+    private let capacity: Int
+    private var keys: [Int: MLXArray] = [:]
+    private var values: [Int: MLXArray] = [:]
+
+    init(capacity: Int) { self.capacity = capacity }
+
+    /// Stores (1, heads, n, dim) new keys and values for `layer` and returns
+    /// everything up to them.
+    func update(layer: Int, keys newKeys: MLXArray, values newValues: MLXArray) -> (MLXArray, MLXArray) {
+        let count = newKeys.dim(2)
+        precondition(offset + count <= capacity, "planner cache overflow")
+        if keys[layer] == nil {
+            let shape = [newKeys.dim(0), newKeys.dim(1), capacity, newKeys.dim(3)]
+            keys[layer] = MLXArray.zeros(shape, dtype: .float16)
+            values[layer] = MLXArray.zeros(shape, dtype: .float16)
+        }
+        keys[layer]![0..., 0..., offset ..< offset + count, 0...] = newKeys.asType(.float16)
+        values[layer]![0..., 0..., offset ..< offset + count, 0...] = newValues.asType(.float16)
+        return (keys[layer]![0..., 0..., 0 ..< offset + count, 0...],
+                values[layer]![0..., 0..., 0 ..< offset + count, 0...])
+    }
+
+    func advance(by count: Int) { offset += count }
 }

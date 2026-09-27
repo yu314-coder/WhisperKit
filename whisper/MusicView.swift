@@ -183,7 +183,34 @@ struct MusicView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(Studio.rule, lineWidth: 0.5)
             )
+            if !promptSettings.isEmpty {
+                Label("From your prompt: \(promptSettingsSummary)", systemImage: "text.badge.checkmark")
+                    .font(Studio.mono(10))
+                    .foregroundColor(Studio.accent)
+            }
         }
+    }
+
+    /// Length, tempo, key and meter the prompt itself states.
+    private var promptSettings: PromptMetadata { PromptMetadata(parsing: prompt) }
+
+    private var promptSettingsSummary: String {
+        let settings = promptSettings
+        var parts: [String] = []
+        if let seconds = settings.seconds { parts.append(Self.formatLength(Double(seconds))) }
+        // Tempo, key and meter are read by ACE-Step's planner; Stable Audio
+        // takes them from the prompt text as written.
+        if selectedModel == .aceStep15 {
+            if let bpm = settings.bpm { parts.append("\(bpm) BPM") }
+            if let key = settings.keyscale { parts.append(key) }
+            if let beats = settings.timeSignature { parts.append(beats == 6 ? "6/8" : "\(beats)/4") }
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The length that will be generated: the prompt's, when it names one.
+    private var effectiveSeconds: Double {
+        promptSettings.seconds.map(Double.init) ?? durationSeconds
     }
 
     /// Lyrics are conditioning, not a caption: the model sings them, so an
@@ -237,23 +264,31 @@ struct MusicView: View {
     /// 384 seconds is the model's own ceiling, not an arbitrary cap: the
     /// conditioner clamps seconds_total to 0...384, so asking for more would
     /// feed it out-of-range conditioning and still produce 6:24 of audio.
-    /// Memory does not grow with length — a 6-minute render peaks no higher
-    /// than a 10-second one — but time does, roughly in proportion.
+    /// Memory grows only modestly with length — every stage but the
+    /// transformer's activations is fixed-size — while time grows roughly in
+    /// proportion.
     private static let maximumSeconds: Double = 384
 
+    /// The prompt decides the length when it names one ("1 minute 21
+    /// seconds", "1:21", "81s"); the slider follows it and is locked, so the
+    /// two can never disagree. It applies only to prompts that name none.
     private var lengthCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let fromPrompt = promptSettings.seconds != nil
+        return VStack(alignment: .leading, spacing: 10) {
             HStack {
                 StudioLabel(text: "Length")
                 Spacer()
-                Text(Self.formatLength(durationSeconds))
+                Text(Self.formatLength(effectiveSeconds))
                     .font(Studio.mono(11, weight: .semibold))
                     .foregroundColor(Studio.accent)
             }
-            Slider(value: $durationSeconds, in: 5...Self.maximumSeconds, step: 1)
+            Slider(value: fromPrompt ? .constant(effectiveSeconds) : $durationSeconds,
+                   in: 5...Self.maximumSeconds, step: 1)
                 .tint(Studio.accent)
+                .disabled(fromPrompt)
             HStack {
-                Text("5s").font(Studio.mono(9)).foregroundColor(Studio.mute)
+                Text(fromPrompt ? "Set by your prompt" : "5s").font(Studio.mono(9))
+                    .foregroundColor(fromPrompt ? Studio.accent : Studio.mute)
                 Spacer()
                 Text("6:24 max").font(Studio.mono(9)).foregroundColor(Studio.mute)
             }
@@ -281,8 +316,6 @@ struct MusicView: View {
                 noteRow(icon: "wrench.and.screwdriver", tint: Studio.mute, text: note)
             case .licenceRestricted(let note):
                 noteRow(icon: "hand.raised", tint: Studio.mute, text: note)
-            case .needsMoreMemory(let note):
-                noteRow(icon: "memorychip", tint: Studio.hot, text: note)
             }
         }
     }
@@ -412,7 +445,7 @@ struct MusicView: View {
                     engine.generate(model: selectedModel, prompt: prompt,
                                     lyrics: selectedModel.supportsLyrics ? lyrics : "",
                                     language: vocalLanguage,
-                                    seconds: durationSeconds)
+                                    seconds: effectiveSeconds)
                 }
             } label: {
                 Text(buttonTitle)
@@ -482,7 +515,6 @@ struct MusicModelPicker: View {
                 case .weightsPublished:    chip("UNTESTED", tint: Studio.hot)
                 case .needsConversion:     chip("NEEDS CONVERSION", tint: Studio.mute)
                 case .licenceRestricted:   chip("LICENCE", tint: Studio.mute)
-                case .needsMoreMemory:     chip("NEEDS MORE RAM", tint: Studio.hot)
                 }
                 chip(model.engine == .coreML ? "CORE ML" : "MLX", tint: Studio.mute)
             }

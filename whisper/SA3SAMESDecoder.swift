@@ -23,21 +23,35 @@ struct SAMESDecoder {
     let weights: [String: MLXArray]
 
     func decodeChunked(latents: MLXArray, chunkSize: Int = 8, overlap: Int = 2) -> MLXArray {
+        var pieces: [MLXArray] = []
+        decodeChunked(latents: latents, chunkSize: chunkSize, overlap: overlap) { pieces.append($0) }
+        return concatenated(pieces, axis: -1)
+    }
+
+    /// The same windows, each evaluated and handed to `emit` in order as it
+    /// is finished. Built as one lazy graph and concatenated, as the variant
+    /// above does, every window of a long clip could be alive at once.
+    func decodeChunked(latents: MLXArray, chunkSize: Int = 8, overlap: Int = 2,
+                       emit: (MLXArray) throws -> Void) rethrows {
         let latentLength = latents.dim(-1)
         let kernel = chunkSize + 2 * overlap
+        func finish(_ piece: MLXArray) throws {
+            eval(piece)
+            try emit(piece)
+        }
         if latentLength <= kernel {
-            return callAsFunction(latents)
+            try finish(callAsFunction(latents))
+            return
         }
 
-        var pieces: [MLXArray] = []
         let firstOutput = callAsFunction(latents[0..., 0..., 0 ..< kernel])
         let validFirst = chunkSize + overlap
-        pieces.append(firstOutput[0..., 0..., 0 ..< (validFirst * Self.stride)])
+        try finish(firstOutput[0..., 0..., 0 ..< (validFirst * Self.stride)])
         var index = validFirst
 
         while index + chunkSize + overlap <= latentLength {
             let out = callAsFunction(latents[0..., 0..., (index - overlap) ..< (index + chunkSize + overlap)])
-            pieces.append(out[0..., 0..., (overlap * Self.stride) ..< ((overlap + chunkSize) * Self.stride)])
+            try finish(out[0..., 0..., (overlap * Self.stride) ..< ((overlap + chunkSize) * Self.stride)])
             index += chunkSize
         }
 
@@ -45,10 +59,8 @@ struct SAMESDecoder {
         if remaining > 0 {
             let out = callAsFunction(latents[0..., 0..., (latentLength - kernel) ..< latentLength])
             let start = out.dim(-1) - remaining * Self.stride
-            pieces.append(out[0..., 0..., start...])
+            try finish(out[0..., 0..., start...])
         }
-
-        return concatenated(pieces, axis: -1)
     }
 
     func callAsFunction(_ latents: MLXArray) -> MLXArray {

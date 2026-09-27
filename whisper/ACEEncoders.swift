@@ -58,7 +58,22 @@ struct ACEEncoderStack {
     /// the reference, which is why this takes the checkpoint's word for
     /// nothing.
     func callAsFunction(_ inputs: MLXArray) -> MLXArray {
-        var h = linear(inputs, "embed_tokens.weight") + w("embed_tokens.bias")
+        encode(embedded: linear(inputs, "embed_tokens.weight") + w("embed_tokens.bias"))
+    }
+
+    /// The input projection, on its own. The detokenizer adds learned
+    /// per-position tokens between this and the layers.
+    func embed(_ inputs: MLXArray) -> MLXArray {
+        linear(inputs, "embed_tokens.weight") + w("embed_tokens.bias")
+    }
+
+    /// The layers and final norm over already-projected input.
+    ///
+    /// - Parameter embedded: (batch, length, 2048). Batched because the
+    ///   detokenizer treats every planner token as its own five-frame
+    ///   sequence — a thousand-odd of them for a long song.
+    func encode(embedded: MLXArray) -> MLXArray {
+        var h = embedded
         let (cos, sin) = rotaryTable(length: h.dim(1))
         let local = ACESlidingWindow.mask(length: h.dim(1))
 
@@ -78,10 +93,10 @@ struct ACEEncoderStack {
 
     private func attention(prefix: String, x: MLXArray, cos: MLXArray, sin: MLXArray,
                            mask: MLXArray?) -> MLXArray {
-        let length = x.dim(1)
+        let (batch, length) = (x.dim(0), x.dim(1))
         func heads(_ key: String, _ count: Int) -> MLXArray {
             linear(x, "\(prefix).\(key)_proj.weight")
-                .reshaped(1, length, count, Self.headDimension)
+                .reshaped(batch, length, count, Self.headDimension)
         }
         var q = rmsNorm(heads("q", Self.headCount),
                         weight: w("\(prefix).q_norm.weight"), eps: Self.epsilon)
@@ -98,7 +113,7 @@ struct ACEEncoderStack {
                                             scale: pow(Float(Self.headDimension), -0.5),
                                             mask: mask)
             .transposed(0, 2, 1, 3)
-            .reshaped(1, length, Self.headCount * Self.headDimension)
+            .reshaped(batch, length, Self.headCount * Self.headDimension)
         return linear(out, "\(prefix).o_proj.weight")
     }
 
@@ -158,5 +173,55 @@ enum ACESlidingWindow {
         return MLX.where(lessEqual(distance, MLXArray(Int32(radius))),
                          MLXArray(Float(0)), MLXArray(-Float.infinity))
             .reshaped(1, 1, length, length)
+    }
+}
+
+/// Planner tokens to the 25 Hz guide the diffusion transformer follows.
+///
+/// Each token is looked up in the FSQ codebook (exported from the reference
+/// quantizer rather than re-derived, so its level offsets are exactly its
+/// own), projected to 2048, then expanded to five frames: the projection is
+/// repeated, a learned token is added per frame, and two encoder layers run
+/// over each five-frame group on its own before the output projection.
+struct ACEHints {
+    static let framesPerCode = 5
+    let weights: [String: MLXArray]
+    var quantizationBits = 8
+
+    /// - Returns: (1, codes × 5, 64).
+    func callAsFunction(codes: [Int32]) -> MLXArray {
+        var stack = ACEEncoderStack(weights: weights, prefix: "detokenizer", layerCount: 2)
+        stack.quantizationBits = quantizationBits
+        let special = weights["detokenizer.special_tokens"]!.asType(.float32)       // (1, 5, 2048)
+        let projection = weights["tokenizer.quantizer.project_out.weight"]!.asType(.float32)
+        let projectionBias = weights["tokenizer.quantizer.project_out.bias"]!.asType(.float32)
+
+        // In small chunks. The two layers' intermediates for a chunk are all
+        // live at once — measured at about 1.8 MB per token, so 256 tokens
+        // cost 490 MB and a six-minute song whole would cost 3.5 GB. At 32
+        // the batch is still 160 rows, plenty to keep the GPU busy.
+        var pieces: [MLXArray] = []
+        for start in stride(from: 0, to: codes.count, by: 32) {
+            let chunk = Array(codes[start ..< min(start + 32, codes.count)])
+            let vectors = take(weights["fsq_codebook"]!, MLXArray(chunk), axis: 0)  // (n, 6)
+            let quantized = matmul(vectors, projection.T) + projectionBias             // (n, 2048)
+            let embedded = stack.embed(quantized.reshaped(chunk.count, 1, -1)) + special
+            let encoded = stack.encode(embedded: embedded)                             // (n, 5, 2048)
+            let out = outputProjection(encoded)                                        // (n, 5, 64)
+            eval(out)
+            pieces.append(out.reshaped(1, chunk.count * Self.framesPerCode, -1))
+        }
+        return concatenated(pieces, axis: 1)
+    }
+
+    private func outputProjection(_ x: MLXArray) -> MLXArray {
+        let key = "detokenizer.proj_out.weight"
+        let bias = weights["detokenizer.proj_out.bias"]!.asType(.float32)
+        if quantizationBits > 0, let packed = weights["\(key).wq"] {
+            return quantizedMatmul(x, packed, scales: weights["\(key).scales"]!,
+                                   biases: weights["\(key).biases"]!, transpose: true,
+                                   groupSize: 64, bits: quantizationBits) + bias
+        }
+        return matmul(x, weights[key]!.asType(.float32).T) + bias
     }
 }

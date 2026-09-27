@@ -62,15 +62,19 @@ enum StableAudioModelKind: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Prompt to audio with Stable Audio 3, one stage at a time.
+///
+/// This once kept every model it had loaded — text encoder, transformer,
+/// decoder — for the life of the app, which is how Medium came to need
+/// 3.5 GB and be killed on an 8 GB iPad. Now each stage maps its weights
+/// (`MappedWeights`: file-backed pages, not memory charged to the app),
+/// runs, and hands everything back before the next begins. Only the
+/// tokenizer, a few megabytes, is kept between runs.
 actor StableAudioPipeline {
     static let sampleRate = 44_100
     static let samplesPerLatent = 4_096
 
     private var cachedTokenizer: SentencepieceTokenizer?
-    private var cachedT5Encoder: T5GemmaEncoder?
-    private var cachedConditioners: [StableAudioModelKind: SA3Conditioning] = [:]
-    private var cachedDiTWeights: [StableAudioModelKind: [String: MLXArray]] = [:]
-    private var cachedDecoder: SAMESDecoder?
 
     struct Result {
         let url: URL
@@ -79,73 +83,88 @@ actor StableAudioPipeline {
         let elapsedSeconds: TimeInterval
     }
 
-    func generate(model: StableAudioModelKind, prompt: String, seconds: Float = 5, steps: Int = 8, seed: UInt64 = 20260522, progress: @escaping @Sendable (String) -> Void) throws -> Result {
+    func generate(model: StableAudioModelKind, prompt: String, seconds: Float = 5, steps: Int = 8,
+                  seed: UInt64 = 20260522, progress: @escaping @Sendable (String) -> Void) throws -> Result {
         let totalStartedAt = Date()
         let latentLength = Self.latentLength(for: seconds)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stable-audio-\(Int(Date().timeIntervalSince1970)).wav")
 
-        let conditioning = try Stream.withNewDefaultStream(device: .gpu) {
-            let t5StartedAt = Date()
-            progress("T5")
-            Self.logStart("T5", totalStartedAt: totalStartedAt)
-            let promptEncoding = try encodePrompt(prompt: prompt, maxLength: 256)
-            Self.logEnd("T5", startedAt: t5StartedAt, totalStartedAt: totalStartedAt)
+        try StageMemory.withoutCache {
+            // 1. Text encoder.
+            progress("Reading prompt")
+            let promptEncoding = try Stream.withNewDefaultStream(device: .gpu) {
+                try encodePrompt(prompt: prompt, maxLength: 256)
+            }
+            StageMemory.release()
+            try Task.checkCancellation()
 
-            let conditioningStartedAt = Date()
+            // 2. Conditioner: prompt plus the requested length.
             progress("Conditioning")
-            Self.logStart("Conditioning", totalStartedAt: totalStartedAt)
-            let conditioner = try loadConditioner(model: model)
-            let conditioned = conditioner.makeConditioning(promptEncoding: promptEncoding, seconds: seconds)
-            let crossAttention = conditioned.crossAttention.asType(.float16)
-            let globalCondition = conditioned.globalCondition.asType(.float16)
-            eval(crossAttention, globalCondition)
-            Self.logEnd("Conditioning", startedAt: conditioningStartedAt, totalStartedAt: totalStartedAt)
-            return (crossAttention, globalCondition)
+            let conditioning = try Stream.withNewDefaultStream(device: .gpu) {
+                let conditioner = SA3Conditioning(weights: try loadWeights(model.conditionerResourceName))
+                let conditioned = conditioner.makeConditioning(promptEncoding: promptEncoding, seconds: seconds)
+                let crossAttention = conditioned.crossAttention.asType(.float16)
+                let globalCondition = conditioned.globalCondition.asType(.float16)
+                eval(crossAttention, globalCondition)
+                return (crossAttention, globalCondition)
+            }
+            StageMemory.release()
+
+            // 3. Transformer, eight steps.
+            let latents = try Stream.withNewDefaultStream(device: .gpu) {
+                let dit = SA3DiT(weights: try loadDiTWeights(model), latentLength: latentLength,
+                                 config: model.ditConfig)
+                let latents = try sample(dit: dit, latentLength: latentLength, steps: steps, seed: seed,
+                                         totalStartedAt: totalStartedAt, crossAttention: conditioning.0,
+                                         globalCondition: conditioning.1, progress: progress)
+                eval(latents)
+                return latents
+            }
+            StageMemory.release()
+            try Task.checkCancellation()
+
+            // 4. Decoder, a chunk at a time, straight to disk.
+            progress("Decoding audio")
+            try Stream.withNewDefaultStream(device: .gpu) {
+                let decoder = SAMESDecoder(weights: try loadWeights("same_s_decoder_f32"))
+                let requested = Int((seconds * Float(Self.sampleRate)).rounded())
+                let writer = try StreamingWAVWriter(url: url, frames: requested, sampleRate: Self.sampleRate)
+                var written = 0
+                try decoder.decodeChunked(latents: latents.asType(.float32)) { patches in
+                    guard written < requested else { return }
+                    let audio = Self.patchedDecode(patches).asType(.float32)      // (1, 2, n)
+                    let take = min(audio.dim(2), requested - written)
+                    try writer.append(audio[0..., 0..., 0 ..< take].transposed(0, 2, 1))
+                    written += take
+                    try Task.checkCancellation()
+                }
+                try writer.finish()
+            }
         }
 
-        let latents = try Stream.withNewDefaultStream(device: .gpu) {
-            let loadStartedAt = Date()
-            progress("DiT load")
-            Self.logStart("DiT load", totalStartedAt: totalStartedAt)
-            let dit = try loadDiT(model: model, latentLength: latentLength)
-            Self.logEnd("DiT load", startedAt: loadStartedAt, totalStartedAt: totalStartedAt)
-
-            let samplingStartedAt = Date()
-            progress("Sampling")
-            Self.logStart("Sampling", totalStartedAt: totalStartedAt)
-            let latents = sample(dit: dit, latentLength: latentLength, steps: steps, seed: seed, totalStartedAt: totalStartedAt, crossAttention: conditioning.0, globalCondition: conditioning.1, progress: progress)
-            eval(latents)
-            Self.logEnd("Sampling", startedAt: samplingStartedAt, totalStartedAt: totalStartedAt)
-            return latents
-        }
-
-        let audio = try Stream.withNewDefaultStream(device: .gpu) {
-            let loadStartedAt = Date()
-            progress("Decoder load")
-            Self.logStart("Decoder load", totalStartedAt: totalStartedAt)
-            let decoder = try loadDecoder()
-            Self.logEnd("Decoder load", startedAt: loadStartedAt, totalStartedAt: totalStartedAt)
-
-            let forwardStartedAt = Date()
-            progress("Decoder forward")
-            Self.logStart("Decoder forward", totalStartedAt: totalStartedAt)
-            let patches = decoder.decodeChunked(latents: latents.asType(.float32))
-            let audio = Self.patchedDecode(patches).asType(.float32)
-            eval(audio)
-            Self.logEnd("Decoder forward", startedAt: forwardStartedAt, totalStartedAt: totalStartedAt)
-            return audio
-        }
-
-        let wavStartedAt = Date()
-        progress("Writing WAV")
-        Self.logStart("Writing WAV", totalStartedAt: totalStartedAt)
-        let requestedSamples = Int((seconds * Float(Self.sampleRate)).rounded())
-        let trimmed = audio[0, 0..., 0 ..< requestedSamples]
-        let url = try WAVWriter.writeStereoFloat32(trimmed, sampleRate: Self.sampleRate)
-        Self.logEnd("Writing WAV", startedAt: wavStartedAt, totalStartedAt: totalStartedAt)
         progress("Done")
         let elapsedSeconds = Date().timeIntervalSince(totalStartedAt)
-        print("[SA3] total \(Self.formatMilliseconds(elapsedSeconds))ms model=\(model.displayName) prompt=\"\(prompt)\" seconds=\(seconds) steps=\(steps) latentLength=\(latentLength)")
+        print("[SA3] total \(Self.formatMilliseconds(elapsedSeconds))ms model=\(model.displayName) seconds=\(seconds) steps=\(steps) latentLength=\(latentLength)")
         return Result(url: url, duration: seconds, latentLength: latentLength, elapsedSeconds: elapsedSeconds)
+    }
+
+    private func loadWeights(_ name: String) throws -> [String: MLXArray] {
+        guard let url = SA3Weights.url(forResource: name, withExtension: "safetensors") else {
+            throw WeightTensorLoaderError.missing("\(name).safetensors")
+        }
+        return try MappedWeights.load(url: url)
+    }
+
+    /// Medium ships as two shards: one file would exceed the 2 GB cap on a
+    /// release asset.
+    private func loadDiTWeights(_ model: StableAudioModelKind) throws -> [String: MLXArray] {
+        guard model.ditShardCount > 1 else { return try loadWeights(model.ditResourceName) }
+        var merged: [String: MLXArray] = [:]
+        for shard in 1 ... model.ditShardCount {
+            merged.merge(try loadWeights("\(model.ditResourceName).part\(shard)")) { current, _ in current }
+        }
+        return merged
     }
 
     private func sample(
@@ -157,7 +176,7 @@ actor StableAudioPipeline {
         crossAttention: MLXArray,
         globalCondition: MLXArray,
         progress: @escaping @Sendable (String) -> Void
-    ) -> MLXArray {
+    ) throws -> MLXArray {
         let schedule = Self.buildSchedule(steps: steps)
         var key = MLXRandom.key(seed)
         var x = MLXRandom.normal([1, 256, latentLength], dtype: .float16, key: key)
@@ -165,7 +184,8 @@ actor StableAudioPipeline {
 
         for index in 0 ..< steps {
             let stepStartedAt = Date()
-            progress("Sampling \(index + 1)/\(steps)")
+            try Task.checkCancellation()
+            progress("Step \(index + 1) of \(steps)")
             let current = schedule[index]
             let next = schedule[index + 1]
             let t = MLXArray([current], [1]).asType(.float16)
@@ -234,106 +254,7 @@ actor StableAudioPipeline {
     }
 
     private func loadT5Encoder() throws -> T5GemmaEncoder {
-        if let cachedT5Encoder {
-            print("[SA3] cache hit T5Gemma")
-            return cachedT5Encoder
-        }
-
-        guard let url = SA3Weights.url(
-            forResource: "t5gemma_f16",
-            withExtension: "safetensors",
-            subdirectory: "Weights"
-        ) else {
-            throw WeightTensorLoaderError.missing("t5gemma_f16.safetensors")
-        }
-
-        print("[SA3] cache miss T5Gemma, loading weights")
-        let weights = try loadArrays(url: url, stream: .cpu)
-        let encoder = try T5GemmaEncoder(weights: weights)
-        cachedT5Encoder = encoder
-        return encoder
-    }
-
-    private func loadConditioner(model: StableAudioModelKind) throws -> SA3Conditioning {
-        if let cachedConditioner = cachedConditioners[model] {
-            print("[SA3] cache hit conditioner \(model.displayName)")
-            return cachedConditioner
-        }
-
-        let fallbackMusicConditioner = model == .smallMusic
-            ? SA3Weights.url(
-                forResource: "sa3_conditioner",
-                withExtension: "safetensors",
-                subdirectory: "Weights"
-            )
-            : nil
-        guard let url = SA3Weights.url(
-            forResource: model.conditionerResourceName,
-            withExtension: "safetensors",
-            subdirectory: "Weights"
-        ) ?? fallbackMusicConditioner else {
-            throw WeightTensorLoaderError.missing("\(model.conditionerResourceName).safetensors")
-        }
-
-        print("[SA3] cache miss conditioner \(model.displayName), loading weights")
-        let weights = try loadArrays(url: url, stream: .cpu)
-        let conditioner = SA3Conditioning(weights: weights)
-        cachedConditioners[model] = conditioner
-        return conditioner
-    }
-
-    private func loadDiT(model: StableAudioModelKind, latentLength: Int) throws -> SA3DiT {
-        if let cachedDiTWeights = cachedDiTWeights[model] {
-            print("[SA3] cache hit DiT \(model.displayName)")
-            return SA3DiT(weights: cachedDiTWeights, latentLength: latentLength, config: model.ditConfig)
-        }
-
-        if model.ditShardCount > 1 {
-            var merged: [String: MLXArray] = [:]
-            for shard in 1 ... model.ditShardCount {
-                guard let url = SA3Weights.url(forResource: "\(model.ditResourceName).part\(shard)",
-                                               withExtension: "safetensors") else {
-                    throw WeightTensorLoaderError.missing("\(model.ditResourceName).part\(shard).safetensors")
-                }
-                merged.merge(try loadArrays(url: url, stream: .cpu)) { current, _ in current }
-            }
-            cachedDiTWeights[model] = merged
-            return SA3DiT(weights: merged, latentLength: latentLength, config: model.ditConfig)
-        }
-
-        guard let url = SA3Weights.url(
-            forResource: model.ditResourceName,
-            withExtension: "safetensors",
-            subdirectory: "Weights"
-        ) else {
-            throw WeightTensorLoaderError.missing(model.missingDiTFileName)
-        }
-
-        print("[SA3] cache miss DiT \(model.displayName), loading weights")
-        let weights = try loadArrays(url: url, stream: .cpu)
-        cachedDiTWeights[model] = weights
-        return SA3DiT(weights: weights, latentLength: latentLength, config: model.ditConfig)
-    }
-
-    private func loadDecoder() throws -> SAMESDecoder {
-        if let cachedDecoder {
-            print("[SA3] cache hit decoder")
-            return cachedDecoder
-        }
-
-        guard let url = SA3Weights.url(
-            forResource: "same_s_decoder_f32",
-            withExtension: "safetensors",
-            subdirectory: "Weights"
-        ) else {
-            throw WeightTensorLoaderError.missing("same_s_decoder_f32.safetensors")
-        }
-
-        print("[SA3] cache miss decoder, loading weights")
-        let weights = try loadArrays(url: url, stream: .cpu)
-        let decoder = SAMESDecoder(weights: weights)
-        cachedDecoder = decoder
-        return decoder
+        try T5GemmaEncoder(weights: try loadWeights("t5gemma_f16"))
     }
 
     static func latentLength(for seconds: Float) -> Int {
@@ -381,64 +302,6 @@ actor StableAudioPipeline {
 
     private static func formatMilliseconds(_ seconds: TimeInterval) -> Int {
         Int((seconds * 1000).rounded())
-    }
-}
-
-enum WAVWriter {
-    static func writeStereoFloat32(_ audio: MLXArray, sampleRate: Int) throws -> URL {
-        let shape = audio.shape
-        precondition(shape.count == 2 && shape[0] == 2)
-        let samples = shape[1]
-        let values = audio.asArray(Float.self)
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("stable-audio-\(Int(Date().timeIntervalSince1970)).wav")
-
-        var data = Data()
-        appendString("RIFF", to: &data)
-        appendUInt32(UInt32(36 + samples * 2 * 2), to: &data)
-        appendString("WAVE", to: &data)
-        appendString("fmt ", to: &data)
-        appendUInt32(16, to: &data)
-        appendUInt16(1, to: &data)
-        appendUInt16(2, to: &data)
-        appendUInt32(UInt32(sampleRate), to: &data)
-        appendUInt32(UInt32(sampleRate * 2 * 2), to: &data)
-        appendUInt16(4, to: &data)
-        appendUInt16(16, to: &data)
-        appendString("data", to: &data)
-        appendUInt32(UInt32(samples * 2 * 2), to: &data)
-
-        for index in 0 ..< samples {
-            appendPCM(values[index], to: &data)
-            appendPCM(values[samples + index], to: &data)
-        }
-
-        try data.write(to: url, options: [.atomic])
-        return url
-    }
-
-    private static func appendPCM(_ value: Float, to data: inout Data) {
-        let clipped = max(-1.0, min(1.0, value))
-        appendInt16(Int16(clipped * 32767.0), to: &data)
-    }
-
-    private static func appendString(_ string: String, to data: inout Data) {
-        data.append(string.data(using: .ascii)!)
-    }
-
-    private static func appendUInt16(_ value: UInt16, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
-    }
-
-    private static func appendInt16(_ value: Int16, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
-    }
-
-    private static func appendUInt32(_ value: UInt32, to data: inout Data) {
-        var little = value.littleEndian
-        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
     }
 }
 

@@ -29,7 +29,7 @@ and classifier-free guidance.
 
 Ships in the app — the code is `whisper/ACE*.swift`; only the weight
 converter lives here (`convert_weights.py`). Text prompt and lyrics in any of
-its 50 vocal languages.
+its 50 vocal languages, with the 1.7B planner as upstream runs it.
 
 Verified against the official pipeline (`ace-step/ACE-Step-1.5`,
 `generate_audio`), not only module by module — the module checks all passed
@@ -61,6 +61,37 @@ What the module checks missed, all fixed:
   checks used; a 30-second clip is 375, and timbre is always 750.
 - **Silence latent** was trimmed to 60 s, which capped generation there.
 
+**Planner** (`ACEPlanner.swift`). Without it the diffusion transformer decides
+when a song is over, and at 81 seconds four of four runs went silent 5 to 24
+seconds early. With it, four of four have sound to the last second.
+
+| check | result |
+|---|---|
+| Chat-template prompts, both phases, token ids | identical |
+| Reasoning block vs PyYAML, 13 captions (folding, quoting, Ukrainian, Chinese) | identical |
+| Next-token logits, float32 / shipped int8 | cosine 1.0 / 0.99999, same argmax |
+| Same, through the KV cache | cosine 1.0 / 0.99999 |
+| Guidance pair batched vs separate | cosine 0.99997 |
+| Tokens to 25 Hz guide (FSQ + detokenizer) | cosine 0.999996 |
+
+Departures from upstream defaults, each deliberate:
+
+- **The caption is the user's.** Upstream lets the planner rewrite it; at its
+  sampling temperature "a restrained underscore with soft granular pads" came
+  back as energetic synthwave, and the music followed. `use_cot_caption` is
+  upstream's own switch for this.
+- **No planned silence.** The planner learned from recordings that end in
+  silence and writes 5-15 s of it at the end of a requested length. The
+  silence token (35847, found by tokenizing the silence latent) is excluded
+  until the final second.
+- **Tempo, key and meter from the prompt** are written into the reasoning
+  instead of sampled, as upstream does for its UI fields.
+- **Phase 1 without the 2,300-line state machine:** field names are forced in
+  order and values sampled, with the same multi-line caption rule.
+
+Planning an 81-second song takes about 25 s on an M4 Mac; the guidance pair
+runs as one batch of two, which costs the same as one row.
+
 **Memory.** Peak for a 30-second song on a Mac went from 3.58 GB to 0.74 GB,
 same output and speed; the 6:24 maximum peaks at 1.6 GB.
 
@@ -88,8 +119,8 @@ same output and speed; the 6:24 maximum peaks at 1.6 GB.
 stays float16: Qwen3's outlier channels made it the largest single source of
 drift at int8 (final latent 0.960 with it quantized, 0.983 without).
 
-Still missing: the FSQ tokenizer and detokenizer, which turn supplied audio
-into acoustic latents — so reference audio and covers are unavailable.
+Still missing: the FSQ audio encoder side, which turns supplied audio into
+tokens — so reference audio and covers are unavailable.
 
 ## What kept going wrong
 

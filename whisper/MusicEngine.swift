@@ -192,11 +192,14 @@ final class MusicEngine {
         guard let kind = model.stableAudioKind else {
             throw MusicEngineError.notImplemented(model.displayName)
         }
+        // A fresh seed per run: a fixed one made the same prompt give the
+        // same clip every time.
         let result = try await pipeline.generate(
             model: kind,
             prompt: prompt,
             seconds: Float(seconds),
             steps: 8,
+            seed: UInt64.random(in: 0 ... UInt64(UInt32.max)),
             progress: { stage in
                 Task { @MainActor [weak self] in self?.phase = .generating(stage: stage) }
             }
@@ -235,9 +238,13 @@ extension MusicEngine {
             try await Task.detached(priority: .userInitiated) { [weak self] in
             _ = try generator.generate(caption: prompt, lyrics: lyrics, language: language,
                                        seconds: seconds, seed: seed, to: destination,
+                                       known: PromptMetadata(parsing: prompt),
                                        isCancelled: { flag.isCancelled }) { stage in
                 let label: String
                 switch stage {
+                case .planning:               label = "Planning the song"
+                case .writing(let done, let of):
+                    label = "Writing the song \(Int(Double(done) / Double(max(of, 1)) * 100))%"
                 case .readingPrompt:          label = "Reading prompt"
                 case .conditioning:           label = lyrics.isEmpty ? "Conditioning" : "Reading lyrics"
                 case .step(let step, let of): label = "Step \(step) of \(of)"

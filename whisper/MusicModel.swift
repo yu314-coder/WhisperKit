@@ -63,36 +63,15 @@ enum MusicModel: String, CaseIterable, Identifiable {
         case needsConversion(note: String)
         /// Ported and working, but the weights may not be distributed here.
         case licenceRestricted(note: String)
-        /// Runs, but not on a device with this much memory.
-        case needsMoreMemory(note: String)
-    }
-
-    /// Physical memory this model needs, in gigabytes.
-    ///
-    /// Measured, not guessed: Medium peaks at 3.5 GB generating, which an 8 GB
-    /// iPad Air cannot survive — iOS killed it mid-generation in testing. A
-    /// 12 GB device has the headroom. Small peaks near 1.8 GB and runs
-    /// anywhere.
-    var minimumPhysicalMemoryGB: Double {
-        switch self {
-        case .stableAudio3Medium: return 10
-        default:                  return 0
-        }
-    }
-
-    static var physicalMemoryGB: Double {
-        Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
     }
 
     var availability: Availability {
         switch self {
-        case .stableAudio3Small:
-            return .ready
-        case .stableAudio3Medium:
-            guard Self.physicalMemoryGB >= minimumPhysicalMemoryGB else {
-                return .needsMoreMemory(
-                    note: String(format: "Medium peaks around 3.5 GB while generating, which is more than iOS allows an app on a %.0f GB device — it is killed part-way. Small runs comfortably here.", Self.physicalMemoryGB))
-            }
+        case .stableAudio3Small, .stableAudio3Medium:
+            // Medium was fenced off below 10 GB after it was killed on an
+            // 8 GB iPad at 3.5 GB. With weights mapped and stages run one at a
+            // time it peaks at 0.63 GB for 81 s and 1.4 GB at the 6:24
+            // maximum, measured on a Mac.
             return .ready
         case .magentaRealtime2:
             return .weightsPublished(
@@ -105,8 +84,8 @@ enum MusicModel: String, CaseIterable, Identifiable {
                 note: "Ported and working, but Meta licenses these weights for non-commercial use only (CC-BY-NC 4.0), so they are not distributed with this app.")
         case .aceStep15:
             // Weights are mapped rather than loaded and each stage runs
-            // alone; measured on a Mac, a 30-second song peaks at 0.74 GB and
-            // the 6:24 maximum at 1.6 GB, against 3.6 GB before. See
+            // alone; measured on a Mac with the planner, an 81-second song
+            // peaks at 0.78 GB, against 3.6 GB for 30 seconds before. See
             // `ACEGenerator` and `MappedWeights`.
             return .ready
         }
@@ -131,7 +110,7 @@ enum MusicModel: String, CaseIterable, Identifiable {
     var releaseTag: String {
         switch self {
         case .aceStep15: return "acestep-v2"
-        default:         return "sa3-small-weights-v1"
+        default:         return "sa3-weights-v2"
         }
     }
 
@@ -172,21 +151,23 @@ enum MusicModel: String, CaseIterable, Identifiable {
     var weightFiles: [(path: String, bytes: Int64)] {
         // Text encoder, decoder and tokenizer are shared by both Stable Audio
         // variants, so switching between them only fetches a different DiT.
+        // 64-byte-aligned rewrites of the v1 conversions (same tensors), so
+        // they can be mapped; see ports/stable-audio-3/align_weights.py.
         let shared: [(String, Int64)] = [
-            ("t5gemma_f16.safetensors", 567_416_533),
-            ("same_s_decoder_f32.safetensors", 218_069_578),
+            ("t5gemma_f16.safetensors", 567_416_686),
+            ("same_s_decoder_f32.safetensors", 218_069_540),
             ("t5gemma_tokenizer.model", 4_241_003),
         ]
         switch self {
         case .stableAudio3Small:
-            return (shared + [("dit_sm-music_f16.safetensors", 919_104_895),
-                              ("sa3_conditioner_sm-music.safetensors", 792_862)])
+            return (shared + [("dit_sm-music_f16.safetensors", 919_104_928),
+                              ("sa3_conditioner_sm-music.safetensors", 792_896)])
                 .map { (path: $0.0, bytes: $0.1) }
         case .stableAudio3Medium:
             // Two shards: one 2.9 GB file exceeds the 2 GB release-asset cap.
-            return (shared + [("dit_medium_f16.part1.safetensors", 1_445_754_371),
-                              ("dit_medium_f16.part2.safetensors", 1_461_439_235),
-                              ("sa3_conditioner_medium.safetensors", 792_862)])
+            return (shared + [("dit_medium_f16.part1.safetensors", 1_445_754_368),
+                              ("dit_medium_f16.part2.safetensors", 1_461_439_328),
+                              ("sa3_conditioner_medium.safetensors", 792_896)])
                 .map { (path: $0.0, bytes: $0.1) }
         case .aceStep15:
             // One file per stage, so a stage maps only its own. Built by
@@ -199,7 +180,11 @@ enum MusicModel: String, CaseIterable, Identifiable {
                     (ACEGenerator.File.decoder, 168_807_360),
                     (ACEGenerator.File.silence, 1_920_128),
                     (ACEGenerator.File.vocabulary, 2_776_833),
-                    (ACEGenerator.File.merges, 1_671_853)]
+                    (ACEGenerator.File.merges, 1_671_853),
+                    // The planner, which lays the song out before it is
+                    // rendered — without it songs often ended early.
+                    (ACEGenerator.File.planner, 2_086_211_264),
+                    (ACEGenerator.File.hints, 119_730_496)]
                 .map { (path: $0.0, bytes: $0.1) }
         case .magentaRealtime2, .musicGenSmall:
             return []
