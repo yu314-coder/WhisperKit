@@ -15,7 +15,6 @@ struct MusicView: View {
     @FocusState private var lyricsFocused: Bool
     @State private var selectedModel: MusicModel = .stableAudio3Small
     @State private var showModelPicker = false
-    @State private var durationSeconds: Double = 10
     @State private var engine = MusicEngine()
     @State private var showLibrary = false
     @Environment(\.modelContext) private var modelContext
@@ -38,7 +37,6 @@ struct MusicView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     promptCard
                     if selectedModel.supportsLyrics { lyricsCard }
-                    lengthCard
                     if engine.isBusy || engine.lastResult != nil || engine.failureMessage != nil {
                         progressCard
                     }
@@ -160,7 +158,7 @@ struct MusicView: View {
             StudioLabel(text: "Prompt")
             ZStack(alignment: .topLeading) {
                 if prompt.isEmpty {
-                    Text("A slow lo-fi beat with warm bass and vinyl crackle")
+                    Text("A slow lo-fi beat with warm bass and vinyl crackle, 1 minute 30 seconds")
                         .font(Studio.text(15))
                         .foregroundColor(Studio.mute.opacity(0.7))
                         .padding(.top, 8)
@@ -183,6 +181,16 @@ struct MusicView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(Studio.rule, lineWidth: 0.5)
             )
+            // The length comes from the prompt alone; there is no separate
+            // control to disagree with it. This line says what was read —
+            // or, when the prompt names no length, what will be used.
+            if promptSettings.seconds == nil {
+                Label("No length in your prompt — \(Self.formatLength(Self.defaultSeconds)) will be made. Add one, like “90 seconds” or “2:30”.",
+                      systemImage: "clock")
+                    .font(Studio.mono(10))
+                    .foregroundColor(Studio.mute)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if !promptSettings.isEmpty {
                 Label("From your prompt: \(promptSettingsSummary)", systemImage: "text.badge.checkmark")
                     .font(Studio.mono(10))
@@ -208,9 +216,14 @@ struct MusicView: View {
         return parts.joined(separator: " · ")
     }
 
-    /// The length that will be generated: the prompt's, when it names one.
+    /// Used when the prompt names no length.
+    private static let defaultSeconds: Double = 30
+
+    /// The length that will be generated: the prompt's, or the default.
+    /// `PromptMetadata` already keeps it within 5 seconds to 6:24, the
+    /// models' own range.
     private var effectiveSeconds: Double {
-        promptSettings.seconds.map(Double.init) ?? durationSeconds
+        promptSettings.seconds.map(Double.init) ?? Self.defaultSeconds
     }
 
     /// Lyrics are conditioning, not a caption: the model sings them, so an
@@ -258,40 +271,6 @@ struct MusicView: View {
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Studio.sunk))
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(Studio.rule, lineWidth: 0.5))
-        }
-    }
-
-    /// 384 seconds is the model's own ceiling, not an arbitrary cap: the
-    /// conditioner clamps seconds_total to 0...384, so asking for more would
-    /// feed it out-of-range conditioning and still produce 6:24 of audio.
-    /// Memory grows only modestly with length — every stage but the
-    /// transformer's activations is fixed-size — while time grows roughly in
-    /// proportion.
-    private static let maximumSeconds: Double = 384
-
-    /// The prompt decides the length when it names one ("1 minute 21
-    /// seconds", "1:21", "81s"); the slider follows it and is locked, so the
-    /// two can never disagree. It applies only to prompts that name none.
-    private var lengthCard: some View {
-        let fromPrompt = promptSettings.seconds != nil
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                StudioLabel(text: "Length")
-                Spacer()
-                Text(Self.formatLength(effectiveSeconds))
-                    .font(Studio.mono(11, weight: .semibold))
-                    .foregroundColor(Studio.accent)
-            }
-            Slider(value: fromPrompt ? .constant(effectiveSeconds) : $durationSeconds,
-                   in: 5...Self.maximumSeconds, step: 1)
-                .tint(Studio.accent)
-                .disabled(fromPrompt)
-            HStack {
-                Text(fromPrompt ? "Set by your prompt" : "5s").font(Studio.mono(9))
-                    .foregroundColor(fromPrompt ? Studio.accent : Studio.mute)
-                Spacer()
-                Text("6:24 max").font(Studio.mono(9)).foregroundColor(Studio.mute)
-            }
         }
     }
 

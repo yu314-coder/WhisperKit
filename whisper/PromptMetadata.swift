@@ -3,9 +3,9 @@ import Foundation
 /// What a music prompt says about its own length, tempo, key and meter.
 ///
 /// The prompt is the control. Someone who writes "a 1 minute 21 second
-/// underscore at 120 BPM in C minor" has already said how long it runs, and
-/// a separate slider set to something else should not quietly win — the
-/// length slider only applies when the prompt names no length.
+/// underscore at 120 BPM in C minor" has already said how long it runs, so
+/// there is no separate length control to disagree with it; a prompt that
+/// names no length gets a stated default.
 struct PromptMetadata: Equatable {
     var seconds: Int?
     var bpm: Int?
@@ -14,6 +14,10 @@ struct PromptMetadata: Equatable {
     /// Beats per bar: 2, 3, 4 or 6.
     var timeSignature: Int?
 
+    /// 6:24 is the models' own ceiling, not an arbitrary cap: Stable Audio's
+    /// conditioner clamps its seconds input to 0...384, so asking for more
+    /// would still produce 6:24. A longer request is made at 6:24, and the
+    /// summary under the prompt shows it.
     static let secondsRange = 5 ... 384
 
     init(parsing prompt: String) {
