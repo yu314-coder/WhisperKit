@@ -82,7 +82,10 @@ enum MusicModel: String, CaseIterable, Identifiable {
             generator.transformerEngine = .gpu
             generator.transformerShape = .xl
             generator.transformerFiles = Self.parts("ace_xl_decoder_q8", 3)
-            generator.conditionerFiles = [ACEGenerator.File.conditioner, "ace_xl_cond_q8.safetensors"]
+            generator.conditionerFiles = [ACEGenerator.File.conditioner, "ace_xl_cond_f16.safetensors"]
+            // Float16 would be 8.1 GB, more than an 8 GB device holds; the
+            // XL transformer stays int8 (4.7 GB). Everything else is full
+            // precision in both versions.
             // The 4B planner matched prompts more closely (CLAP 0.501 against
             // 0.438) but its songs broke apart more: 17 abrupt changes in 196
             // window pairs against 6. The 1.7B planner stays.
@@ -113,17 +116,21 @@ enum MusicModel: String, CaseIterable, Identifiable {
         let release: String
     }
 
-    /// The files every version reads, from release acestep-v2.
+    /// The files every version reads: from release acestep-v2, and the
+    /// full-precision planner, condition encoder and hints from acestep-v4.
     private static let shared: [WeightFile] = ([
         (ACEGenerator.File.textEncoder, 1_191_586_112),
-        (ACEGenerator.File.conditioner, 684_509_312),
         (ACEGenerator.File.decoder, 168_807_360),
         (ACEGenerator.File.silence, 1_920_128),
         (ACEGenerator.File.vocabulary, 2_776_833),
         (ACEGenerator.File.merges, 1_671_853),
-        (ACEGenerator.File.hints, 119_730_496),
-        (ACEGenerator.File.planner, 2_086_211_264),
     ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v2") }
+        + ([
+            (ACEGenerator.File.conditioner, 1_216_753_088),
+            (ACEGenerator.File.hints, 211_591_744),
+            (ACEGenerator.File.planner[0], 1_896_403_904),
+            (ACEGenerator.File.planner[1], 1_812_117_376),
+        ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v4") }
 
     var weightFiles: [WeightFile] {
         switch self {
@@ -157,11 +164,11 @@ enum MusicModel: String, CaseIterable, Identifiable {
     ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v3") }
 
     static let xlFiles: [WeightFile] = ([
-        ("ace_xl_cond_q8.safetensors", 4_888_128),
         ("ace_xl_decoder_q8.part1.safetensors", 1_895_498_560),
         ("ace_xl_decoder_q8.part2.safetensors", 1_888_113_216),
         ("ace_xl_decoder_q8.part3.safetensors", 908_410_816),
     ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v3") }
+        + [WeightFile(path: "ace_xl_cond_f16.safetensors", bytes: 8_672_128, release: "acestep-v4")]
 
     /// Release assets are flat, so a file in a subfolder is published with
     /// its slashes as "__".

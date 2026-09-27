@@ -286,6 +286,34 @@ struct ACEPlanner {
         return codes
     }
 
+    /// For verification: the guided distribution at every step while the
+    /// given codes are fed in, the way `writeCodes` feeds sampled ones.
+    /// Returns each step's entropy at `temperature`, the log-probability of
+    /// the code that follows, and the most likely code.
+    func forcedScores(conditional: [Int32], unconditional: [Int32],
+                      codes: [Int32]) -> [(entropy: Float, chosen: Float, top: Int32)] {
+        let padding = conditional.count - unconditional.count
+        let batch = conditional + [Int32](repeating: ACETokenizer.endOfText, count: padding) + unconditional
+        let cache = ACEKVCache(capacity: conditional.count + codes.count + 1)
+        var last = feedPair(MLXArray(batch, [2, conditional.count]), cache: cache,
+                            mask: Self.pairMask(queries: conditional.count, offset: 0, padding: padding))
+        let codeRows = Self.codeBase ..< Self.codeBase + Self.codebookSize
+        var result: [(Float, Float, Int32)] = []
+        for code in codes {
+            let scores = model.logits(last, rows: codeRows)
+            let guided = scores[1 ..< 2] + guidance * (scores[0 ..< 1] - scores[1 ..< 2])
+            let tempered = guided / temperature
+            let logprobs = tempered - logSumExp(tempered, axis: -1, keepDims: true)
+            let entropy = -(exp(logprobs) * logprobs).sum().item(Float.self)
+            result.append((entropy, logprobs[0, Int(code)].item(Float.self),
+                           argMax(guided, axis: -1).item(Int32.self)))
+            let token = Int32(Self.codeBase) + code
+            last = feedPair(MLXArray([token, token], [2, 1]), cache: cache,
+                            mask: Self.pairMask(queries: 1, offset: cache.offset, padding: padding))
+        }
+        return result
+    }
+
     /// Logit penalties for tokens that would extend an exact copy of
     /// something already written — the "don't repeat yourself" sampler used
     /// against loops in text models.

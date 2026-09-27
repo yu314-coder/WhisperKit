@@ -178,10 +178,8 @@ struct ACEQwen3 {
         // Norms apply per head, before the rotary embedding.
         q = rmsNorm(q, weight: w("\(prefix).q_norm.weight"), eps: config.epsilon)
         k = rmsNorm(k, weight: w("\(prefix).k_norm.weight"), eps: config.epsilon)
-        q = RoPE(q, dimensions: config.headDimension, traditional: false,
-                 base: config.ropeTheta, scale: 1, offset: offset)
-        k = RoPE(k, dimensions: config.headDimension, traditional: false,
-                 base: config.ropeTheta, scale: 1, offset: offset)
+        q = rotate(q, offset: offset)
+        k = rotate(k, offset: offset)
 
         // Grouped-query attention: the fused kernel pairs each key/value head
         // with its query group itself, so k and v are passed untiled.
@@ -202,6 +200,31 @@ struct ACEQwen3 {
             .transposed(0, 2, 1, 3)
             .reshaped(batch, length, config.headCount * config.headDimension)
         return linear(out, "\(prefix).o_proj.weight")
+    }
+
+    /// Rotary embedding at `offset`, for (batch, heads, length, dim).
+    ///
+    /// MLX's fused rope gets one shape wrong: several rows of one position
+    /// each. The first row is rotated to `offset`; the others come out at
+    /// no position at all (max difference 3.7 against the same row alone,
+    /// and against its neighbours). That is the planner's guidance pair
+    /// writing a code, so every code step scrambled the unconditional row:
+    /// its next-code distribution had entropy 9.8 where the row alone has
+    /// 8.1, guidance against that noise made the plan overconfident, and
+    /// songs looped — 90% of a 1:52 plan repeated its first 4 or 16
+    /// seconds, against 12-32% for the reference. Rows of several positions
+    /// are rotated correctly, so a single-position batch is folded into the
+    /// heads, where every entry shares the position.
+    private func rotate(_ x: MLXArray, offset: Int) -> MLXArray {
+        let (batch, heads, length) = (x.dim(0), x.dim(1), x.dim(2))
+        guard batch > 1, length == 1 else {
+            return RoPE(x, dimensions: config.headDimension, traditional: false,
+                        base: config.ropeTheta, scale: 1, offset: offset)
+        }
+        return RoPE(x.reshaped(1, batch * heads, 1, config.headDimension),
+                    dimensions: config.headDimension, traditional: false,
+                    base: config.ropeTheta, scale: 1, offset: offset)
+            .reshaped(batch, heads, 1, config.headDimension)
     }
 
     private func feedForward(prefix: String, x: MLXArray) -> MLXArray {

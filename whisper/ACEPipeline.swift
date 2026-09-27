@@ -187,14 +187,15 @@ struct ACEGenerator {
 
     enum File {
         static let textEncoder = "ace_qwen_f16.safetensors"
-        static let conditioner = "ace_cond_q8.safetensors"
+        static let conditioner = "ace_cond_f16.safetensors"
         static let transformer = "ace_decoder_q8.safetensors"
         static let decoder = "ace_vae_f16.safetensors"
         static let silence = "ace_silence_full.safetensors"
         static let vocabulary = "ace_vocab.json"
         static let merges = "ace_merges.txt"
-        static let planner = "ace_lm_q8.safetensors"
-        static let hints = "ace_hints_q8.safetensors"
+        /// The planner as published, bfloat16, in two parts.
+        static let planner = ["ace_lm_bf16.part1.safetensors", "ace_lm_bf16.part2.safetensors"]
+        static let hints = "ace_hints_f16.safetensors"
     }
 
     let directory: URL
@@ -231,10 +232,15 @@ struct ACEGenerator {
     var plannerGuidance: Float = 2.0
     /// See `ACEPlanner.copyAllowance`.
     var plannerCopyAllowance: Int? = 12
+    /// Plan a prompt's timeline part by part; see `ACEPlanner.plan`.
+    var plansBySection = true
+    /// What the planner computes in: bfloat16, as upstream runs it. Its
+    /// activations overflow float16.
+    var plannerDType: DType = .bfloat16
     /// What the transformer computes in. Float16 needs float16 weights.
     var transformerDType: DType = .float32
     /// Which planner, and its shape. Files over 2 GB come in parts.
-    var plannerFiles = [File.planner]
+    var plannerFiles = File.planner
     var plannerConfig = ACEQwen3.Config.planner
     /// Which diffusion transformer, and its shape.
     var transformerFiles = [File.transformer]
@@ -303,7 +309,7 @@ struct ACEGenerator {
         // the piece its shape. The rest of the prompt is then the caption:
         // the text encoder keeps 256 tokens, and a long timeline would push
         // the style out.
-        let sections = hasLyrics || !usesPlanner ? [] : known?.sections ?? []
+        let sections = hasLyrics || !usesPlanner || !plansBySection ? [] : known?.sections ?? []
         let caption = sections.isEmpty ? caption
             : known.map { $0.style.isEmpty ? sections.map(\.description).joined(separator: ", ") : $0.style } ?? caption
 
@@ -314,6 +320,7 @@ struct ACEGenerator {
             plan = try {
                 var model = ACEQwen3(weights: try load(plannerFiles), config: plannerConfig, prefix: "")
                 model.quantizationBits = quantizationBits
+                model.dtype = plannerDType
                 var planner = ACEPlanner(model: model, tokenizer: tokenizer)
                 planner.guidance = plannerGuidance
                 planner.copyAllowance = plannerCopyAllowance

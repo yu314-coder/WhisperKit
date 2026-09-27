@@ -34,7 +34,9 @@ def save_aligned(path, tensors):
         f.write(struct.pack("<Q", len(text)))
         f.write(text.encode())
         for _, array in items:
-            f.write(np.array(array).tobytes())
+            # NumPy has no bfloat16; its bits are written as they are.
+            raw = mx.view(array, mx.uint16) if array.dtype == mx.bfloat16 else array
+            f.write(np.array(raw).tobytes())
     misaligned = [n for n, h in header.items() if (8 + len(text) + h["data_offsets"][0]) % ALIGN]
     print(f"{os.path.basename(path)}: {len(items)} tensors, {os.path.getsize(path):,} bytes, "
           f"{len(misaligned)} not 64-byte aligned")

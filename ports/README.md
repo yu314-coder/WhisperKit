@@ -100,6 +100,38 @@ The transformer shapes a whole piece to whatever window it renders, ending
 included, so the window is made 20% longer than what is kept and the cut is
 faded; no run above left a silent tail.
 
+**The planner's guidance was broken by an MLX bug (fixed in 1.2 (24)).**
+MLX's fused rotary embedding (mlx-swift 0.31.6) mis-rotates every row but
+the first when a batch has one position per row — max difference 3.7
+against the same row alone, and against its neighbouring positions. The
+planner writes each code as exactly that batch: the guidance pair. So the
+unconditional row was scrambled on every step (next-code entropy 9.8 where
+the row alone has 8.1), and guidance against that noise sharpened the
+plan until it looped: 90% of a 1:52 plan repeated its first 4 or 16
+seconds, against 12-32% for a line-for-line Python copy of upstream's
+sampler on the original weights. Found by feeding the reference's codes
+through the port and comparing step by step — conditional alone matched
+(entropy 4.09 / 4.09), unconditional alone matched, the pair did not,
+blocks of several codes did. `ACEQwen3.rotate` folds such a batch into the
+heads. After the fix the guided distribution matches the reference at every
+stage of the song (entropy 4.28 / 4.24 early, 0.65 / 0.68 late); on seven
+prompts at 81 s, own-prompt CLAP 0.506 -> 0.551 and no plan repeats more
+than a quarter of itself. Every earlier build with the planner had it.
+
+**Full precision.** The planner now runs as published, bfloat16 (upstream's
+precision; Qwen3 overflows float16), and the condition encoder and hints in
+float16 (`convert_full.py`); only XL's transformer stays int8, because at
+float16 it is 8.1 GB. With the fix, seven prompts at 81 s:
+
+| | own prompt | margin over others | neighbours | abrupt | 15 s+ apart |
+|---|---|---|---|---|---|
+| int8 planner, before the fix | 0.506 | +0.035 | 0.903 | 16/182 | 0.839 |
+| int8 planner, fixed | 0.551 | +0.062 | 0.908 | 15/182 | 0.858 |
+| **full precision, fixed** | **0.594** | **+0.140** | **0.914** | **11/182** | **0.863** |
+
+Planning costs about 1.3x the int8 time (54 s against 40 s for 1:52 on an
+M4).
+
 **Loops.** Followed throughout, the plan's own habits become the song's,
 and on long pieces the planner loops. For a 1:52 underscore it copied a
 4-second pattern for 34 seconds and then wrote one token 446 times; another
