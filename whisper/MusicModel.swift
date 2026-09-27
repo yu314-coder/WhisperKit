@@ -148,7 +148,14 @@ enum MusicModel: String, CaseIterable, Identifiable {
     }
 
     func downloadURL(for fileName: String) -> URL? {
-        URL(string: "\(Self.releaseRoot)/\(releaseTag)/\(fileName)")
+        #if DEBUG
+        // For testing interrupted downloads against a local server:
+        // launch with `-MusicWeightsRootOverride http://127.0.0.1:8765`.
+        if let root = UserDefaults.standard.string(forKey: "MusicWeightsRootOverride") {
+            return URL(string: "\(root)/\(releaseTag)/\(fileName)")
+        }
+        #endif
+        return URL(string: "\(Self.releaseRoot)/\(releaseTag)/\(fileName)")
     }
 
     /// Files to fetch from `weightsRepo`, with their published sizes in MB.

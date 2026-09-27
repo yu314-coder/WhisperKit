@@ -311,6 +311,11 @@ struct MusicView: View {
                         .font(Studio.mono(10))
                         .foregroundColor(Studio.mute)
                 }
+                if let note = engine.downloadNote {
+                    Label(note, systemImage: "arrow.clockwise")
+                        .font(Studio.mono(10))
+                        .foregroundColor(Studio.hot)
+                }
             case .generating(let stage):
                 StudioLabel(text: "Generating")
                 ProgressView().tint(Studio.accent)

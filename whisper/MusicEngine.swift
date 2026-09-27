@@ -23,6 +23,9 @@ final class MusicEngine {
     private(set) var lastResult: URL?
     private(set) var lastDuration: Double = 0
     private(set) var elapsedMilliseconds: Int = 0
+    /// Shown under the download bar while a dropped transfer is recovered.
+    private(set) var downloadNote: String?
+    private var currentDownload: String?
 
     private let pipeline = StableAudioPipeline()
     private var work: Task<Void, Never>?
@@ -94,6 +97,23 @@ final class MusicEngine {
         }
         guard !missing.isEmpty else { return }
 
+        // Checked up front: a download that fills the disk does not fail, it
+        // stalls, with nothing on screen to say why.
+        let needed = missing.reduce(Int64(0)) { $0 + $1.element.bytes } + 300_000_000
+        if let available = (try? directory.resourceValues(
+                forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage,
+           available < needed {
+            throw MusicDownloaderError.insufficientSpace(needed: needed, available: available)
+        }
+
+        WeightDownloadService.shared.onStatus = { [weak self] note in
+            Task { @MainActor in self?.downloadNote = note }
+        }
+        defer {
+            downloadNote = nil
+            currentDownload = nil
+        }
+
         for (index, file) in missing {
             try Task.checkCancellation()
             guard let remote = model.downloadURL(for: file.path) else {
@@ -105,21 +125,22 @@ final class MusicEngine {
 
             // Progress arrives from the shared background session, so it is
             // pointed at the file being fetched right now.
+            // Progress hops to the main actor in separate tasks, which are not
+            // guaranteed to run in order; a late one for the previous file
+            // could otherwise put its bar back on screen after the next file
+            // had started.
+            currentDownload = file.path
             WeightDownloadService.shared.onProgress = { [weak self] progress in
                 Task { @MainActor in
-                    self?.phase = .downloading(file: file.path, completed: index,
-                                               total: files.count, fraction: progress.fraction,
-                                               received: progress.received, expected: progress.expected)
+                    guard let self, self.currentDownload == file.path else { return }
+                    self.phase = .downloading(file: file.path, completed: index,
+                                              total: files.count, fraction: progress.fraction,
+                                              received: progress.received, expected: progress.expected)
                 }
             }
-            do {
-                try await WeightDownloadService.shared.download(from: remote, to: destination)
-            } catch {
-                // A background transfer that fails is retried once; iOS has
-                // already done its own reconnection attempts by this point.
-                try Task.checkCancellation()
-                try await WeightDownloadService.shared.download(from: remote, to: destination)
-            }
+            // Interruptions are resumed inside the service; what reaches here
+            // has failed repeatedly or been cancelled.
+            try await WeightDownloadService.shared.download(from: remote, to: destination)
 
             let written = (try? destination.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             guard Int64(written) == file.bytes else {
