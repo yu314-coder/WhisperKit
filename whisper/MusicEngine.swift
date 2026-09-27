@@ -5,9 +5,9 @@ import MLX
 
 /// Fetches model weights and runs generation for the Music tab.
 ///
-/// Weights are downloaded rather than bundled — the Stable Audio set alone is
-/// 1.7 GB, and Medium is 3.7 GB. Files land in Documents and survive app
-/// updates, so the download happens once per model.
+/// Weights are downloaded rather than bundled — several gigabytes per
+/// version. Files land in Documents and survive app updates, so the download
+/// happens once.
 @Observable
 @MainActor
 final class MusicEngine {
@@ -27,7 +27,6 @@ final class MusicEngine {
     private(set) var downloadNote: String?
     private var currentDownload: String?
 
-    private let pipeline = StableAudioPipeline()
     private var work: Task<Void, Never>?
 
     /// Set by the view so a finished clip can be filed in the library.
@@ -117,12 +116,15 @@ final class MusicEngine {
 
         for (index, file) in missing {
             try Task.checkCancellation()
-            guard let remote = model.downloadURL(for: file.path) else {
+            guard let remote = model.downloadURL(for: file) else {
                 throw MusicEngineError.badURL(file.path)
             }
             phase = .downloading(file: file.path, completed: index, total: files.count,
                                  fraction: 0, received: 0, expected: file.bytes)
             let destination = directory.appendingPathComponent(file.path)
+            // The Neural Engine models are folders of files.
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
 
             // Progress arrives from the shared background session, so it is
             // pointed at the file being fetched right now.
@@ -157,9 +159,9 @@ final class MusicEngine {
     /// this, updating the app would leave 2.7 GB behind in Documents that
     /// nothing reads and nothing in the app can remove.
     private func removeSupersededFiles(in directory: URL) {
-        let expected = Set(MusicModel.allCases
-            .filter { $0.weightsDirectory == directory }
-            .flatMap { $0.weightFiles.map(\.path) })
+        // Compared by top-level name: a Neural Engine model is a folder, and
+        // its files' paths start with the folder's name.
+        let expected = MusicModel.expectedTopLevelNames
         guard !expected.isEmpty,
               let present = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
         else { return }
@@ -182,35 +184,8 @@ final class MusicEngine {
         #else
         phase = .generating(stage: "Starting")
         MusicRunMarker.begin()
-
-        // Routing comes before the Stable Audio check, not after it.
-        // ACE-Step has no Stable Audio variant, so asking for one first threw
-        // "no on-device implementation" and never reached this branch.
-        if model == .aceStep15 {
-            try await runACEStep(prompt: prompt, lyrics: lyrics, language: language,
-                                 seconds: seconds, model: model)
-            return
-        }
-        guard let kind = model.stableAudioKind else {
-            throw MusicEngineError.notImplemented(model.displayName)
-        }
-        // A fresh seed per run: a fixed one made the same prompt give the
-        // same clip every time.
-        let result = try await pipeline.generate(
-            model: kind,
-            prompt: prompt,
-            seconds: Float(seconds),
-            steps: 8,
-            seed: UInt64.random(in: 0 ... UInt64(UInt32.max)),
-            progress: { stage in
-                Task { @MainActor [weak self] in self?.phase = .generating(stage: stage) }
-            }
-        )
-        lastResult = result.url
-        lastDuration = Double(result.duration)
-        elapsedMilliseconds = Int(result.elapsedSeconds * 1000)
-        save(result.url, model: model, prompt: prompt, seconds: Double(result.duration))
-        phase = .idle
+        try await runACEStep(prompt: prompt, lyrics: lyrics, language: language,
+                             seconds: seconds, model: model)
         #endif
     }
 }
@@ -221,10 +196,11 @@ extension MusicEngine {
     /// Runs off the main actor — the first version ran the whole pipeline on
     /// it, which froze the screen, memory gauge included, for the length of a
     /// generation. Each run draws a new seed, so the same prompt twice gives
-    /// two different takes, as it does with Stable Audio.
+    /// two different takes.
     func runACEStep(prompt: String, lyrics: String, language: String,
                     seconds: Double, model: MusicModel) async throws {
-        let generator = ACEGenerator(directory: model.weightsDirectory)
+        var generator = ACEGenerator(directory: model.weightsDirectory)
+        model.configure(&generator)
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("acestep-\(Int(Date().timeIntervalSince1970)).wav")
         let seed = UInt64.random(in: 0 ... UInt64(UInt32.max))
@@ -246,6 +222,9 @@ extension MusicEngine {
                 switch stage {
                 case .planning:               label = "Planning the song"
                 case .lengthening:            label = "Filling the full length"
+                // iOS compiles each length for the Neural Engine once and
+                // keeps it; a new length can take a minute here.
+                case .preparingEngine:        label = "Preparing the Neural Engine — first time at this length is slow"
                 case .writing(let done, let of):
                     label = "Writing the song \(Int(Double(done) / Double(max(of, 1)) * 100))%"
                 case .readingPrompt:          label = "Reading prompt"
@@ -316,17 +295,6 @@ enum MusicEngineError: LocalizedError {
             device cannot run MLX. Downloading models works here; generating \
             does not.
             """
-        }
-    }
-}
-
-extension MusicModel {
-    /// The Stable Audio pipeline variant backing this entry, if any.
-    var stableAudioKind: StableAudioModelKind? {
-        switch self {
-        case .stableAudio3Small:  return .smallMusic
-        case .stableAudio3Medium: return .medium
-        default:                  return nil
         }
     }
 }

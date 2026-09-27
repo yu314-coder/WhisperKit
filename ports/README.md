@@ -28,7 +28,8 @@ and classifier-free guidance.
 ## acestep/ — ACE-Step 1.5 (MIT)
 
 Ships in the app — the code is `whisper/ACE*.swift`; only the weight
-converter lives here (`convert_weights.py`). Text prompt and lyrics in any of
+converters live here (`convert_weights.py`, `convert_neural_engine.py`,
+`convert_large.py`). Text prompt and lyrics in any of
 its 50 vocal languages, with the 1.7B planner as upstream runs it.
 
 Verified against the official pipeline (`ace-step/ACE-Step-1.5`,
@@ -74,24 +75,30 @@ seconds early. With it, four of four have sound to the last second.
 | Guidance pair batched vs separate | cosine 0.99997 |
 | Tokens to 25 Hz guide (FSQ + detokenizer) | cosine 0.999996 |
 
-**Following the prompt.** Scored with CLAP (laion/clap-htsat-unfused): 7
-prompts × 3 seeds, 30 s each, how well each clip matches its own prompt.
+**Following the prompt, and holding together.** Scored with CLAP
+(laion/clap-htsat-unfused), 7 prompts × 2 seeds, 45 s each: how well each
+clip matches its own prompt, how alike neighbouring 3 s windows are, how
+many neighbours differ abruptly (similarity below 0.8), and how alike
+windows 15 s or more apart are.
 
-| setting | clip matches own prompt best | similarity to own prompt | silent tail ≥ 3 s |
-|---|---|---|---|
-| plan followed throughout | 15/21 | 0.490 | 2/21 |
-| no planner | 17/21 | 0.559 | 15/21 |
-| plan for 2 of 8 steps | 18/21 | 0.582 | 13/21 |
-| **plan for 2 of 8, rendered 20% longer and cut** | **17/21** | **0.576** | **0/21** |
+| setting | own prompt | neighbours | abrupt | 15 s+ apart |
+|---|---|---|---|---|
+| 2B, plan for 2 of 8 steps (build 21) | 0.570 | 0.932 | 4/196 | 0.900 |
+| 2B, plan throughout (upstream default) | 0.438 | 0.934 | 6/196 | 0.892 |
+| **XL 4B, plan throughout** | **0.496** | **0.942** | 6/196 | **0.911** |
+| 2B with the 4B planner | 0.501 | 0.913 | 17/196 | 0.843 |
 
-The planner's tokens carry less of a description than the text does, so
-following them throughout filled the length but followed the words least.
-The structure is set in the first, noisiest steps; after two of eight the
-transformer continues as plain text-to-music (upstream's
-`audio_cover_strength`). The transformer shapes a whole piece to whatever
-window it renders, ending included, so the window is made longer than what
-is kept and the cut is faded. Stable Audio 3 Small scored 0.625 on the same
-prompts.
+Build 21 followed the plan for two steps and let the transformer continue
+as plain text-to-music, which matched the words best at 45 s but came apart
+over longer songs: at 81 s, windows 15 s apart agreed at 0.892 against 0.965
+with the plan throughout (0.690 with no plan). Build 22 follows the plan
+throughout, as upstream's `audio_cover_strength` does by default, and offers
+XL for closer prompt-following. The 4B planner matched prompts better but
+broke songs up more, so both versions keep the 1.7B.
+
+The transformer shapes a whole piece to whatever window it renders, ending
+included, so the window is made 20% longer than what is kept and the cut is
+faded; no run above left a silent tail.
 
 **DCW**, upstream's default sampler correction for turbo models, is ported
 (Haar, closed form; latent matches the repository sampler at 0.9999985).
@@ -105,7 +112,7 @@ Departures from upstream defaults, each deliberate:
 - **No planned silence.** The planner learned from recordings that end in
   silence and writes 5-15 s of it at the end of a requested length. The
   silence token (35847, found by tokenizing the silence latent) is excluded.
-- **Plan strength 0.25 and a longer render** — see above.
+- **A longer render**, cut and faded — see above.
 - **Tempo, key and meter from the prompt** are written into the reasoning
   instead of sampled, as upstream does for its UI fields.
 - **Phase 1 without the 2,300-line state machine:** field names are forced in
@@ -140,6 +147,31 @@ same output and speed; the 6:24 maximum peaks at 1.6 GB.
 (velocity cosine: int8 0.9989, 6-bit 0.9826, 4-bit 0.7465). The text encoder
 stays float16: Qwen3's outlier channels made it the largest single source of
 drift at int8 (final latent 0.960 with it quantized, 0.983 without).
+
+**Versions.** Both share every file but the transformer:
+
+- *ACE-Step 1.5* runs the 2B transformer on the Neural Engine
+  (`convert_neural_engine.py`, `whisper/ACENeuralTransformer.swift`): 24
+  layers as four Core ML programs of six, float16, each with one function
+  per length (15 sizes, up to 7:40 rendered) and conditioning size (2),
+  sharing one copy of the weights. Padding is masked out of every attention,
+  so kept positions see exactly what they would unpadded (checked: identical
+  to the unpadded computation in float32). The sliding-window layers attend
+  in blocks of 128 queries against 384 keys. RMS norms run on a pre-scaled
+  input so squaring cannot overflow float16.
+- *ACE-Step 1.5 XL* runs the 4B turbo transformer (32 layers, width 2,560)
+  on the GPU at int8 (`convert_large.py`). Of its 201 non-transformer tensors,
+  192 are bit-identical to the 2B's; the 9 it retrained ship as a 5 MB file
+  laid over the 2B condition encoder.
+
+| 45 s song, M4 Mac | transformer, 8 steps | latent vs float32 transformer |
+|---|---|---|
+| 2B int8, GPU (build 21) | 11 s | 0.99954 |
+| 2B float16, Neural Engine | 3.6 s | 0.99963 |
+
+The first run at a new length waits while iOS compiles that length's
+programs for the Neural Engine — two minutes on the Mac with its CPU busy,
+five seconds once cached.
 
 Still missing: the FSQ audio encoder side, which turns supplied audio into
 tokens — so reference audio and covers are unavailable.

@@ -1,214 +1,201 @@
 import Foundation
 
-/// The text-to-music models offered in the Music tab.
+/// The Music tab's models: ACE-Step 1.5, in the versions that run here.
 ///
-/// Unlike the Whisper lineup, these do not share one runtime. Stable Audio 3
-/// runs as an MLX graph, Magenta RealTime 2 as Core ML on the Neural Engine,
-/// and two of them have no Apple-silicon build published at all — their
-/// weights have to be converted before they can be listed as anything but
-/// unavailable. `availability` is what the picker reads, so a model whose
-/// conversion is not finished says so instead of offering a button that fails.
+/// Every version shares the text encoder, condition encoder, planner, hints
+/// and audio decoder, and all of them share one folder, so moving between
+/// versions downloads only what differs: the diffusion transformer, and for
+/// XL the few condition-encoder tensors it retrained.
 enum MusicModel: String, CaseIterable, Identifiable {
-    case aceStep15            = "ace-step-1.5-2b"
-    case stableAudio3Medium   = "stable-audio-3-medium-1.4b"
-    case stableAudio3Small    = "stable-audio-3-small-music-433m"
-    case magentaRealtime2     = "magenta-realtime-2-small-230m"
-    case musicGenSmall        = "musicgen-small-300m"
+    /// The raw value predates the versions; kept so a stored choice still
+    /// resolves.
+    case aceStep15   = "ace-step-1.5-2b"
+    case aceStep15XL = "ace-step-1.5-xl-4b"
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .aceStep15:          return "ACE-Step 1.5"
-        case .stableAudio3Medium: return "Stable Audio 3 Medium"
-        case .stableAudio3Small:  return "Stable Audio 3 Small-Music"
-        case .magentaRealtime2:   return "Magenta RealTime 2 Small"
-        case .musicGenSmall:      return "MusicGen Small"
+        case .aceStep15:   return "ACE-Step 1.5"
+        case .aceStep15XL: return "ACE-Step 1.5 XL"
         }
     }
 
-    /// Parameter count, as the model is published.
+    /// The diffusion transformer's size, as published.
     var parameterLabel: String {
         switch self {
-        case .aceStep15:          return "2B"
-        case .stableAudio3Medium: return "1.4B"
-        case .stableAudio3Small:  return "433M"
-        case .magentaRealtime2:   return "230M"
-        case .musicGenSmall:      return "300M"
+        case .aceStep15:   return "2B"
+        case .aceStep15XL: return "4B"
         }
     }
 
-    /// Which runtime executes the model, once its weights exist locally.
-    enum Engine {
-        /// MLX graphs (`.npz`), executed on the GPU through MLX Swift.
-        case mlx
-        /// Core ML, executed on the Neural Engine.
-        case coreML
-    }
-
-    var engine: Engine {
+    var tagline: String {
         switch self {
-        case .magentaRealtime2: return .coreML
-        default:                return .mlx
+        case .aceStep15:   return "Recommended · runs on the Neural Engine"
+        case .aceStep15XL: return "Richer sound · slower, needs 8 GB"
         }
     }
 
-    /// Whether this model can run on this platform yet, and if not, why.
-    enum Availability: Equatable {
-        /// Implemented and runnable once the weights are downloaded.
-        case ready
-        /// Apple-silicon weights exist, but the pipeline is not wired up yet.
-        case weightsPublished(note: String)
-        /// No Apple-silicon build exists; the weights must be converted first.
-        case needsConversion(note: String)
-        /// Ported and working, but the weights may not be distributed here.
-        case licenceRestricted(note: String)
+    /// Where the diffusion transformer runs.
+    var engineLabel: String {
+        switch self {
+        case .aceStep15:   return "NEURAL ENGINE"
+        case .aceStep15XL: return "GPU"
+        }
     }
+
+    /// Whether this model can run on this device, and if not, why.
+    enum Availability: Equatable {
+        case ready
+        case needsMoreMemory(note: String)
+    }
+
+    /// XL maps 4.7 GB of transformer weights. They are file-backed and not
+    /// charged to the app, but a 6 GB device has too little room for the
+    /// pages the GPU keeps in use.
+    static let xlMinimumMemoryGB = 7.5
 
     var availability: Availability {
         switch self {
-        case .stableAudio3Small, .stableAudio3Medium:
-            // Medium was fenced off below 10 GB after it was killed on an
-            // 8 GB iPad at 3.5 GB. With weights mapped and stages run one at a
-            // time it peaks at 0.63 GB for 81 s and 1.4 GB at the 6:24
-            // maximum, measured on a Mac.
-            return .ready
-        case .magentaRealtime2:
-            return .weightsPublished(
-                note: "Core ML graphs are published, but text prompting needs MusicCoCa, which runs on a Mac today.")
-        case .musicGenSmall:
-            // Ported and verified against the reference (187 of 188 tokens
-            // identical), but Meta releases the weights under CC-BY-NC 4.0 —
-            // non-commercial only — so they are not shipped with this app.
-            return .licenceRestricted(
-                note: "Ported and working, but Meta licenses these weights for non-commercial use only (CC-BY-NC 4.0), so they are not distributed with this app.")
         case .aceStep15:
-            // Weights are mapped rather than loaded and each stage runs
-            // alone; measured on a Mac with the planner, an 81-second song
-            // peaks at 0.78 GB, against 3.6 GB for 30 seconds before. See
-            // `ACEGenerator` and `MappedWeights`.
             return .ready
+        case .aceStep15XL:
+            let gigabytes = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+            return gigabytes >= Self.xlMinimumMemoryGB
+                ? .ready
+                : .needsMoreMemory(note: String(format: "XL needs a device with 8 GB of memory; this one has %.0f GB. ACE-Step 1.5 runs here.", gigabytes))
         }
     }
 
     var isRunnable: Bool { availability == .ready }
 
-    /// Only ACE-Step has a lyric encoder; the others take a prompt alone.
-    var supportsLyrics: Bool { self == .aceStep15 }
+    var supportsLyrics: Bool { true }
 
-    /// Where the app fetches weights from.
-    ///
-    /// Not Hugging Face directly: MLX reads `safetensors` and the published
-    /// files are `npz`, so they are converted first and the conversions are
-    /// hosted as a release. Stability's licence and a notice of exactly what
-    /// was changed sit alongside them.
+    // MARK: - Generator settings
+
+    /// Points the generator at this version's files.
+    func configure(_ generator: inout ACEGenerator) {
+        switch self {
+        case .aceStep15:
+            generator.transformerEngine = .neuralEngine
+        case .aceStep15XL:
+            generator.transformerEngine = .gpu
+            generator.transformerShape = .xl
+            generator.transformerFiles = Self.parts("ace_xl_decoder_q8", 3)
+            generator.conditionerFiles = [ACEGenerator.File.conditioner, "ace_xl_cond_q8.safetensors"]
+            // The 4B planner matched prompts more closely (CLAP 0.501 against
+            // 0.438) but its songs broke apart more: 17 abrupt changes in 196
+            // window pairs against 6. The 1.7B planner stays.
+        }
+    }
+
+    private static func parts(_ stem: String, _ count: Int) -> [String] {
+        (1 ... count).map { "\(stem).part\($0).safetensors" }
+    }
+
+    // MARK: - Weights
+
     private static let releaseRoot =
         "https://github.com/yu314-coder/WhisperKit/releases/download"
 
-    /// Each model family has its own release, so they can be re-cut
-    /// independently.
-    var releaseTag: String {
-        switch self {
-        case .aceStep15: return "acestep-v2"
-        default:         return "sa3-weights-v2"
-        }
-    }
-
-    /// Weights live in their own folder per family; switching models does not
-    /// disturb another family's download.
+    /// All versions share one folder, so shared files are fetched once.
     var weightsDirectory: URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let folder: String
-        switch self {
-        case .aceStep15: folder = "MusicModels/ace-step"
-        default:         folder = "MusicModels/stable-audio-3"
-        }
-        return documents.appendingPathComponent(folder, isDirectory: true)
+        return documents.appendingPathComponent("MusicModels/ace-step", isDirectory: true)
     }
 
-    func downloadURL(for fileName: String) -> URL? {
+    struct WeightFile {
+        /// Relative to `weightsDirectory`; may name a subfolder.
+        let path: String
+        /// Exact, read from the hosted asset: it doubles as the "already
+        /// downloaded" test.
+        let bytes: Int64
+        let release: String
+    }
+
+    /// The files every version reads, from release acestep-v2.
+    private static let shared: [WeightFile] = ([
+        (ACEGenerator.File.textEncoder, 1_191_586_112),
+        (ACEGenerator.File.conditioner, 684_509_312),
+        (ACEGenerator.File.decoder, 168_807_360),
+        (ACEGenerator.File.silence, 1_920_128),
+        (ACEGenerator.File.vocabulary, 2_776_833),
+        (ACEGenerator.File.merges, 1_671_853),
+        (ACEGenerator.File.hints, 119_730_496),
+        (ACEGenerator.File.planner, 2_086_211_264),
+    ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v2") }
+
+    var weightFiles: [WeightFile] {
+        switch self {
+        case .aceStep15:   return Self.shared + Self.neuralEngineFiles
+        case .aceStep15XL: return Self.shared + Self.xlFiles
+        }
+    }
+
+    static let neuralEngineFiles: [WeightFile] = ([
+        ("ace_dit_ane_c0.mlmodelc/model.mil", 8_262_897),
+        ("ace_dit_ane_c0.mlmodelc/coremldata.bin", 8_186),
+        ("ace_dit_ane_c0.mlmodelc/metadata.json", 122_343),
+        ("ace_dit_ane_c0.mlmodelc/analytics/coremldata.bin", 243),
+        ("ace_dit_ane_c0.mlmodelc/weights/weight.bin", 755_752_384),
+        ("ace_dit_ane_c1.mlmodelc/model.mil", 8_266_317),
+        ("ace_dit_ane_c1.mlmodelc/coremldata.bin", 8_186),
+        ("ace_dit_ane_c1.mlmodelc/metadata.json", 122_343),
+        ("ace_dit_ane_c1.mlmodelc/analytics/coremldata.bin", 243),
+        ("ace_dit_ane_c1.mlmodelc/weights/weight.bin", 755_752_384),
+        ("ace_dit_ane_c2.mlmodelc/model.mil", 8_273_157),
+        ("ace_dit_ane_c2.mlmodelc/coremldata.bin", 8_186),
+        ("ace_dit_ane_c2.mlmodelc/metadata.json", 122_343),
+        ("ace_dit_ane_c2.mlmodelc/analytics/coremldata.bin", 243),
+        ("ace_dit_ane_c2.mlmodelc/weights/weight.bin", 755_752_384),
+        ("ace_dit_ane_c3.mlmodelc/model.mil", 8_273_157),
+        ("ace_dit_ane_c3.mlmodelc/coremldata.bin", 8_186),
+        ("ace_dit_ane_c3.mlmodelc/metadata.json", 122_343),
+        ("ace_dit_ane_c3.mlmodelc/analytics/coremldata.bin", 243),
+        ("ace_dit_ane_c3.mlmodelc/weights/weight.bin", 755_752_384),
+        ("ace_dit_outer_f16.safetensors", 130_111_616),
+    ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v3") }
+
+    static let xlFiles: [WeightFile] = ([
+        ("ace_xl_cond_q8.safetensors", 4_888_128),
+        ("ace_xl_decoder_q8.part1.safetensors", 1_895_498_560),
+        ("ace_xl_decoder_q8.part2.safetensors", 1_888_113_216),
+        ("ace_xl_decoder_q8.part3.safetensors", 908_410_816),
+    ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v3") }
+
+    /// Release assets are flat, so a file in a subfolder is published with
+    /// its slashes as "__".
+    func downloadURL(for file: WeightFile) -> URL? {
+        let asset = file.path.replacingOccurrences(of: "/", with: "__")
         #if DEBUG
         // For testing interrupted downloads against a local server:
         // launch with `-MusicWeightsRootOverride http://127.0.0.1:8765`.
         if let root = UserDefaults.standard.string(forKey: "MusicWeightsRootOverride") {
-            return URL(string: "\(root)/\(releaseTag)/\(fileName)")
+            return URL(string: "\(root)/\(file.release)/\(asset)")
         }
         #endif
-        return URL(string: "\(Self.releaseRoot)/\(releaseTag)/\(fileName)")
-    }
-
-    /// Files to fetch from `weightsRepo`, with their published sizes in MB.
-    ///
-    /// Stable Audio 3 is assembled from four separate graphs rather than one
-    /// bundle: a shared text encoder, a diffusion transformer that differs per
-    /// variant, and the SAME decoder that turns latents into audio.
-    /// Exact byte counts, read from the hosted assets.
-    ///
-    /// Exact rather than rounded because these double as the "already
-    /// downloaded" test. An earlier version compared against megabytes scaled
-    /// by 900,000, which made the 792,862-byte conditioner look perpetually
-    /// missing and re-downloaded it on every run.
-    var weightFiles: [(path: String, bytes: Int64)] {
-        // Text encoder, decoder and tokenizer are shared by both Stable Audio
-        // variants, so switching between them only fetches a different DiT.
-        // 64-byte-aligned rewrites of the v1 conversions (same tensors), so
-        // they can be mapped; see ports/stable-audio-3/align_weights.py.
-        let shared: [(String, Int64)] = [
-            ("t5gemma_f16.safetensors", 567_416_686),
-            ("same_s_decoder_f32.safetensors", 218_069_540),
-            ("t5gemma_tokenizer.model", 4_241_003),
-        ]
-        switch self {
-        case .stableAudio3Small:
-            return (shared + [("dit_sm-music_f16.safetensors", 919_104_928),
-                              ("sa3_conditioner_sm-music.safetensors", 792_896)])
-                .map { (path: $0.0, bytes: $0.1) }
-        case .stableAudio3Medium:
-            // Two shards: one 2.9 GB file exceeds the 2 GB release-asset cap.
-            return (shared + [("dit_medium_f16.part1.safetensors", 1_445_754_368),
-                              ("dit_medium_f16.part2.safetensors", 1_461_439_328),
-                              ("sa3_conditioner_medium.safetensors", 792_896)])
-                .map { (path: $0.0, bytes: $0.1) }
-        case .aceStep15:
-            // One file per stage, so a stage maps only its own. Built by
-            // ports/acestep/convert_weights.py: int8 projections in the two
-            // transformer files, float16 for the text encoder (int8 there
-            // cost the most accuracy) and the decoder.
-            return [(ACEGenerator.File.textEncoder, 1_191_586_112),
-                    (ACEGenerator.File.conditioner, 684_509_312),
-                    (ACEGenerator.File.transformer, 1_773_865_088),
-                    (ACEGenerator.File.decoder, 168_807_360),
-                    (ACEGenerator.File.silence, 1_920_128),
-                    (ACEGenerator.File.vocabulary, 2_776_833),
-                    (ACEGenerator.File.merges, 1_671_853),
-                    // The planner, which lays the song out before it is
-                    // rendered — without it songs often ended early.
-                    (ACEGenerator.File.planner, 2_086_211_264),
-                    (ACEGenerator.File.hints, 119_730_496)]
-                .map { (path: $0.0, bytes: $0.1) }
-        case .magentaRealtime2, .musicGenSmall:
-            return []
-        }
+        return URL(string: "\(Self.releaseRoot)/\(file.release)/\(asset)")
     }
 
     var downloadBytes: Int64 { weightFiles.reduce(0) { $0 + $1.bytes } }
 
-    /// Download size for the picker. Unconverted models have no honest number
-    /// to show, because nothing has been built to measure.
     var sizeLabel: String {
-        let bytes = downloadBytes
-        guard bytes > 0 else { return "—" }
-        let mb = Double(bytes) / 1_000_000
-        return mb >= 1000 ? String(format: "%.1f GB", mb / 1000) : String(format: "%.0f MB", mb)
+        let gigabytes = Double(downloadBytes) / 1_000_000_000
+        return String(format: "%.1f GB", gigabytes)
     }
 
-    var tagline: String {
-        switch self {
-        case .aceStep15:          return "Songs with vocals"
-        case .stableAudio3Medium: return "Highest quality"
-        case .stableAudio3Small:  return "Recommended"
-        case .magentaRealtime2:   return "Live jamming"
-        case .musicGenSmall:      return "Lightest"
+    /// Top-level names under `weightsDirectory` that any version uses; the
+    /// rest are left over from earlier builds.
+    static var expectedTopLevelNames: Set<String> {
+        Set(allCases.flatMap { $0.weightFiles.map { String($0.path.split(separator: "/")[0]) } })
+    }
+
+    /// Stable Audio 3, which earlier builds offered, left 1.7 to 3.7 GB here.
+    static func removeRetiredWeights() {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let retired = documents.appendingPathComponent("MusicModels/stable-audio-3", isDirectory: true)
+        if FileManager.default.fileExists(atPath: retired.path) {
+            try? FileManager.default.removeItem(at: retired)
         }
     }
 }

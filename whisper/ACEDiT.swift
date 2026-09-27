@@ -20,13 +20,23 @@ import MLX
 /// self-attention only — the cross-attention path never sees cos/sin, for
 /// queries or keys.
 struct ACEDiT {
-    static let hiddenSize = 2048
-    static let headCount = 16
-    static let keyValueHeadCount = 8
+    /// The transformer's size. The XL checkpoint keeps the 2B's layout —
+    /// same tensor names, same conditioning width — and is wider and deeper.
+    struct Shape: Equatable {
+        var hiddenSize: Int
+        var headCount: Int
+        var layerCount: Int
+        var keyValueHeadCount = 8
+
+        static let base = Shape(hiddenSize: 2048, headCount: 16, layerCount: 24)
+        static let xl = Shape(hiddenSize: 2560, headCount: 32, layerCount: 32)
+    }
+
     static let headDimension = 128
     static let epsilon: Float = 1e-6
 
     let weights: [String: MLXArray]
+    var shape = Shape.base
     /// 0 when the checkpoint is dense; 4 or 8 when its projections are packed.
     var quantizationBits: Int = 0
     var evaluatesPerLayer = true
@@ -98,13 +108,13 @@ struct ACEDiT {
             linear(input, "\(prefix).\(key)_proj.weight")
                 .reshaped(1, length, count, Self.headDimension)
         }
-        var q = rmsNorm(heads(x, "q", Self.headCount, queryLength),
+        var q = rmsNorm(heads(x, "q", shape.headCount, queryLength),
                         weight: w("\(prefix).q_norm.weight"), eps: Self.epsilon)
             .transposed(0, 2, 1, 3)
-        var k = rmsNorm(heads(memory, "k", Self.keyValueHeadCount, memoryLength),
+        var k = rmsNorm(heads(memory, "k", shape.keyValueHeadCount, memoryLength),
                         weight: w("\(prefix).k_norm.weight"), eps: Self.epsilon)
             .transposed(0, 2, 1, 3)
-        let v = heads(memory, "v", Self.keyValueHeadCount, memoryLength).transposed(0, 2, 1, 3)
+        let v = heads(memory, "v", shape.keyValueHeadCount, memoryLength).transposed(0, 2, 1, 3)
 
         if let cos, let sin, source == nil {
             q = applyRotary(q, cos: cos, sin: sin)
@@ -114,12 +124,12 @@ struct ACEDiT {
         // The fused kernel never materializes the full score matrix, which
         // is what makes long clips possible at all: at the 6:24 maximum the
         // diffusion transformer sees 4,800 positions, and the unfused
-        // product would be 16 x 4,800 x 4,800 floats — 1.5 GB per layer.
+        // product would be 16 x 4,800 x 4,800 floats at the base size — 1.5 GB per layer.
         let out = scaledDotProductAttention(queries: q, keys: k, values: v,
                                             scale: pow(Float(Self.headDimension), -0.5),
                                             mask: mask)
             .transposed(0, 2, 1, 3)
-            .reshaped(1, queryLength, Self.headCount * Self.headDimension)
+            .reshaped(1, queryLength, shape.headCount * Self.headDimension)
         return linear(out, "\(prefix).o_proj.weight")
     }
 
@@ -149,6 +159,20 @@ extension ACEDiT {
     static let outputChannels = 64
     static let ropeTheta: Float = 1_000_000
 
+    /// Everything before the layers, for one step.
+    struct Prepared {
+        /// (1, positions, hidden): patched and projected.
+        var hidden: MLXArray
+        /// (1, tokens, hidden): the conditioning, projected to this width.
+        var conditioning: MLXArray
+        /// (1, hidden) and (1, 6, hidden): the timestep embedding, and the
+        /// modulation every layer adds its own table to.
+        var embedding: MLXArray
+        var modulation: MLXArray
+        /// Latent frames before padding to whole patches.
+        var frames: Int
+    }
+
     /// Predicts the flow-matching velocity for one diffusion step.
     ///
     /// - Parameters:
@@ -158,18 +182,30 @@ extension ACEDiT {
     ///   - encoder: (1, tokens, 2048) conditioning sequence.
     ///   - timestep: the current t.
     func forward(xt: MLXArray, context: MLXArray, encoder: MLXArray, timestep: Float) -> MLXArray {
-        let frames = xt.dim(1)
+        let prepared = prepare(xt: xt, context: context, encoder: encoder, timestep: timestep)
+        var h = prepared.hidden
+        let (cos, sin) = Self.rotaryTable(length: h.dim(1))
+        let localMask = ACESlidingWindow.mask(length: h.dim(1))
+        for index in 0 ..< shape.layerCount {
+            h = layer(index, hidden: h, encoder: prepared.conditioning, temb: prepared.modulation,
+                      cos: cos, sin: sin, localMask: localMask)
+            // Layer by layer: left as one graph, MLX kept many layers'
+            // intermediates alive together — 1.6 GB at 81 seconds, where one
+            // layer's worth is a small fraction of that.
+            if evaluatesPerLayer { eval(h) }
+        }
+        return finish(h, prepared)
+    }
 
+    func prepare(xt: MLXArray, context: MLXArray, encoder: MLXArray, timestep: Float) -> Prepared {
         // Two timestep embeddings are summed: one for t, one for t - r. With
         // r == t the second reduces to the embedding of zero, which is not the
         // same as omitting it — it still contributes learned bias.
         let (tembT, projT) = timeEmbedding(timestep, prefix: "decoder.time_embed")
         let (tembR, projR) = timeEmbedding(0, prefix: "decoder.time_embed_r")
-        let temb = tembT + tembR
-        let modulation = projT + projR
 
         var h = concatenated([context, xt], axis: -1).asType(dtype)
-        let originalLength = h.dim(1)
+        let frames = h.dim(1)
         if h.dim(1) % Self.patchSize != 0 {
             let pad = Self.patchSize - (h.dim(1) % Self.patchSize)
             h = concatenated([h, MLXArray.zeros([1, pad, h.dim(2)], dtype: h.dtype)], axis: 1)
@@ -183,21 +219,16 @@ extension ACEDiT {
 
         let conditioning = linear(encoder.asType(dtype), "decoder.condition_embedder.weight")
             + w("decoder.condition_embedder.bias")
+        return Prepared(hidden: h, conditioning: conditioning, embedding: tembT + tembR,
+                        modulation: projT + projR, frames: frames)
+    }
 
-        let (cos, sin) = rotaryTable(length: h.dim(1))
-        let localMask = ACESlidingWindow.mask(length: h.dim(1))
-        for index in 0 ..< 24 {
-            h = layer(index, hidden: h, encoder: conditioning, temb: modulation,
-                      cos: cos, sin: sin, localMask: localMask)
-            // Layer by layer: left as one graph, MLX kept many layers'
-            // intermediates alive together — 1.6 GB at 81 seconds, where one
-            // layer's worth is a small fraction of that.
-            if evaluatesPerLayer { eval(h) }
-        }
-
-        let outParts = (w("decoder.scale_shift_table") + temb.expandedDimensions(axis: 1))
+    /// Everything after the layers: the output norm and the patches back to
+    /// frames, as float32.
+    func finish(_ hidden: MLXArray, _ prepared: Prepared) -> MLXArray {
+        let outParts = (w("decoder.scale_shift_table") + prepared.embedding.expandedDimensions(axis: 1))
             .split(parts: 2, axis: 1)
-        h = rmsNorm(h, weight: w("decoder.norm_out.weight"), eps: Self.epsilon)
+        var h = rmsNorm(hidden.asType(dtype), weight: w("decoder.norm_out.weight"), eps: Self.epsilon)
             * (1 + outParts[1]) + outParts[0]
 
         // De-patchify: transposed convolution back to one frame per input.
@@ -205,7 +236,7 @@ extension ACEDiT {
         h = convTransposed1d(h, w("decoder.proj_out.1.weight").transposed(1, 2, 0),
                              stride: Self.patchSize, padding: 0)
             + w("decoder.proj_out.1.bias")
-        return h[0..., 0 ..< originalLength, 0...].asType(.float32)
+        return h[0..., 0 ..< prepared.frames, 0...].asType(.float32)
     }
 
     /// Sinusoidal features, an MLP, and a six-way modulation projection.
@@ -227,18 +258,18 @@ extension ACEDiT {
         let activated = temb * sigmoid(temb)
         let projected = linear(activated, "\(prefix).time_proj.weight")
             + w("\(prefix).time_proj.bias")
-        return (temb, projected.reshaped(1, 6, Self.hiddenSize))
+        return (temb, projected.reshaped(1, 6, shape.hiddenSize))
     }
 
     /// Qwen3 rotary table: half as many inverse frequencies as the head
     /// dimension, each used twice.
-    private func rotaryTable(length: Int) -> (MLXArray, MLXArray) {
+    static func rotaryTable(length: Int) -> (MLXArray, MLXArray) {
         let half = Self.headDimension / 2
         var cosValues = [Float](repeating: 0, count: length * Self.headDimension)
         var sinValues = [Float](repeating: 0, count: length * Self.headDimension)
         for position in 0 ..< length {
             for i in 0 ..< half {
-                let inverse = 1.0 / pow(Self.ropeTheta, Float(2 * i) / Float(Self.headDimension))
+                let inverse = 1.0 / pow(ropeTheta, Float(2 * i) / Float(headDimension))
                 let angle = Float(position) * inverse
                 cosValues[position * Self.headDimension + i] = cos(angle)
                 cosValues[position * Self.headDimension + i + half] = cos(angle)

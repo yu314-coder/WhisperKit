@@ -171,7 +171,6 @@
 				4B3001782E9282B400055AFA /* MLXNN */,
 				4B3001792E9282B400055AFA /* MLXRandom */,
 				4B30017A2E9282B400055AFA /* MLXFast */,
-				4B3002772E9282B400055AFA /* SentencepieceTokenizer */,
 			);
 			productName = whisper;
 			productReference = 4B2061672E92821800055AFA /* whisper.app */;
@@ -229,7 +228,6 @@
 			packageReferences = (
 				4B2061762E9282B400055AFA /* XCRemoteSwiftPackageReference "WhisperKit" */,
 				4B3001762E9282B400055AFA /* XCRemoteSwiftPackageReference "mlx-swift" */,
-				4B3002762E9282B400055AFA /* XCRemoteSwiftPackageReference "swift-sentencepiece" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 4B2061682E92821800055AFA /* Products */;
@@ -583,14 +581,6 @@
 				minimumVersion = 0.31.6;
 			};
 		};
-		4B3002762E9282B400055AFA /* XCRemoteSwiftPackageReference "swift-sentencepiece" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/jkrukowski/swift-sentencepiece";
-			requirement = {
-				kind = revision;
-				revision = b968826b1d3b76e37359abdbe2f4c0daaa96a50a;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -618,11 +608,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 4B3001762E9282B400055AFA /* XCRemoteSwiftPackageReference "mlx-swift" */;
 			productName = MLXFast;
-		};
-		4B3002772E9282B400055AFA /* SentencepieceTokenizer */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 4B3002762E9282B400055AFA /* XCRemoteSwiftPackageReference "swift-sentencepiece" */;
-			productName = SentencepieceTokenizer;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

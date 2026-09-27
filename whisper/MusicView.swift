@@ -2,18 +2,13 @@ import SwiftUI
 import SwiftData
 import AVFoundation
 
-/// The Music tab: a prompt, a model, and a generated clip.
-///
-/// The model list is deliberately honest about what cannot run yet. Three of
-/// the five have no working Apple-silicon path at the time of writing, and
-/// showing them with a Generate button that fails would waste the one thing
-/// that actually settles these questions — a run on real hardware.
+/// The Music tab: a prompt, a version of ACE-Step 1.5, and a generated clip.
 struct MusicView: View {
     @State private var prompt: String = ""
     @State private var lyrics: String = ""
     @FocusState private var promptFocused: Bool
     @FocusState private var lyricsFocused: Bool
-    @State private var selectedModel: MusicModel = .stableAudio3Small
+    @AppStorage("musicModel") private var selectedModel: MusicModel = .aceStep15
     @State private var showModelPicker = false
     @State private var engine = MusicEngine()
     @State private var showLibrary = false
@@ -163,7 +158,7 @@ struct MusicView: View {
             Label("Last generation didn't finish", systemImage: "exclamationmark.triangle")
                 .font(Studio.text(14, weight: .semibold))
                 .foregroundColor(Studio.hot)
-            Text("Whisper was closed while it was generating. If you didn't close it yourself, iOS stopped it — most likely for memory. A shorter length or Stable Audio 3 Small needs less.")
+            Text("Whisper was closed while it was generating. If you didn't close it yourself, iOS stopped it — most likely for memory. A shorter piece needs less.")
                 .font(Studio.text(13))
                 .foregroundColor(Studio.ink)
                 .fixedSize(horizontal: false, vertical: true)
@@ -228,13 +223,10 @@ struct MusicView: View {
         let settings = promptSettings
         var parts: [String] = []
         if let seconds = settings.seconds { parts.append(Self.formatLength(Double(seconds))) }
-        // Tempo, key and meter are read by ACE-Step's planner; Stable Audio
-        // takes them from the prompt text as written.
-        if selectedModel == .aceStep15 {
-            if let bpm = settings.bpm { parts.append("\(bpm) BPM") }
-            if let key = settings.keyscale { parts.append(key) }
-            if let beats = settings.timeSignature { parts.append(beats == 6 ? "6/8" : "\(beats)/4") }
-        }
+        // Tempo, key and meter go to the planner as given.
+        if let bpm = settings.bpm { parts.append("\(bpm) BPM") }
+        if let key = settings.keyscale { parts.append(key) }
+        if let beats = settings.timeSignature { parts.append(beats == 6 ? "6/8" : "\(beats)/4") }
         return parts.joined(separator: " · ")
     }
 
@@ -310,13 +302,9 @@ struct MusicView: View {
             case .ready:
                 noteRow(icon: "checkmark.circle",
                         tint: Studio.ok,
-                        text: "\(selectedModel.displayName) runs on this device. Weights are \(selectedModel.sizeLabel), downloaded once.")
-            case .weightsPublished(let note):
-                noteRow(icon: "exclamationmark.triangle", tint: Studio.hot, text: note)
-            case .needsConversion(let note):
-                noteRow(icon: "wrench.and.screwdriver", tint: Studio.mute, text: note)
-            case .licenceRestricted(let note):
-                noteRow(icon: "hand.raised", tint: Studio.mute, text: note)
+                        text: "\(selectedModel.displayName) runs on this device. Weights are \(selectedModel.sizeLabel), downloaded once; versions share most of them.")
+            case .needsMoreMemory(let note):
+                noteRow(icon: "memorychip", tint: Studio.hot, text: note)
             }
         }
     }
@@ -426,7 +414,7 @@ struct MusicView: View {
 
     private var buttonTitle: String {
         if engine.isBusy { return "Cancel" }
-        guard selectedModel.isRunnable else { return "\(selectedModel.displayName) is not runnable yet" }
+        guard selectedModel.isRunnable else { return "\(selectedModel.displayName) needs more memory" }
         return "Generate"
     }
 
@@ -512,12 +500,10 @@ struct MusicModelPicker: View {
             HStack(spacing: 7) {
                 chip(model.sizeLabel, tint: Studio.mute)
                 switch model.availability {
-                case .ready:               chip("RUNS ON DEVICE", tint: Studio.ok)
-                case .weightsPublished:    chip("UNTESTED", tint: Studio.hot)
-                case .needsConversion:     chip("NEEDS CONVERSION", tint: Studio.mute)
-                case .licenceRestricted:   chip("LICENCE", tint: Studio.mute)
+                case .ready:           chip("RUNS ON DEVICE", tint: Studio.ok)
+                case .needsMoreMemory: chip("NEEDS 8 GB", tint: Studio.hot)
                 }
-                chip(model.engine == .coreML ? "CORE ML" : "MLX", tint: Studio.mute)
+                chip(model.engineLabel, tint: Studio.mute)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

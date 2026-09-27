@@ -29,10 +29,18 @@ struct ACEQwen3 {
         static let embedder = Config(layerCount: 28, hiddenSize: 1024, headCount: 16,
                                      keyValueHeadCount: 8, headDimension: 128,
                                      ropeTheta: 1_000_000, epsilon: 1e-6)
+        /// acestep-5Hz-lm-0.6B, the small planner.
+        static let plannerSmall = Config(layerCount: 28, hiddenSize: 1024, headCount: 16,
+                                         keyValueHeadCount: 8, headDimension: 128,
+                                         ropeTheta: 1_000_000, epsilon: 1e-6)
         /// acestep-5Hz-lm-1.7B, the planner.
         static let planner = Config(layerCount: 28, hiddenSize: 2048, headCount: 16,
                                     keyValueHeadCount: 8, headDimension: 128,
                                     ropeTheta: 1_000_000, epsilon: 1e-6)
+        /// acestep-5Hz-lm-4B, the large planner.
+        static let plannerLarge = Config(layerCount: 36, hiddenSize: 2560, headCount: 32,
+                                         keyValueHeadCount: 8, headDimension: 128,
+                                         ropeTheta: 1_000_000, epsilon: 1e-6)
     }
 
     let weights: [String: MLXArray]

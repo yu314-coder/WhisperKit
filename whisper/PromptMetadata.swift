@@ -14,9 +14,9 @@ struct PromptMetadata: Equatable {
     /// Beats per bar: 2, 3, 4 or 6.
     var timeSignature: Int?
 
-    /// 6:24 is the models' own ceiling, not an arbitrary cap: Stable Audio's
-    /// conditioner clamps its seconds input to 0...384, so asking for more
-    /// would still produce 6:24. A longer request is made at 6:24, and the
+    /// 6:24 is the longest the Neural Engine transformer was built for: a
+    /// piece is rendered 20% past its length and cut, and 6:24 plus that
+    /// fills its largest size. A longer request is made at 6:24, and the
     /// summary under the prompt shows it.
     static let secondsRange = 5 ... 384
 

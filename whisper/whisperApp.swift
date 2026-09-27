@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         _ = MusicRunMarker.wasInterrupted   // what the last run left, before anything changes it
+        DispatchQueue.global(qos: .utility).async { MusicModel.removeRetiredWeights() }
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: Self.transcriptionTaskID,
             using: nil

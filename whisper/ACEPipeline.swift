@@ -74,7 +74,11 @@ enum ACEPipeline {
     ///   - release: after this many steps, continue with `released` — the
     ///     same prompt conditioned as plain text-to-music, over silence —
     ///     instead of following the source. Upstream's audio_cover_strength.
-    static func diffuse(dit: ACEDiT,
+    /// One velocity prediction: the noisy latent, the context, the
+    /// conditioning and t. `ACEDiT.forward`, or the Neural Engine's.
+    typealias Transformer = (MLXArray, MLXArray, MLXArray, Float) throws -> MLXArray
+
+    static func diffuse(dit: Transformer,
                         conditioning: MLXArray,
                         source: MLXArray,
                         frames: Int,
@@ -99,7 +103,7 @@ enum ACEPipeline {
             if let release, index == release.afterStep {
                 guide = (release.conditioning, context(release.source))
             }
-            let velocity = dit.forward(xt: x, context: guide.context, encoder: guide.conditioning, timestep: t)
+            let velocity = try dit(x, guide.context, guide.conditioning, t)
             let denoised = x - velocity * t
             if index == schedule.count - 1 {
                 // Last step solves for the clean latent rather than stepping.
@@ -170,6 +174,9 @@ extension ACEPipeline {
 struct ACEGenerator {
     enum Stage {
         case lengthening
+        /// Loading the Neural Engine programs; slow only the first time at
+        /// a length, while iOS compiles them.
+        case preparingEngine
         case planning
         case writing(Int, Int)
         case readingPrompt
@@ -204,25 +211,48 @@ struct ACEGenerator {
     /// user's words are used verbatim (see `generate`).
     var plannerRewritesCaption = false
     /// Fraction of the eight steps that follow the plan before the rest
-    /// continue as plain text-to-music — upstream's audio_cover_strength.
+    /// continue as plain text-to-music — upstream's audio_cover_strength,
+    /// whose default is the whole run.
     ///
-    /// Following the plan throughout fills the length but follows the words
-    /// less: the planner's tokens carry less of a description than the text
-    /// does. Scored with CLAP over seven prompts, the clip matched its own
-    /// prompt at 0.493 with the plan followed throughout, 0.565 with no
-    /// planner, and 0.583 following it for two steps of eight — the
-    /// structure is set in the first, noisiest steps and the words shape
-    /// the rest. When that lighter hold still lets a song stop early, the
-    /// run is rendered again at full strength; see `generate`.
-    var planStrength: Double = 0.25
+    /// Build 21 followed the plan for two steps of eight, which matched the
+    /// words more closely (CLAP 0.583 against 0.493 over seven prompts) but
+    /// let the transformer rewrite each section on its own: past a minute
+    /// the piece came apart into pieces. Scored as the similarity of 3 s
+    /// windows 15 s or more apart, an 81-second song held together at 0.965
+    /// following the plan throughout and 0.892 following it for two steps;
+    /// with no plan at all, 0.690. The words are better served by a better
+    /// planner — see `MusicModel.aceStep15XL` — than by letting go of it.
+    var planStrength: Double = 1.0
     /// Re-render at full plan strength when a song would end early.
     var retriesEarlyEndings = true
     /// Render past the requested length and cut; see `renderedSeconds`.
     var rendersPastEnd = true
+    /// The planner's classifier-free guidance; upstream's lm_cfg_scale.
+    var plannerGuidance: Float = 2.0
+    /// What the transformer computes in. Float16 needs float16 weights.
+    var transformerDType: DType = .float32
+    /// Which planner, and its shape. Files over 2 GB come in parts.
+    var plannerFiles = [File.planner]
+    var plannerConfig = ACEQwen3.Config.planner
+    /// Which diffusion transformer, and its shape.
+    var transformerFiles = [File.transformer]
+    var transformerShape = ACEDiT.Shape.base
+    /// The condition encoder, with any later file's tensors replacing the
+    /// earlier's: XL retrained only its input embeddings and projection.
+    var conditionerFiles = [File.conditioner]
+    /// Where the transformer's layers run.
+    enum Engine { case gpu, neuralEngine }
+    var transformerEngine = Engine.gpu
 
     private func load(_ name: String) throws -> [String: MLXArray] {
         let url = directory.appendingPathComponent(name)
         return mapsWeights ? try MappedWeights.load(url: url) : try loadArrays(url: url, stream: .cpu)
+    }
+
+    private func load(_ names: [String]) throws -> [String: MLXArray] {
+        var merged: [String: MLXArray] = [:]
+        for name in names { merged.merge(try load(name)) { $1 } }
+        return merged
     }
 
     private func release() { StageMemory.release() }
@@ -270,9 +300,10 @@ struct ACEGenerator {
         if usesPlanner {
             progress(.planning)
             plan = try {
-                var model = ACEQwen3(weights: try load(File.planner), config: .planner, prefix: "")
+                var model = ACEQwen3(weights: try load(plannerFiles), config: plannerConfig, prefix: "")
                 model.quantizationBits = quantizationBits
-                let planner = ACEPlanner(model: model, tokenizer: tokenizer)
+                var planner = ACEPlanner(model: model, tokenizer: tokenizer)
+                planner.guidance = plannerGuidance
                 // The caption is the user's, written in verbatim. Upstream
                 // lets the planner rewrite it by default, and at its sampling
                 // temperature a "restrained underscore with soft granular
@@ -341,7 +372,7 @@ struct ACEGenerator {
         // 2. Condition encoder: lyric and timbre stacks plus the projection.
         progress(.conditioning)
         let conditioning: MLXArray = try {
-            var packer = ACEConditioning(weights: try load(File.conditioner))
+            var packer = ACEConditioning(weights: try load(conditionerFiles))
             packer.quantizationBits = quantizationBits
             let timbre = silence[0..., 0 ..< ACEPipeline.timbreFrames, 0...].asType(.float32)
             let packed = packer.encode(text: text, lyric: lyric, timbre: timbre)
@@ -372,10 +403,27 @@ struct ACEGenerator {
 
         // 3. Diffusion transformer, eight steps.
         let latent: MLXArray = try {
-            var dit = ACEDiT(weights: try load(File.transformer))
-            dit.quantizationBits = quantizationBits
+            let transformer: ACEPipeline.Transformer
+            switch transformerEngine {
+            case .gpu:
+                var dit = ACEDiT(weights: try load(transformerFiles))
+                dit.shape = transformerShape
+                dit.quantizationBits = quantizationBits
+                dit.dtype = transformerDType
+                transformer = { dit.forward(xt: $0, context: $1, encoder: $2, timestep: $3) }
+            case .neuralEngine:
+                progress(.preparingEngine)
+                // The layers' weights live in the Core ML programs; MLX
+                // holds only what surrounds them, in float32.
+                let outer = ACEDiT(weights: try load(ACENeuralTransformer.outerFile))
+                let engine = try ACENeuralTransformer(
+                    directory: directory, outer: outer, frames: renderFrames,
+                    tokens: max(conditioning.dim(1), plainConditioning?.dim(1) ?? 0))
+                try checkCancellation()
+                transformer = { try engine.forward(xt: $0, context: $1, encoder: $2, timestep: $3) }
+            }
             func render(release: (Int, MLXArray, MLXArray)?) throws -> MLXArray {
-                try ACEPipeline.diffuse(dit: dit, conditioning: conditioning, source: source,
+                try ACEPipeline.diffuse(dit: transformer, conditioning: conditioning, source: source,
                                         frames: renderFrames, seed: seed, noise: noise, release: release) { step, total in
                     progress(.step(step, total))
                     try checkCancellation()
