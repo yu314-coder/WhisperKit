@@ -104,11 +104,10 @@ enum MusicModel: String, CaseIterable, Identifiable {
             return .licenceRestricted(
                 note: "Ported and working, but Meta licenses these weights for non-commercial use only (CC-BY-NC 4.0), so they are not distributed with this app.")
         case .aceStep15:
-            // Measured on a Mac: 2.7 GB for a prompt alone, 3.2 GB with
-            // lyrics. Medium needs 3.5 GB and an 8 GB iPad cannot survive it,
-            // so this sits just under a line known to fail. Offered anyway
-            // rather than fenced off — it may well fit where Medium does not
-            // — but the note says plainly what the risk is.
+            // Weights are mapped rather than loaded and each stage runs
+            // alone; measured on a Mac, a 30-second song peaks at 0.74 GB and
+            // the 6:24 maximum at 1.6 GB, against 3.6 GB before. See
+            // `ACEGenerator` and `MappedWeights`.
             return .ready
         }
     }
@@ -117,15 +116,6 @@ enum MusicModel: String, CaseIterable, Identifiable {
 
     /// Only ACE-Step has a lyric encoder; the others take a prompt alone.
     var supportsLyrics: Bool { self == .aceStep15 }
-
-    /// Shown under a runnable model when it is close to what the device can
-    /// hold. ACE-Step peaks at 2.7 GB for a prompt and 3.2 GB with lyrics;
-    /// Medium needs 3.5 GB and is killed on 8 GB hardware, so the margin here
-    /// is real but thin.
-    var memoryCaution: String? {
-        guard self == .aceStep15, Self.physicalMemoryGB < 10 else { return nil }
-        return String(format: "Peaks near 3 GB while generating. On this %.0f GB device that is close to the limit, so it may be stopped part-way — more likely with lyrics than without.", Self.physicalMemoryGB)
-    }
 
     /// Where the app fetches weights from.
     ///
@@ -140,7 +130,7 @@ enum MusicModel: String, CaseIterable, Identifiable {
     /// independently.
     var releaseTag: String {
         switch self {
-        case .aceStep15: return "acestep-int8-v1"
+        case .aceStep15: return "acestep-v2"
         default:         return "sa3-small-weights-v1"
         }
     }
@@ -192,15 +182,17 @@ enum MusicModel: String, CaseIterable, Identifiable {
                               ("sa3_conditioner_medium.safetensors", 792_862)])
                 .map { (path: $0.0, bytes: $0.1) }
         case .aceStep15:
-            // int8 projections, fp16 elsewhere. The DiT is sharded because
-            // 2.69 GB exceeds the 2 GB cap on a release asset.
-            return [("ace_dit_q8.part1.safetensors", 1_265_350_530),
-                    ("ace_dit_q8.part2.safetensors", 1_429_400_896),
-                    ("ace_qwen_q8.safetensors", 670_383_070),
-                    ("ace_vae_f16.safetensors", 337_352_796),
-                    ("ace_silence.safetensors", 192_101),
-                    ("ace_vocab.json", 2_776_833),
-                    ("ace_merges.txt", 1_671_853)]
+            // One file per stage, so a stage maps only its own. Built by
+            // ports/acestep/convert_weights.py: int8 projections in the two
+            // transformer files, float16 for the text encoder (int8 there
+            // cost the most accuracy) and the decoder.
+            return [(ACEGenerator.File.textEncoder, 1_191_586_112),
+                    (ACEGenerator.File.conditioner, 684_509_312),
+                    (ACEGenerator.File.transformer, 1_773_865_088),
+                    (ACEGenerator.File.decoder, 168_807_360),
+                    (ACEGenerator.File.silence, 1_920_128),
+                    (ACEGenerator.File.vocabulary, 2_776_833),
+                    (ACEGenerator.File.merges, 1_671_853)]
                 .map { (path: $0.0, bytes: $0.1) }
         case .magentaRealtime2, .musicGenSmall:
             return []

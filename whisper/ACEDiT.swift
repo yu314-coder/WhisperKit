@@ -58,7 +58,8 @@ struct ACEDiT {
                encoder: MLXArray,
                temb: MLXArray,
                cos: MLXArray,
-               sin: MLXArray) -> MLXArray {
+               sin: MLXArray,
+               localMask: MLXArray? = nil) -> MLXArray {
         let prefix = "decoder.layers.\(index)"
         let modulation = w("\(prefix).scale_shift_table") + temb
         let parts = modulation.split(parts: 6, axis: 1)
@@ -69,7 +70,8 @@ struct ACEDiT {
         var normed = rmsNorm(h, weight: w("\(prefix).self_attn_norm.weight"), eps: Self.epsilon)
             * (1 + scale) + shift
         h = h + attention(prefix: "\(prefix).self_attn", x: normed, source: nil,
-                          cos: cos, sin: sin) * gate
+                          cos: cos, sin: sin,
+                          mask: ACESlidingWindow.isLocal(layer: index) ? localMask : nil) * gate
 
         normed = rmsNorm(h, weight: w("\(prefix).cross_attn_norm.weight"), eps: Self.epsilon)
         h = h + attention(prefix: "\(prefix).cross_attn", x: normed, source: encoder,
@@ -82,7 +84,7 @@ struct ACEDiT {
     }
 
     private func attention(prefix: String, x: MLXArray, source: MLXArray?,
-                           cos: MLXArray?, sin: MLXArray?) -> MLXArray {
+                           cos: MLXArray?, sin: MLXArray?, mask: MLXArray? = nil) -> MLXArray {
         let queryLength = x.dim(1)
         let memory = source ?? x
         let memoryLength = memory.dim(1)
@@ -106,13 +108,13 @@ struct ACEDiT {
             k = applyRotary(k, cos: cos, sin: sin)
         }
 
-        let repeats = Self.headCount / Self.keyValueHeadCount
-        let kFull = repeatHeads(k, count: repeats)
-        let vFull = repeatHeads(v, count: repeats)
-
-        var scores = matmul(q, kFull.transposed(0, 1, 3, 2)) * pow(Float(Self.headDimension), -0.5)
-        scores = softmax(scores, axis: -1)
-        let out = matmul(scores, vFull)
+        // The fused kernel never materializes the full score matrix, which
+        // is what makes long clips possible at all: at the 6:24 maximum the
+        // diffusion transformer sees 4,800 positions, and the unfused
+        // product would be 16 x 4,800 x 4,800 floats — 1.5 GB per layer.
+        let out = scaledDotProductAttention(queries: q, keys: k, values: v,
+                                            scale: pow(Float(Self.headDimension), -0.5),
+                                            mask: mask)
             .transposed(0, 2, 1, 3)
             .reshaped(1, queryLength, Self.headCount * Self.headDimension)
         return linear(out, "\(prefix).o_proj.weight")
@@ -135,13 +137,6 @@ struct ACEDiT {
         return x * c + rotated * s
     }
 
-    private func repeatHeads(_ x: MLXArray, count: Int) -> MLXArray {
-        guard count > 1 else { return x }
-        let shape = x.shape
-        let expanded = broadcast(x.expandedDimensions(axis: 2),
-                                 to: [shape[0], shape[1], count, shape[2], shape[3]])
-        return expanded.reshaped(shape[0], shape[1] * count, shape[2], shape[3])
-    }
 }
 
 // MARK: - Full forward
@@ -187,8 +182,10 @@ extension ACEDiT {
             + w("decoder.condition_embedder.bias")
 
         let (cos, sin) = rotaryTable(length: h.dim(1))
+        let localMask = ACESlidingWindow.mask(length: h.dim(1))
         for index in 0 ..< 24 {
-            h = layer(index, hidden: h, encoder: conditioning, temb: modulation, cos: cos, sin: sin)
+            h = layer(index, hidden: h, encoder: conditioning, temb: modulation,
+                      cos: cos, sin: sin, localMask: localMask)
         }
 
         let outParts = (w("decoder.scale_shift_table") + temb.expandedDimensions(axis: 1))

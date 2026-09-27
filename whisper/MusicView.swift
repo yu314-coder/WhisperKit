@@ -24,6 +24,11 @@ struct MusicView: View {
     @State private var isPlaying = false
     @State private var playingClipID: UUID?
     @State private var memory = MusicMemoryMonitor()
+    /// The language the lyrics are sung in. ACE-Step conditions on it; an
+    /// instrumental ignores it and sends "unknown" instead.
+    @AppStorage("musicVocalLanguage") private var vocalLanguage =
+        Languages.preferred(among: Languages.aceStepCodes)
+    private static let vocalLanguages = Languages.sortedByName(Languages.aceStepCodes)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -188,9 +193,22 @@ struct MusicView: View {
             HStack {
                 StudioLabel(text: "Lyrics")
                 Spacer()
-                Text("optional")
-                    .font(Studio.mono(9))
-                    .foregroundColor(Studio.mute)
+                Menu {
+                    Picker("Sung in", selection: $vocalLanguage) {
+                        ForEach(Self.vocalLanguages, id: \.self) { code in
+                            Text(Languages.displayName(code)).tag(code)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "globe")
+                        Text("Sung in \(Languages.englishName(vocalLanguage))")
+                        Image(systemName: "chevron.up.chevron.down")
+                    }
+                    .font(Studio.mono(10, weight: .semibold))
+                    .foregroundColor(lyrics.isEmpty ? Studio.mute : Studio.accent)
+                }
+                .accessibilityLabel("Vocal language, \(Languages.englishName(vocalLanguage))")
             }
             ZStack(alignment: .topLeading) {
                 if lyrics.isEmpty {
@@ -257,9 +275,6 @@ struct MusicView: View {
                 noteRow(icon: "checkmark.circle",
                         tint: Studio.ok,
                         text: "\(selectedModel.displayName) runs on this device. Weights are \(selectedModel.sizeLabel), downloaded once.")
-                if let caution = selectedModel.memoryCaution {
-                    noteRow(icon: "exclamationmark.triangle", tint: Studio.hot, text: caution)
-                }
             case .weightsPublished(let note):
                 noteRow(icon: "exclamationmark.triangle", tint: Studio.hot, text: note)
             case .needsConversion(let note):
@@ -391,6 +406,7 @@ struct MusicView: View {
                     memory.start()
                     engine.generate(model: selectedModel, prompt: prompt,
                                     lyrics: selectedModel.supportsLyrics ? lyrics : "",
+                                    language: vocalLanguage,
                                     seconds: durationSeconds)
                 }
             } label: {

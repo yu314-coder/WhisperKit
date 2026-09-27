@@ -62,23 +62,31 @@ struct ACEQwen3 {
         return value.asType(.float32)
     }
 
-    /// Dequantized on demand when the checkpoint packed it.
-    private func embeddingTable() -> MLXArray {
+    /// Looks up token embeddings without the transformer — ACE-Step feeds
+    /// lyrics to its own lyric encoder this way, as raw table rows.
+    ///
+    /// Only the requested rows are dequantized. The table is 151,669 rows of
+    /// 1024, so expanding all of it to float32 for a lookup cost 620 MB of
+    /// transient memory for what is, at most, a couple of thousand rows.
+    func embed(inputIDs: MLXArray) -> MLXArray {
         let key = prefix.isEmpty ? "embed_tokens.weight" : "\(prefix).embed_tokens.weight"
+        let ids = inputIDs.reshaped(-1)
+        let rows: MLXArray
         if quantizationBits > 0, let packed = weights["\(key).wq"] {
-            return dequantized(packed,
-                               scales: weights["\(key).scales"]!,
-                               biases: weights["\(key).biases"]!,
+            rows = dequantized(take(packed, ids, axis: 0),
+                               scales: take(weights["\(key).scales"]!, ids, axis: 0),
+                               biases: take(weights["\(key).biases"]!, ids, axis: 0),
                                groupSize: quantizationGroup,
                                bits: quantizationBits)
+        } else {
+            rows = take(weights[key]!, ids, axis: 0)
         }
-        return w("embed_tokens.weight")
+        return rows.asType(.float32).reshaped(1, inputIDs.dim(1), config.hiddenSize)
     }
 
     func callAsFunction(inputIDs: MLXArray) -> MLXArray {
         let length = inputIDs.dim(1)
-        var h = take(embeddingTable(), inputIDs.reshaped(-1), axis: 0)
-            .reshaped(1, length, config.hiddenSize)
+        var h = embed(inputIDs: inputIDs)
 
         let mask = causalMask(length: length)
         for layer in 0 ..< config.layerCount {
@@ -90,6 +98,11 @@ struct ACEQwen3 {
             h = h + feedForward(prefix: "\(prefix).mlp",
                                 x: rmsNorm(h, weight: w("\(prefix).post_attention_layernorm.weight"),
                                            eps: config.epsilon))
+            // One layer at a time. Dense float16 weights are widened to
+            // float32 as they are used, and left as one lazy graph MLX
+            // widened all 28 layers' worth together — 600 MB for a model
+            // that runs once, on a few hundred tokens.
+            eval(h)
         }
         return rmsNorm(h, weight: w("norm.weight"), eps: config.epsilon)
     }
@@ -114,15 +127,11 @@ struct ACEQwen3 {
         k = RoPE(k, dimensions: config.headDimension, traditional: false,
                  base: config.ropeTheta, scale: 1, offset: 0)
 
-        // Grouped-query attention: each key/value head serves several queries.
-        let repeats = config.headCount / config.keyValueHeadCount
-        let kExpanded = repeated(k, count: repeats, axis: 1)
-        let vExpanded = repeated(v, count: repeats, axis: 1)
-
-        var scores = matmul(q, kExpanded.transposed(0, 1, 3, 2))
-            * pow(Float(config.headDimension), -0.5)
-        scores = softmax(scores + mask, axis: -1)
-        let out = matmul(scores, vExpanded)
+        // Grouped-query attention: the fused kernel pairs each key/value head
+        // with its query group itself, so k and v are passed untiled.
+        let out = scaledDotProductAttention(queries: q, keys: k, values: v,
+                                            scale: pow(Float(config.headDimension), -0.5),
+                                            mask: mask)
             .transposed(0, 2, 1, 3)
             .reshaped(1, length, config.headCount * config.headDimension)
         return linear(out, "\(prefix).o_proj.weight")
@@ -132,19 +141,6 @@ struct ACEQwen3 {
         let gate = linear(x, "\(prefix).gate_proj.weight")
         let up = linear(x, "\(prefix).up_proj.weight")
         return linear(gate * sigmoid(gate) * up, "\(prefix).down_proj.weight")
-    }
-
-    /// Repeats each head `count` times along `axis`, matching how grouped
-    /// key/value heads are broadcast across their query group.
-    private func repeated(_ x: MLXArray, count: Int, axis: Int) -> MLXArray {
-        guard count > 1 else { return x }
-        let shape = x.shape
-        // Interleaved per head — [h0, h0, h1, h1, ...] — which is what the
-        // key/value grouping means. Repeating the whole tensor instead would
-        // pair every query head with the wrong key.
-        let expanded = broadcast(x.expandedDimensions(axis: axis + 1),
-                                 to: [shape[0], shape[1], count, shape[2], shape[3]])
-        return expanded.reshaped(shape[0], shape[1] * count, shape[2], shape[3])
     }
 
     private func causalMask(length: Int) -> MLXArray {

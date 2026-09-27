@@ -46,23 +46,31 @@ final class MusicEngine {
         }
     }
 
+    /// A download stops at once. A generation stops at its next step, and
+    /// until then the engine stays busy — letting Generate start another run
+    /// while the first is still unwinding would hold both in memory.
     func cancel() {
         work?.cancel()
-        work = nil
-        phase = .idle
+        if case .generating = phase {
+            phase = .generating(stage: "Stopping")
+        } else {
+            work = nil
+            phase = .idle
+        }
     }
 
     /// Downloads whatever is missing, then generates. Both phases report into
     /// `phase` so the view can show one continuous progress story.
-    func generate(model: MusicModel, prompt: String, lyrics: String = "", seconds: Double) {
+    func generate(model: MusicModel, prompt: String, lyrics: String = "",
+                  language: String = "en", seconds: Double) {
         guard !isBusy else { return }
         work = Task { [weak self] in
             guard let self else { return }
             do {
                 try await self.fetchWeightsIfNeeded(for: model)
                 try Task.checkCancellation()
-                try await self.runGeneration(model: model, prompt: prompt,
-                                             lyrics: lyrics, seconds: seconds)
+                try await self.runGeneration(model: model, prompt: prompt, lyrics: lyrics,
+                                             language: language, seconds: seconds)
             } catch is CancellationError {
                 self.phase = .idle
             } catch {
@@ -76,6 +84,7 @@ final class MusicEngine {
     private func fetchWeightsIfNeeded(for model: MusicModel) async throws {
         let directory = model.weightsDirectory
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        removeSupersededFiles(in: directory)
 
         let files = model.weightFiles
         let missing = files.enumerated().filter { _, file in
@@ -119,10 +128,28 @@ final class MusicEngine {
         }
     }
 
+    /// Deletes files an earlier version downloaded that no model uses now.
+    ///
+    /// ACE-Step's first layout was two 1.3 GB shards and a trimmed silence
+    /// file; its replacement splits the checkpoint by stage instead. Without
+    /// this, updating the app would leave 2.7 GB behind in Documents that
+    /// nothing reads and nothing in the app can remove.
+    private func removeSupersededFiles(in directory: URL) {
+        let expected = Set(MusicModel.allCases
+            .filter { $0.weightsDirectory == directory }
+            .flatMap { $0.weightFiles.map(\.path) })
+        guard !expected.isEmpty,
+              let present = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return }
+        for name in present where !expected.contains(name) && !name.hasPrefix(".") {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
+    }
+
     // MARK: - Generation
 
-    private func runGeneration(model: MusicModel, prompt: String,
-                               lyrics: String, seconds: Double) async throws {
+    private func runGeneration(model: MusicModel, prompt: String, lyrics: String,
+                               language: String, seconds: Double) async throws {
         // MLX asks the Metal device for its architecture and the Simulator's
         // MTLSimDevice returns null, which MLX turns straight into a
         // std::string — strlen(NULL), a hard crash inside the library before
@@ -137,7 +164,8 @@ final class MusicEngine {
         // ACE-Step has no Stable Audio variant, so asking for one first threw
         // "no on-device implementation" and never reached this branch.
         if model == .aceStep15 {
-            try await runACEStep(prompt: prompt, lyrics: lyrics, seconds: seconds, model: model)
+            try await runACEStep(prompt: prompt, lyrics: lyrics, language: language,
+                                 seconds: seconds, model: model)
             return
         }
         guard let kind = model.stableAudioKind else {
@@ -162,59 +190,48 @@ final class MusicEngine {
 }
 
 extension MusicEngine {
-    /// ACE-Step's text-only path: prompt to 48 kHz stereo in eight steps.
+    /// ACE-Step: prompt and lyrics to 48 kHz stereo in eight steps.
     ///
-    /// Loaded per run rather than cached. The weights are 3.7 GB and a stale
-    /// copy held between generations is the difference between fitting and
-    /// being killed — the same failure Stable Audio 3 Medium hits on an 8 GB
-    /// device.
-    func runACEStep(prompt: String, lyrics: String, seconds: Double, model: MusicModel) async throws {
-        let directory = model.weightsDirectory
-        func url(_ name: String) -> URL { directory.appendingPathComponent(name) }
-
-        phase = .generating(stage: "Loading weights")
-        let ditWeights = try loadArrays(url: url("ace_dit_q8.part1.safetensors"), stream: .cpu)
-            .merging(try loadArrays(url: url("ace_dit_q8.part2.safetensors"), stream: .cpu)) { a, _ in a }
-        let qwenWeights = try loadArrays(url: url("ace_qwen_q8.safetensors"), stream: .cpu)
-        let vaeWeights = try loadArrays(url: url("ace_vae_f16.safetensors"), stream: .cpu)
-        let silence = try loadArrays(url: url("ace_silence.safetensors"), stream: .cpu)["silence"]!
-
-        phase = .generating(stage: "Reading prompt")
-        let tokenizer = try ACETokenizer(vocabularyURL: url("ace_vocab.json"),
-                                         mergesURL: url("ace_merges.txt"))
-        let ids = tokenizer.encode(prompt)
-        guard !ids.isEmpty else { throw MusicEngineError.notImplemented("empty prompt") }
-        let trimmedLyrics = lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lyricIDs = trimmedLyrics.isEmpty ? nil : tokenizer.encode(trimmedLyrics)
-
-        var encoder = ACEQwen3(weights: qwenWeights, config: .embedder, prefix: "")
-        encoder.quantizationBits = 8
-        var dit = ACEDiT(weights: ditWeights)
-        dit.quantizationBits = 8
-
-        let projectionKey = "encoder.text_projector.weight"
-        let projection = ditWeights[projectionKey] ?? dequantized(
-            ditWeights["\(projectionKey).wq"]!,
-            scales: ditWeights["\(projectionKey).scales"]!,
-            biases: ditWeights["\(projectionKey).biases"]!,
-            groupSize: 64, bits: 8)
-
-        let acePipeline = ACEPipeline(textEncoder: encoder, dit: dit,
-                                      vae: ACEVAE(weights: vaeWeights),
-                                      silence: silence, textProjection: projection)
-        let started = Date()
-        let audio = acePipeline.generate(tokenIDs: MLXArray(ids, [1, ids.count]),
-                                         lyricIDs: lyricIDs.map { MLXArray($0, [1, $0.count]) },
-                                         seconds: seconds) { step, total in
-            Task { @MainActor [weak self] in
-                self?.phase = .generating(stage: "Step \(step) of \(total)")
-            }
-        }
-        eval(audio)
-
+    /// Runs off the main actor — the first version ran the whole pipeline on
+    /// it, which froze the screen, memory gauge included, for the length of a
+    /// generation. Each run draws a new seed, so the same prompt twice gives
+    /// two different takes, as it does with Stable Audio.
+    func runACEStep(prompt: String, lyrics: String, language: String,
+                    seconds: Double, model: MusicModel) async throws {
+        let generator = ACEGenerator(directory: model.weightsDirectory)
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("acestep-\(Int(Date().timeIntervalSince1970)).wav")
-        try ACEWAVWriter.write(audio, to: destination)
+        let seed = UInt64.random(in: 0 ... UInt64(UInt32.max))
+        let started = Date()
+
+        phase = .generating(stage: "Reading prompt")
+        // Cancelling `work` does not reach a detached task, and a run left
+        // going after Cancel would still hold its memory when the next one
+        // starts. The flag carries the request across; the generator checks
+        // it between steps.
+        let flag = CancellationFlag()
+        try await withTaskCancellationHandler {
+            try await Task.detached(priority: .userInitiated) { [weak self] in
+            _ = try generator.generate(caption: prompt, lyrics: lyrics, language: language,
+                                       seconds: seconds, seed: seed, to: destination,
+                                       isCancelled: { flag.isCancelled }) { stage in
+                let label: String
+                switch stage {
+                case .readingPrompt:          label = "Reading prompt"
+                case .conditioning:           label = lyrics.isEmpty ? "Conditioning" : "Reading lyrics"
+                case .step(let step, let of): label = "Step \(step) of \(of)"
+                case .decoding(let fraction): label = "Decoding audio \(Int(fraction * 100))%"
+                }
+                Task { @MainActor [weak self] in
+                    guard let self, !flag.isCancelled else { return }
+                    self.phase = .generating(stage: label)
+                }
+            }
+            }.value
+        } onCancel: {
+            flag.cancel()
+        }
+
         lastResult = destination
         lastDuration = seconds
         elapsedMilliseconds = Int(Date().timeIntervalSince(started) * 1000)

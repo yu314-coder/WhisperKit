@@ -52,7 +52,27 @@ struct ACETokenizer {
         byteToCharacter = Self.byteMapping()
     }
 
+    /// The literal `<|endoftext|>` inside a template is the special token,
+    /// not twelve characters of text. ACE-Step's prompt templates close with
+    /// one and the tokenizer then appends another, so both must come out as
+    /// id 151643 — byte-level merging the literal gives a different sequence
+    /// the model never saw.
+    private static let endOfTextMarker = "<|endoftext|>"
+
     func encode(_ text: String, appendEndOfText: Bool = true) -> [Int32] {
+        // Qwen's tokenizer normalizes to NFC first; a decomposed accent would
+        // otherwise split into different byte pairs.
+        let normalized = text.precomposedStringWithCanonicalMapping
+        var ids: [Int32] = []
+        for (index, segment) in normalized.components(separatedBy: Self.endOfTextMarker).enumerated() {
+            if index > 0 { ids.append(Self.endOfText) }
+            ids.append(contentsOf: encodeOrdinary(segment))
+        }
+        if appendEndOfText { ids.append(Self.endOfText) }
+        return ids
+    }
+
+    private func encodeOrdinary(_ text: String) -> [Int32] {
         var ids: [Int32] = []
         let range = NSRange(text.startIndex ..< text.endIndex, in: text)
         for match in expression.matches(in: text, range: range) {
@@ -60,7 +80,6 @@ struct ACETokenizer {
             let mapped = String(Array(text[piece].utf8).compactMap { byteToCharacter[$0] })
             ids.append(contentsOf: merge(mapped).compactMap { vocabulary[$0] })
         }
-        if appendEndOfText { ids.append(Self.endOfText) }
         return ids
     }
 

@@ -27,32 +27,37 @@ struct ACEConditioning {
         return stack
     }
 
+    /// `encoder.text_projector`: 1024 to 2048, no bias.
+    private func projectText(_ text: MLXArray) -> MLXArray {
+        let key = "encoder.text_projector.weight"
+        if quantizationBits > 0, let packed = weights["\(key).wq"] {
+            return quantizedMatmul(text, packed,
+                                   scales: weights["\(key).scales"]!,
+                                   biases: weights["\(key).biases"]!,
+                                   transpose: true, groupSize: 64, bits: quantizationBits)
+        }
+        return matmul(text, weights[key]!.asType(.float32).T)
+    }
+
+    /// Every stream is always present. A song without words still sends its
+    /// lyric slot — the text "[Instrumental]" — and a prompt without a
+    /// reference clip still sends a timbre, read from the silence bed. That is
+    /// how the model was trained; leaving either out, as this once did,
+    /// conditions it on a sequence shape it never saw.
+    ///
     /// - Parameters:
-    ///   - text: (1, n, 1024) from the Qwen3 embedder.
-    ///   - lyric: (1, n, 1024) lyric embeddings, or nil for instrumental.
-    ///   - reference: (1, n, 64) acoustic latents of a reference clip, or nil.
-    /// - Returns: the packed sequence and its mask.
-    func encode(text: MLXArray,
-                textProjection: MLXArray,
-                lyric: MLXArray?,
-                reference: MLXArray?) -> (MLXArray, MLXArray) {
-        let projected = matmul(text, textProjection.asType(.float32).T)
-
-        var streams: [(MLXArray, Int)] = []
-        if let lyric {
-            streams.append((lyricEncoder(lyric), lyric.dim(1)))
-        }
-        if let reference {
-            // The learned lead token's final state is the timbre summary, so
-            // only position zero survives.
-            let encoded = timbreEncoder(reference)
-            streams.append((encoded[0..., 0 ..< 1, 0...], 1))
-        }
-        streams.append((projected, text.dim(1)))
-
-        let sequence = concatenated(streams.map { $0.0 }, axis: 1)
-        let total = streams.reduce(0) { $0 + $1.1 }
-        let mask = MLXArray([Int32](repeating: 1, count: total), [1, total])
-        return (sequence, mask)
+    ///   - text: (1, n, 1024) caption states from the Qwen3 embedder.
+    ///   - lyric: (1, n, 1024) lyric token embeddings — table rows looked up,
+    ///     not run through the embedder.
+    ///   - timbre: (1, frames, 64) acoustic latents: a reference clip, or the
+    ///     first 750 frames of silence when there is none.
+    /// - Returns: (1, lyric + 1 + text, 2048). Packing sorts valid tokens
+    ///   ahead of padding; with none padded it is plain concatenation in the
+    ///   order lyric, timbre, text.
+    func encode(text: MLXArray, lyric: MLXArray, timbre: MLXArray) -> MLXArray {
+        let lyricStates = lyricEncoder(lyric)
+        // The timbre encoder's summary is its first position.
+        let timbreSummary = timbreEncoder(timbre)[0..., 0 ..< 1, 0...]
+        return concatenated([lyricStates, timbreSummary, projectText(text)], axis: 1)
     }
 }

@@ -110,6 +110,7 @@ struct ContentView: View {
     @State private var statusMessage = ""
     @State private var selectedPhotoItem: PhotosPickerItem?
     @AppStorage("selectedLanguage") private var selectedLanguage: String = "auto"
+    @State private var languageQuery = ""
     @State private var transcriptionProgress: Double = 0.0
     @State private var currentSegment: Int = 0
     @State private var totalSegments: Int = 0
@@ -236,19 +237,18 @@ struct ContentView: View {
     }
 
     // MARK: - Languages
-    let supportedLanguages: [(code: String, name: String)] = [
-        ("auto", "🌍 Auto Detect"),
-        ("en", "🇺🇸 English"),
-        ("zh", "🇨🇳 Chinese (中文)"),
-        ("es", "🇪🇸 Spanish (Español)"),
-        ("fr", "🇫🇷 French (Français)"),
-        ("de", "🇩🇪 German (Deutsch)"),
-        ("ja", "🇯🇵 Japanese (日本語)"),
-        ("ko", "🇰🇷 Korean (한국어)"),
-        ("ru", "🇷🇺 Russian (Русский)"),
-        ("pt", "🇵🇹 Portuguese (Português)"),
-        ("it", "🇮🇹 Italian (Italiano)")
-    ]
+    /// Auto-detect, then all of Whisper's languages by English name. Eleven
+    /// were offered before, under a heading promising 99; the model itself
+    /// always knew the rest.
+    ///
+    /// Static because resolving a hundred native names through `Locale` is
+    /// not free, and SwiftUI re-creates this view far more often than the
+    /// list changes.
+    private static let languageOptions: [(code: String, name: String)] =
+        [("auto", "🌍 Auto Detect")]
+        + Languages.sortedByName(Languages.whisperCodes).map { ($0, Languages.displayName($0)) }
+
+    var supportedLanguages: [(code: String, name: String)] { Self.languageOptions }
     
     var body: some View {
         editorialLayout
@@ -1610,10 +1610,19 @@ struct ContentView: View {
         return isModelLoaded && selectedModel == model
     }
 
+    /// Matches English or native name, or the code itself.
+    var filteredLanguages: [(code: String, name: String)] {
+        let query = languageQuery.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return supportedLanguages }
+        return supportedLanguages.filter {
+            $0.name.localizedCaseInsensitiveContains(query) || $0.code.caseInsensitiveCompare(query) == .orderedSame
+        }
+    }
+
     var languagePickerSheet: some View {
         NavigationStack {
             List {
-                ForEach(supportedLanguages, id: \.code) { lang in
+                ForEach(filteredLanguages, id: \.code) { lang in
                     Button {
                         selectedLanguage = lang.code
                         showLanguagePicker = false
@@ -1633,6 +1642,9 @@ struct ContentView: View {
             .frame(maxWidth: 620)
             .frame(maxWidth: .infinity)
             .background(Self.paperBG.ignoresSafeArea())
+            .searchable(text: $languageQuery, placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: "Search \(supportedLanguages.count - 1) languages")
+            .onDisappear { languageQuery = "" }
             .navigationTitle("Language")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -2975,7 +2987,11 @@ struct ContentView: View {
             ?? AudioConverter.peakEnvelope(of: workURL)
         let peakLevel = envelope?.peak
 
-        let languageCode = selectedLanguage == "auto" ? nil : selectedLanguage
+        var languageCode = selectedLanguage == "auto" ? nil : selectedLanguage
+        // Cantonese arrived with large-v3; Small's tokenizer has no <|yue|>,
+        // and WhisperKit answers an unknown language token by decoding as
+        // English. Written Chinese is the nearest thing Small can produce.
+        if languageCode == "yue" && selectedModel == .small { languageCode = "zh" }
         let shouldDetectLanguage = (languageCode == nil)
 
         // Whisper's compression-ratio check exists to catch repetition loops.

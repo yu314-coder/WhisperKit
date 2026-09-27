@@ -21,35 +21,79 @@ struct ACEVAE {
     static let strides = [10, 6, 4, 4, 2]
     static let channels = 128
     static let audioChannels = 2
+    /// Samples per latent frame: the product of the strides.
+    static let hopLength = 1920
 
     let weights: [String: MLXArray]
+    /// What the decoder computes in. Weights are stored as float16.
+    var dtype: DType = .float32
+    /// Routes upsampling through MLX's transposed convolution, for checking.
+    var usesReferenceUpsample = false
 
     private func w(_ key: String) -> MLXArray {
         guard let value = weights[key] else { fatalError("missing VAE weight: \(key)") }
-        return value.asType(.float32)
+        return value.asType(dtype)
     }
-    private func maybe(_ key: String) -> MLXArray? { weights[key]?.asType(.float32) }
+    private func maybe(_ key: String) -> MLXArray? { weights[key]?.asType(dtype) }
 
     /// - Parameter latent: (1, 64, frames), channels-first as the checkpoint expects.
     /// - Returns: (1, 2, samples) stereo audio.
     func decode(latent: MLXArray) -> MLXArray {
         // MLX convolves over (batch, length, channels); the model is stored
         // channels-first, so transpose once here and once at the end.
-        var h = latent.transposed(0, 2, 1)
-        h = convolve(h, prefix: "decoder.conv1", kernel: 7, dilation: 1)
+        run(latent.transposed(0, 2, 1)).transposed(0, 2, 1)
+    }
+
+    /// Decodes in overlapping windows and hands each finished stretch of
+    /// audio to `emit`, so a long clip never exists at full rate inside the
+    /// decoder.
+    ///
+    /// The last stage works at 48 kHz across 128 channels: 740 MB per
+    /// intermediate for a 30-second clip decoded whole, several of them live
+    /// at once. Windows of 48 frames plus 12 either side cap the working set
+    /// regardless of length.
+    ///
+    /// Overlap-discard, as the reference does it: each window decodes with
+    /// context on both sides and only its middle is kept. The decoder's reach
+    /// is under 12 frames — measured, 12 reproduces a whole-clip decode
+    /// exactly and 8 does not — so the join is not merely inaudible but
+    /// absent.
+    ///
+    /// - Parameter latent: (1, frames, 64), frames-first as diffusion leaves it.
+    /// - Parameter emit: (1, samples, 2) audio and the fraction done.
+    func decodeTiled(latent: MLXArray, core: Int = 48, overlap: Int = 12,
+                     emit: (MLXArray, Double) throws -> Void) rethrows {
+        let frames = latent.dim(1)
+        var start = 0
+        while start < frames {
+            let end = min(start + core, frames)
+            let lower = max(0, start - overlap)
+            let upper = min(frames, end + overlap)
+            let audio = run(latent[0..., lower ..< upper, 0...].asType(dtype)).asType(.float32)
+            let kept = audio[0..., ((start - lower) * Self.hopLength) ..< ((end - lower) * Self.hopLength), 0...]
+            eval(kept)
+            try emit(kept, Double(end) / Double(frames))
+            start = end
+        }
+    }
+
+    /// (1, frames, 64) to (1, frames × 1920, 2).
+    private func run(_ latent: MLXArray) -> MLXArray {
+        var h = convolve(latent, prefix: "decoder.conv1", kernel: 7, dilation: 1)
 
         for (index, stride) in Self.strides.enumerated() {
             let prefix = "decoder.block.\(index)"
             h = snake(h, prefix: "\(prefix).snake1")
-            h = upsample(h, prefix: "\(prefix).conv_t1", stride: stride)
+            h = usesReferenceUpsample
+                ? referenceUpsample(h, prefix: "\(prefix).conv_t1", stride: stride)
+                : upsample(h, prefix: "\(prefix).conv_t1", stride: stride)
             for (unit, dilation) in [(1, 1), (2, 3), (3, 9)] {
                 h = residualUnit(h, prefix: "\(prefix).res_unit\(unit)", dilation: dilation)
             }
         }
 
         h = snake(h, prefix: "decoder.snake1")
-        h = convolve(h, prefix: "decoder.conv2", kernel: 7, dilation: 1)
-        return h.transposed(0, 2, 1)
+        return convolve(h, prefix: "decoder.conv2", kernel: 7, dilation: 1)
     }
 
     // MARK: - Pieces
@@ -72,12 +116,53 @@ struct ACEVAE {
         return y
     }
 
-    private func upsample(_ x: MLXArray, prefix: String, stride: Int) -> MLXArray {
-        let kernel = 2 * stride
-        let padding = Int(ceil(Double(stride) / 2))
-        var y = convTransposed1d(x, w("\(prefix).weight"), stride: stride, padding: padding)
+    /// Transposed convolution as one matrix product and a shift.
+    ///
+    /// MLX lowers a strided transposed convolution to an explicit unfold of
+    /// its input. For the fourth block of a five-second window that is a 1 GB
+    /// temporary to produce 60 MB of output, and it was most of what the
+    /// decoder cost in memory. Here every kernel is exactly twice its stride,
+    /// so each output sample draws on just two input frames: multiply every
+    /// frame by all taps at once, then add each frame's overhang into its
+    /// neighbours. Same arithmetic, no unfold.
+    ///
+    /// With padding p = stride/2, output phase r of frame i takes tap r+p
+    /// from frame i, plus tap r+p+s from frame i-1 when r+p < s, or tap
+    /// r+p-s from frame i+1 otherwise.
+    ///
+    /// The weights are stored ready for this — (in, taps, out) under
+    /// `.taps` — because transposing them here happened once per window: an
+    /// 84 MB copy for the first block alone, dozens of times per clip.
+    private func upsample(_ x: MLXArray, prefix: String, stride s: Int) -> MLXArray {
+        let weight = w("\(prefix).taps")     // (in, 2s, out)
+        let (inChannels, taps, outChannels) = (weight.dim(0), weight.dim(1), weight.dim(2))
+        precondition(taps == 2 * s && s % 2 == 0, "upsample assumes kernel = 2 × even stride")
+        let p = s / 2
+        let length = x.dim(1)
+
+        // z[i, k] = x[i] · W_k, for every frame i and tap k.
+        let z = matmul(x, weight.reshaped(inChannels, taps * outChannels))
+            .reshaped(1, length, taps, outChannels)
+
+        let own = z[0..., 0..., p ..< (p + s), 0...]
+        let fromPrevious = z[0..., 0 ..< (length - 1), (p + s) ..< taps, 0...]
+        let fromNext = z[0..., 1 ..< length, 0 ..< p, 0...]
+        let early = concatenated([MLXArray.zeros([1, 1, s - p, outChannels], dtype: z.dtype), fromPrevious],
+                                 axis: 1)
+        let late = concatenated([fromNext, MLXArray.zeros([1, 1, p, outChannels], dtype: z.dtype)],
+                                axis: 1)
+
+        var y = (own + concatenated([early, late], axis: 2)).reshaped(1, length * s, outChannels)
         if let bias = maybe("\(prefix).bias") { y = y + bias }
-        _ = kernel
+        return y
+    }
+
+    /// The same, through MLX's own transposed convolution — kept to check
+    /// `upsample` against.
+    private func referenceUpsample(_ x: MLXArray, prefix: String, stride: Int) -> MLXArray {
+        let padding = Int(ceil(Double(stride) / 2))
+        var y = convTransposed1d(x, w("\(prefix).taps").transposed(2, 1, 0), stride: stride, padding: padding)
+        if let bias = maybe("\(prefix).bias") { y = y + bias }
         return y
     }
 
@@ -91,6 +176,14 @@ struct ACEVAE {
         // Stored as (1, channels, 1); the working layout is (batch, length, channels).
         let alpha = exp(w("\(prefix).alpha").reshaped(1, 1, -1))
         let beta = exp(w("\(prefix).beta").reshaped(1, 1, -1))
+        return Self.fusedSnake(x, alpha, beta)
+    }
+
+    /// One kernel instead of five. Unfused, each step of the formula wrote a
+    /// full-size intermediate — at 48 kHz across 128 channels, several
+    /// hundred megabytes live at once for a single window.
+    private static let fusedSnake = compile(shapeless: true) {
+        (x: MLXArray, alpha: MLXArray, beta: MLXArray) -> MLXArray in
         let s = sin(alpha * x)
         return x + (s * s) / (beta + 1e-9)
     }

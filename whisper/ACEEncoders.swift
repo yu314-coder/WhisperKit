@@ -14,6 +14,7 @@ import MLX
 ///
 /// Attention is bidirectional here — these describe conditioning that exists
 /// all at once, not a sequence being generated, so there is no causal mask.
+/// Even-numbered layers are local, though: see `ACESlidingWindow`.
 struct ACEEncoderStack {
     static let hiddenSize = 2048
     static let headCount = 16
@@ -59,13 +60,15 @@ struct ACEEncoderStack {
     func callAsFunction(_ inputs: MLXArray) -> MLXArray {
         var h = linear(inputs, "embed_tokens.weight") + w("embed_tokens.bias")
         let (cos, sin) = rotaryTable(length: h.dim(1))
+        let local = ACESlidingWindow.mask(length: h.dim(1))
 
         for index in 0 ..< layerCount {
             let layer = "layers.\(index)"
             h = h + attention(prefix: "\(layer).self_attn",
                               x: rmsNorm(h, weight: w("\(layer).input_layernorm.weight"),
                                          eps: Self.epsilon),
-                              cos: cos, sin: sin)
+                              cos: cos, sin: sin,
+                              mask: ACESlidingWindow.isLocal(layer: index) ? local : nil)
             h = h + feedForward(prefix: "\(layer).mlp",
                                 x: rmsNorm(h, weight: w("\(layer).post_attention_layernorm.weight"),
                                            eps: Self.epsilon))
@@ -73,7 +76,8 @@ struct ACEEncoderStack {
         return rmsNorm(h, weight: w("norm.weight"), eps: Self.epsilon)
     }
 
-    private func attention(prefix: String, x: MLXArray, cos: MLXArray, sin: MLXArray) -> MLXArray {
+    private func attention(prefix: String, x: MLXArray, cos: MLXArray, sin: MLXArray,
+                           mask: MLXArray?) -> MLXArray {
         let length = x.dim(1)
         func heads(_ key: String, _ count: Int) -> MLXArray {
             linear(x, "\(prefix).\(key)_proj.weight")
@@ -90,14 +94,9 @@ struct ACEEncoderStack {
         q = applyRotary(q, cos: cos, sin: sin)
         k = applyRotary(k, cos: cos, sin: sin)
 
-        let repeats = Self.headCount / Self.keyValueHeadCount
-        let kFull = repeatHeads(k, count: repeats)
-        let vFull = repeatHeads(v, count: repeats)
-
-        // No mask: bidirectional.
-        var scores = matmul(q, kFull.transposed(0, 1, 3, 2)) * pow(Float(Self.headDimension), -0.5)
-        scores = softmax(scores, axis: -1)
-        let out = matmul(scores, vFull)
+        let out = scaledDotProductAttention(queries: q, keys: k, values: v,
+                                            scale: pow(Float(Self.headDimension), -0.5),
+                                            mask: mask)
             .transposed(0, 2, 1, 3)
             .reshaped(1, length, Self.headCount * Self.headDimension)
         return linear(out, "\(prefix).o_proj.weight")
@@ -118,14 +117,6 @@ struct ACEEncoderStack {
         return x * c + concatenated([-second, first], axis: -1) * s
     }
 
-    private func repeatHeads(_ x: MLXArray, count: Int) -> MLXArray {
-        guard count > 1 else { return x }
-        let shape = x.shape
-        let expanded = broadcast(x.expandedDimensions(axis: 2),
-                                 to: [shape[0], shape[1], count, shape[2], shape[3]])
-        return expanded.reshaped(shape[0], shape[1] * count, shape[2], shape[3])
-    }
-
     private func rotaryTable(length: Int) -> (MLXArray, MLXArray) {
         let half = Self.headDimension / 2
         var cosValues = [Float](repeating: 0, count: length * Self.headDimension)
@@ -142,5 +133,30 @@ struct ACEEncoderStack {
         }
         return (MLXArray(cosValues, [1, length, Self.headDimension]),
                 MLXArray(sinValues, [1, length, Self.headDimension]))
+    }
+}
+
+/// ACE-Step alternates local and global attention: even-numbered layers of
+/// every stack — lyric, timbre and diffusion alike — see only positions
+/// within 128 of their own, odd ones see everything.
+///
+/// Invisible on short inputs, which is how it went unported: below 130
+/// positions the window covers the whole sequence and both kinds of layer
+/// agree. A 30-second clip is 375 positions in the diffusion transformer, and
+/// the timbre encoder always reads 750, so without the window half the layers
+/// attended to context they were never trained to see.
+enum ACESlidingWindow {
+    static let radius = 128
+
+    static func isLocal(layer: Int) -> Bool { layer % 2 == 0 }
+
+    /// Additive mask, or nil when the window already spans the sequence.
+    static func mask(length: Int) -> MLXArray? {
+        guard length > radius + 1 else { return nil }
+        let positions = MLXArray(Array(Int32(0) ..< Int32(length)))
+        let distance = abs(positions.reshaped(length, 1) - positions.reshaped(1, length))
+        return MLX.where(lessEqual(distance, MLXArray(Int32(radius))),
+                         MLXArray(Float(0)), MLXArray(-Float.infinity))
+            .reshaped(1, 1, length, length)
     }
 }
