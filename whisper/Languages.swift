@@ -57,12 +57,33 @@ enum Languages {
     ]
 
     static func englishName(_ code: String) -> String {
-        englishNames[code] ?? code.uppercased()
+        code == traditionalChinese ? "Chinese (Traditional)" : englishNames[code] ?? code.uppercased()
+    }
+
+    // MARK: - Chinese script
+
+    /// A transcription choice, not a Whisper language: Whisper has one
+    /// Chinese, `zh`, and writes it in simplified characters. Choosing this
+    /// transcribes as `zh` and converts the text.
+    static let traditionalChinese = "zh-Hant"
+
+    /// The language Whisper is asked for, for a choice in the picker.
+    static func whisperCode(_ choice: String) -> String {
+        choice == traditionalChinese ? "zh" : choice
+    }
+
+    /// Simplified to traditional characters, with the system's own ICU
+    /// transform. Character by character, with context for the ambiguous
+    /// ones (发展 → 發展 but 头发 → 頭髮, 后来 → 後來); it does not swap
+    /// vocabulary, so 软件 becomes 軟件 rather than Taiwan's 軟體.
+    static func traditional(_ text: String) -> String {
+        text.applyingTransform(StringTransform("Hans-Hant"), reverse: false) ?? text
     }
 
     /// The language's name for itself — "Українська" for `uk` — when the
     /// system knows it and it differs from the English one.
     static func nativeName(_ code: String) -> String? {
+        if code == traditionalChinese { return "繁體中文" }
         // Whisper's `jw` is ISO `jv`; Locale only knows the latter.
         let iso = code == "jw" ? "jv" : code
         guard let name = Locale(identifier: iso).localizedString(forLanguageCode: iso) else {

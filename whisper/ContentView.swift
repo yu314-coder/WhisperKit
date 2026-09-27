@@ -251,7 +251,18 @@ struct ContentView: View {
     /// list changes.
     private static let languageOptions: [(code: String, name: String)] =
         [("auto", "🌍 Auto Detect")]
-        + Languages.sortedByName(Languages.whisperCodes).map { ($0, Languages.displayName($0)) }
+        + Languages.sortedByName(Languages.whisperCodes + [Languages.traditionalChinese])
+            // Whisper writes Chinese in simplified characters; with the
+            // traditional choice beside it, this one says so.
+            .map { ($0, $0 == "zh" ? "Chinese (Simplified) (简体中文)" : Languages.displayName($0)) }
+
+    /// Whether finished text is converted to traditional characters.
+    private var writesTraditionalChinese: Bool { selectedLanguage == Languages.traditionalChinese }
+
+    /// Transcribed text in the script the user chose.
+    private func inChosenScript(_ text: String) -> String {
+        writesTraditionalChinese ? Languages.traditional(text) : text
+    }
 
     var supportedLanguages: [(code: String, name: String)] { Self.languageOptions }
     
@@ -1338,6 +1349,7 @@ struct ContentView: View {
     var languageIndicatorLabel: some View {
         let display: String = {
             if selectedLanguage == "auto" { return "AUTO" }
+            if selectedLanguage == Languages.traditionalChinese { return "ZH 繁" }
             return selectedLanguage.uppercased()
         }()
         return Text(display)
@@ -2911,7 +2923,7 @@ struct ContentView: View {
         var segs: [SavedSegment] = []
         for r in results {
             for s in r.segments {
-                let cleaned = WhisperText.stripSpecialTokens(s.text)
+                let cleaned = inChosenScript(WhisperText.stripSpecialTokens(s.text))
                 guard !cleaned.isEmpty else { continue }
                 segs.append(SavedSegment(
                     startTime: Double(s.start),
@@ -3015,7 +3027,7 @@ struct ContentView: View {
             ?? AudioConverter.peakEnvelope(of: workURL)
         let peakLevel = envelope?.peak
 
-        var languageCode = selectedLanguage == "auto" ? nil : selectedLanguage
+        var languageCode = selectedLanguage == "auto" ? nil : Languages.whisperCode(selectedLanguage)
         // Cantonese arrived with large-v3; Small's tokenizer has no <|yue|>,
         // and WhisperKit answers an unknown language token by decoding as
         // English. Written Chinese is the nearest thing Small can produce.
@@ -3093,7 +3105,7 @@ struct ContentView: View {
                     // Update streaming text. Merged across windows so the live
                     // view accumulates rather than resetting each window.
                     if !text.isEmpty {
-                        self.streamingTranscript = stream.update(window: windowId, text: text)
+                        self.streamingTranscript = self.inChosenScript(stream.update(window: windowId, text: text))
                     }
 
                     // Segments per second, measured on actual decode windows
@@ -3135,10 +3147,10 @@ struct ContentView: View {
                 // Trim before testing — a result made only of whitespace used to
                 // sail through this check and land an empty transcript in the
                 // library.
-                let fullText = results
+                let fullText = inChosenScript(results
                     .map { $0.text }
                     .joined(separator: "\n")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: .whitespacesAndNewlines))
 
                 if !fullText.isEmpty {
                     let detectedLanguage = results.first?.language ?? "Unknown"
