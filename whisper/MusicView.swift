@@ -227,6 +227,10 @@ struct MusicView: View {
         if let bpm = settings.bpm { parts.append("\(bpm) BPM") }
         if let key = settings.keyscale { parts.append(key) }
         if let beats = settings.timeSignature { parts.append(beats == 6 ? "6/8" : "\(beats)/4") }
+        // A timeline is planned part by part; with lyrics, the lyrics lead.
+        if !settings.sections.isEmpty && lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            parts.append("\(settings.sections.count) timed sections")
+        }
         return parts.joined(separator: " · ")
     }
 

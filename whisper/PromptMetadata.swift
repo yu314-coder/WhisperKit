@@ -20,8 +20,25 @@ struct PromptMetadata: Equatable {
     /// summary under the prompt shows it.
     static let secondsRange = 5 ... 384
 
+    /// A timeline the prompt lays out, "0:16–0:34 a second voice enters",
+    /// in order; empty when it gives none.
+    var sections: [Section] = []
+    /// The prompt without its timeline: the style of the whole piece.
+    var style: String
+
+    struct Section: Equatable {
+        var start: Int
+        var end: Int
+        var description: String
+    }
+
     init(parsing prompt: String) {
-        seconds = Self.duration(in: prompt)
+        (sections, style) = Self.timeline(in: prompt)
+        // Timestamps in a timeline are not the length; the length named
+        // outside it is, or else where the timeline ends.
+        seconds = Self.duration(in: style) ?? sections.last.map {
+            min(max($0.end, Self.secondsRange.lowerBound), Self.secondsRange.upperBound)
+        }
         bpm = Self.firstInt(in: prompt, patterns: [#"(\d{2,3})\s*-?\s*bpm\b"#, #"\bbpm\s*[:=]?\s*(\d{2,3})\b"#])
             .flatMap { (30 ... 300).contains($0) ? $0 : nil }
         keyscale = Self.key(in: prompt)
@@ -29,7 +46,7 @@ struct PromptMetadata: Equatable {
     }
 
     /// Whether anything was found, for showing what the prompt set.
-    var isEmpty: Bool { seconds == nil && bpm == nil && keyscale == nil && timeSignature == nil }
+    var isEmpty: Bool { seconds == nil && bpm == nil && keyscale == nil && timeSignature == nil && sections.isEmpty }
 
     // MARK: - Length
 
@@ -77,6 +94,52 @@ struct PromptMetadata: Equatable {
         guard let first = found.min(by: { $0.position < $1.position }) else { return nil }
         let rounded = Int(first.seconds.rounded())
         return min(max(rounded, secondsRange.lowerBound), secondsRange.upperBound)
+    }
+
+    // MARK: - Timeline
+
+    /// "0:00–0:16 sparse opening; 0:16–0:34 …", one range per line or
+    /// separated by semicolons. A range needs two m:ss times joined by a
+    /// dash or "to"; its description runs to the end of the line or the
+    /// next semicolon. Two or more ranges make a timeline — one is just a
+    /// phrase. A heading line ending in a colon right before it goes too.
+    static func timeline(in prompt: String) -> ([Section], String) {
+        let pattern = #"(\d{1,2}):([0-5]\d)\s*(?:–|—|-|to)\s*(\d{1,2}):([0-5]\d)\s*[:,.–—-]?\s*([^;\n]*)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return ([], prompt)
+        }
+        let whole = NSRange(prompt.startIndex ..< prompt.endIndex, in: prompt)
+        let matches = regex.matches(in: prompt, range: whole)
+        guard matches.count >= 2 else { return ([], prompt) }
+        func number(_ match: NSTextCheckingResult, _ group: Int) -> Int {
+            Range(match.range(at: group), in: prompt).flatMap { Int(prompt[$0]) } ?? 0
+        }
+        var sections: [Section] = matches.compactMap { match in
+            let start = number(match, 1) * 60 + number(match, 2)
+            let end = number(match, 3) * 60 + number(match, 4)
+            guard end > start, let range = Range(match.range(at: 5), in: prompt) else { return nil }
+            let description = prompt[range].trimmingCharacters(in: CharacterSet(charactersIn: " .;,\t"))
+            return Section(start: start, end: end, description: description)
+        }
+        sections.sort { $0.start < $1.start }
+        guard sections.count >= 2 else { return ([], prompt) }
+
+        // What is left: every range removed, then any heading that
+        // introduced them, then empty lines.
+        var style = prompt
+        for match in matches.reversed() {
+            guard let range = Range(match.range, in: style) else { continue }
+            style.removeSubrange(range)
+        }
+        let lines = style.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " ;\t")) }
+        var kept: [String] = []
+        for (index, line) in lines.enumerated() {
+            let isHeading = line.hasSuffix(":") && line.count < 60
+                && lines[(index + 1)...].first(where: { !$0.isEmpty }) == nil
+            if !line.isEmpty, !isHeading { kept.append(line) }
+        }
+        return (sections, kept.joined(separator: "\n"))
     }
 
     // MARK: - Tempo, key, meter

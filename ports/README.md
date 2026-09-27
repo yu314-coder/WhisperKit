@@ -100,6 +100,30 @@ The transformer shapes a whole piece to whatever window it renders, ending
 included, so the window is made 20% longer than what is kept and the cut is
 faded; no run above left a silent tail.
 
+**Loops.** Followed throughout, the plan's own habits become the song's,
+and on long pieces the planner loops. For a 1:52 underscore it copied a
+4-second pattern for 34 seconds and then wrote one token 446 times; another
+seed replayed a 16-second phrase to the end (91% and 90% of tokens equal to
+the stretch 4 or 16 s earlier). Four of seven ordinary prompts at 81 s had
+exact copies of 37-67 s. Upstream samples the same way (temperature 0.85,
+top-p 0.9, guidance 2.0, no repetition penalty). Two changes:
+
+- *A copy guard* (`ACEPlanner.copyPenalties`, a "don't repeat yourself"
+  sampler): a token that would extend an exact copy of earlier tokens past
+  12 (2.4 s) is penalised, steeply. Where the planner is not looping a token
+  never repeats more than twice in a row, so long exact copies are the
+  failure, not the style. On the seven prompts, longest copy 67 s -> 3.6 s,
+  own-prompt CLAP 0.506 -> 0.524, neighbouring windows 0.903 -> 0.892. A 4 s
+  allowance was as smooth as none but let near-loops back (0.70-0.90).
+- *Timelines planned part by part.* "0:16-0:34 a second voice enters…" in a
+  prompt becomes a part: its description leads its own caption, and it is
+  written as the continuation of every earlier part. On the 1:52 prompt,
+  repetition at the loop lag fell from 0.91/0.90 to 0.25/0.08 and distinct
+  tokens rose from 31/103 to 139/385; the parts sounded less alike (CLAP
+  between parts 0.83 -> 0.68-0.74) and nearer their own descriptions. The
+  timeline is taken out of the caption the transformer reads, which keeps
+  only 256 tokens and would otherwise lose the style to it.
+
 **DCW**, upstream's default sampler correction for turbo models, is ported
 (Haar, closed form; latent matches the repository sampler at 0.9999985).
 

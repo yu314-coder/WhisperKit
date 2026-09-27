@@ -229,6 +229,8 @@ struct ACEGenerator {
     var rendersPastEnd = true
     /// The planner's classifier-free guidance; upstream's lm_cfg_scale.
     var plannerGuidance: Float = 2.0
+    /// See `ACEPlanner.copyAllowance`.
+    var plannerCopyAllowance: Int? = 12
     /// What the transformer computes in. Float16 needs float16 weights.
     var transformerDType: DType = .float32
     /// Which planner, and its shape. Files over 2 GB come in parts.
@@ -243,6 +245,8 @@ struct ACEGenerator {
     /// Where the transformer's layers run.
     enum Engine { case gpu, neuralEngine }
     var transformerEngine = Engine.gpu
+    /// Sees the planner's output; for diagnostics.
+    var onPlan: ((ACEPlanner.Plan) -> Void)?
 
     private func load(_ name: String) throws -> [String: MLXArray] {
         let url = directory.appendingPathComponent(name)
@@ -294,6 +298,14 @@ struct ACEGenerator {
             vocabularyURL: directory.appendingPathComponent(File.vocabulary),
             mergesURL: directory.appendingPathComponent(File.merges))
         let hasLyrics = !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // A timeline in the prompt is planned part by part (see
+        // `ACEPlanner.plan`) — for instrumentals, where nothing else gives
+        // the piece its shape. The rest of the prompt is then the caption:
+        // the text encoder keeps 256 tokens, and a long timeline would push
+        // the style out.
+        let sections = hasLyrics || !usesPlanner ? [] : known?.sections ?? []
+        let caption = sections.isEmpty ? caption
+            : known.map { $0.style.isEmpty ? sections.map(\.description).joined(separator: ", ") : $0.style } ?? caption
 
         // 0. Planner: the song's layout, five tokens a second.
         var plan: ACEPlanner.Plan?
@@ -304,6 +316,7 @@ struct ACEGenerator {
                 model.quantizationBits = quantizationBits
                 var planner = ACEPlanner(model: model, tokenizer: tokenizer)
                 planner.guidance = plannerGuidance
+                planner.copyAllowance = plannerCopyAllowance
                 // The caption is the user's, written in verbatim. Upstream
                 // lets the planner rewrite it by default, and at its sampling
                 // temperature a "restrained underscore with soft granular
@@ -318,13 +331,14 @@ struct ACEGenerator {
                     language: hasLyrics ? language : nil,
                     timeSignature: known?.timeSignature)
                 return try planner.plan(caption: caption, lyrics: ACEPipeline.lyricBody(lyrics),
-                                        known: given, seconds: rendered, seed: seed,
+                                        known: given, seconds: rendered, seed: seed, sections: sections,
                                         isCancelled: isCancelled) { stage in
                     if case .writing(let done, let total) = stage { progress(.writing(done, total)) }
                 }
             }()
             release()
             try checkCancellation()
+            if let plan { onPlan?(plan) }
         }
         let metadata = plan?.metadata
 
