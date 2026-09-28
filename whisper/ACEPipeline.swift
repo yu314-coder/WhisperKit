@@ -55,6 +55,17 @@ enum ACEPipeline {
         return trimmed.isEmpty ? "[Instrumental]" : trimmed
     }
 
+    /// Song structure for an instrumental, in upstream's tag format: an
+    /// instrumental otherwise sends only "[Instrumental]", which leaves the
+    /// planner nothing to build sections from. With these tags, five short
+    /// prompts at 45 s on XL rated fuller (CLAP, "rich layered production"
+    /// against "a single sparse instrument": +0.413 against +0.393) and
+    /// smoother (neighbouring windows 0.906 against 0.872), with prompt
+    /// match unchanged. Upstream's guide suggests the same for
+    /// instrumentals.
+    static let instrumentalStructure =
+        "[Intro]\n\n[Verse]\n\n[Chorus]\n\n[Verse]\n\n[Chorus]\n\n[Bridge]\n\n[Chorus]\n\n[Outro]"
+
     /// Lyrics with their language. An instrumental is not an empty lyric
     /// slot but the literal "[Instrumental]", and without a planner to say
     /// otherwise its language is "unknown".
@@ -250,6 +261,8 @@ struct ACEGenerator {
     var plannerCopyAllowance: Int? = 12
     /// Plan a prompt's timeline part by part; see `ACEPlanner.plan`.
     var plansBySection = true
+    /// Structure tags for instrumentals; see `ACEPipeline.instrumentalStructure`.
+    var givesInstrumentalsStructure = true
     /// What the planner computes in: bfloat16, as upstream runs it. Its
     /// activations overflow float16.
     var plannerDType: DType = .bfloat16
@@ -345,6 +358,11 @@ struct ACEGenerator {
             vocabularyURL: directory.appendingPathComponent(File.vocabulary),
             mergesURL: directory.appendingPathComponent(File.merges))
         let hasLyrics = !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // An instrumental with no timeline of its own gets song-structure
+        // tags where lyrics would go, sung in no language.
+        let structured = !hasLyrics && usesPlanner && givesInstrumentalsStructure
+            && (known?.sections.isEmpty ?? true)
+        let modelLyrics = structured ? ACEPipeline.instrumentalStructure : lyrics
         // A timeline in the prompt is planned part by part (see
         // `ACEPlanner.plan`) — for instrumentals, where nothing else gives
         // the piece its shape. The rest of the prompt is then the caption:
@@ -377,9 +395,9 @@ struct ACEGenerator {
                 let given = ACEPlanner.Metadata(
                     bpm: known?.bpm, caption: plannerRewritesCaption ? nil : caption, duration: rendered,
                     keyscale: known?.keyscale,
-                    language: hasLyrics ? language : nil,
+                    language: hasLyrics ? language : structured ? "unknown" : nil,
                     timeSignature: known?.timeSignature)
-                return try planner.plan(caption: caption, lyrics: ACEPipeline.lyricBody(lyrics),
+                return try planner.plan(caption: caption, lyrics: ACEPipeline.lyricBody(modelLyrics),
                                         known: given, seconds: rendered, seed: seed, sections: sections,
                                         isCancelled: isCancelled) { stage in
                     if case .writing(let done, let total) = stage { progress(.writing(done, total)) }
@@ -410,7 +428,7 @@ struct ACEGenerator {
                     timeSignature: metadata?.timeSignature)).prefix(256))
             let lyricLanguage = metadata?.language ?? (hasLyrics ? language : "unknown")
             let lyricIDs = Array(tokenizer.encode(
-                ACEPipeline.lyricPrompt(lyrics, language: lyricLanguage)).prefix(2048))
+                ACEPipeline.lyricPrompt(modelLyrics, language: lyricLanguage)).prefix(2048))
 
             var encoder = ACEQwen3(weights: try load(File.textEncoder), config: .embedder, prefix: "")
             encoder.quantizationBits = quantizationBits

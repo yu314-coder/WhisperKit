@@ -9,6 +9,8 @@ struct MusicView: View {
     @FocusState private var promptFocused: Bool
     @FocusState private var lyricsFocused: Bool
     @AppStorage("musicModel") private var selectedModel: MusicModel = .aceStep15
+    /// Let the planner turn the prompt into a full arrangement.
+    @AppStorage("musicExpandsPrompt") private var expandsPrompt = false
     @State private var showModelPicker = false
     @State private var engine = MusicEngine()
     @State private var showLibrary = false
@@ -222,6 +224,22 @@ struct MusicView: View {
                     .font(Studio.mono(10))
                     .foregroundColor(Studio.accent)
             }
+            // A short prompt describes one instrument and gets one; this lets
+            // the planner write out a whole arrangement from it first, as
+            // Suno does. It may add instruments the prompt did not name.
+            Toggle(isOn: $expandsPrompt) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Fuller arrangement")
+                        .font(Studio.text(13, weight: .medium))
+                        .foregroundColor(Studio.ink)
+                    Text("Expands your prompt into a full arrangement before writing the music. May add instruments you didn't name.")
+                        .font(Studio.mono(10))
+                        .foregroundColor(Studio.mute)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .tint(Studio.accent)
+            .padding(.top, 4)
         }
     }
 
@@ -451,7 +469,8 @@ struct MusicView: View {
                     engine.generate(model: selectedModel, prompt: prompt,
                                     lyrics: selectedModel.supportsLyrics ? lyrics : "",
                                     language: vocalLanguage,
-                                    seconds: effectiveSeconds)
+                                    seconds: effectiveSeconds,
+                                    expandsPrompt: expandsPrompt)
                 }
             } label: {
                 Text(buttonTitle)

@@ -63,8 +63,11 @@ final class MusicEngine {
 
     /// Downloads whatever is missing, then generates. Both phases report into
     /// `phase` so the view can show one continuous progress story.
+    /// - Parameter expandsPrompt: let the planner write a fuller
+    ///   description of the music from the prompt, as Suno does with a short
+    ///   one; see `ACEGenerator.plannerRewritesCaption`.
     func generate(model: MusicModel, prompt: String, lyrics: String = "",
-                  language: String = "en", seconds: Double) {
+                  language: String = "en", seconds: Double, expandsPrompt: Bool = false) {
         guard !isBusy else { return }
         work = Task { [weak self] in
             guard let self else { return }
@@ -73,7 +76,8 @@ final class MusicEngine {
                 try await self.fetchWeightsIfNeeded(for: model)
                 try Task.checkCancellation()
                 try await self.runGeneration(model: model, prompt: prompt, lyrics: lyrics,
-                                             language: language, seconds: seconds)
+                                             language: language, seconds: seconds,
+                                             expandsPrompt: expandsPrompt)
             } catch is CancellationError {
                 self.phase = .idle
             } catch {
@@ -186,7 +190,7 @@ final class MusicEngine {
     // MARK: - Generation
 
     private func runGeneration(model: MusicModel, prompt: String, lyrics: String,
-                               language: String, seconds: Double) async throws {
+                               language: String, seconds: Double, expandsPrompt: Bool) async throws {
         // MLX asks the Metal device for its architecture and the Simulator's
         // MTLSimDevice returns null, which MLX turns straight into a
         // std::string — strlen(NULL), a hard crash inside the library before
@@ -198,7 +202,7 @@ final class MusicEngine {
         phase = .generating(stage: "Starting")
         MusicRunMarker.begin()
         try await runACEStep(prompt: prompt, lyrics: lyrics, language: language,
-                             seconds: seconds, model: model)
+                             seconds: seconds, model: model, expandsPrompt: expandsPrompt)
         #endif
     }
 }
@@ -211,8 +215,9 @@ extension MusicEngine {
     /// generation. Each run draws a new seed, so the same prompt twice gives
     /// two different takes.
     func runACEStep(prompt: String, lyrics: String, language: String,
-                    seconds: Double, model: MusicModel) async throws {
+                    seconds: Double, model: MusicModel, expandsPrompt: Bool = false) async throws {
         var generator = ACEGenerator(directory: model.weightsDirectory)
+        generator.plannerRewritesCaption = expandsPrompt
         model.configure(&generator)
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("acestep-\(Int(Date().timeIntervalSince1970)).wav")

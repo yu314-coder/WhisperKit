@@ -241,6 +241,17 @@ they score alike — 0.608 / 0.609 own prompt, 6 / 7 abrupt changes, 0.883 /
 planner, retested after the rope fix, still did worse with both
 transformers (own prompt 0.573 with 2B, 0.589 with XL).
 
+**Instrumentals get structure (1.2 (31)).** An instrumental used to send
+only "[Instrumental]"; it now sends upstream's structure tags ([Intro],
+[Verse], [Chorus], [Bridge], [Outro]) where lyrics go. On five short
+prompts ("Soft piano", "Lofi hip hop beat"…) at 45 s on XL: CLAP
+"rich layered production" minus "single sparse instrument" +0.393 ->
++0.413, neighbouring windows 0.872 -> 0.906, own prompt 0.422 -> 0.423.
+Letting the planner rewrite the caption (upstream's use_cot_caption) turns
+"Soft piano" into piano, bass and soft drums — closer to what Suno does
+with a short prompt — but may add what the prompt ruled out, so it is a
+switch ("Fuller arrangement"), off by default.
+
 **Versions.** Both share every file but the transformer:
 
 - *ACE-Step 1.5* runs the 2B transformer on the Neural Engine
