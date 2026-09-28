@@ -16,7 +16,6 @@ struct MusicView: View {
     @AppStorage("musicExpandsPrompt") private var expandsPrompt = true
     /// Sung or not. Explicit rather than "empty lyrics means instrumental",
     /// so switching does not lose the words.
-    @AppStorage("musicWithVocals") private var withVocals = false
     @State private var showModelPicker = false
     @State private var engine = MusicEngine()
     @State private var showLibrary = false
@@ -53,7 +52,7 @@ struct MusicView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     if MusicRunMarker.wasInterrupted && !interruptionDismissed { interruptedCard }
                     promptCard
-                    vocalsCard
+                    lyricsCard
                     if let warning = selectedModel.memoryWarning {
                         // Advice about the user's own choice, so not in the
                         // alarm colour: in red it read as "not allowed".
@@ -87,7 +86,6 @@ struct MusicView: View {
         }
         .onAppear {
             engine.modelContext = modelContext
-            if !lyrics.isEmpty { withVocals = true }
             #if DEBUG
             // For testing downloads in the Simulator, whose keyboard covers
             // Generate: launch with `-MusicPromptPreset "…"`.
@@ -295,70 +293,42 @@ struct MusicView: View {
     }
 
     private var sendsLyrics: Bool {
-        withVocals && !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var vocalsCard: some View {
+    /// Just a place to type the words. Section tags and a vocals switch
+    /// made writing lyrics a chore; the tags are now added for the model
+    /// (`ACEPipeline.sectioned`), and empty lyrics mean an instrumental.
+    private var lyricsCard: some View {
         card {
-            Picker("Vocals", selection: $withVocals) {
-                Text("Instrumental").tag(false)
-                Text("With vocals").tag(true)
-            }
-            .pickerStyle(.segmented)
-
-            if withVocals {
-                HStack {
-                    StudioLabel(text: "Lyrics")
-                    Spacer()
-                    Menu {
-                        Picker("Sung in", selection: $vocalLanguage) {
-                            ForEach(Self.vocalLanguages, id: \.self) { code in
-                                Text(Languages.displayName(code)).tag(code)
-                            }
+            HStack {
+                StudioLabel(text: "Lyrics · optional")
+                Spacer()
+                Menu {
+                    Picker("Sung in", selection: $vocalLanguage) {
+                        ForEach(Self.vocalLanguages, id: \.self) { code in
+                            Text(Languages.displayName(code)).tag(code)
                         }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "globe")
-                            Text("Sung in \(Languages.englishName(vocalLanguage))")
-                            Image(systemName: "chevron.up.chevron.down")
-                        }
-                        .font(Studio.mono(10, weight: .semibold))
-                        .foregroundColor(Studio.accent)
                     }
-                    .accessibilityLabel("Vocal language, \(Languages.englishName(vocalLanguage))")
-                }
-                editor($lyrics, placeholder: "[Verse]\nWrite the words to be sung, a line at a time\n\n[Chorus]\n…",
-                       focus: $lyricsFocused, minHeight: 120, size: 14)
-                // Section tags, as the model reads them.
-                HStack(spacing: 6) {
-                    ForEach(["Verse", "Chorus", "Bridge", "Outro"], id: \.self) { tag in
-                        Button {
-                            let spacer = lyrics.isEmpty || lyrics.hasSuffix("\n\n") ? "" : (lyrics.hasSuffix("\n") ? "\n" : "\n\n")
-                            lyrics += "\(spacer)[\(tag)]\n"
-                            lyricsFocused = true
-                        } label: {
-                            Text("+ \(tag)")
-                                .font(Studio.mono(10, weight: .semibold))
-                                .foregroundColor(Studio.ink.opacity(0.75))
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 5)
-                                .background(Capsule().fill(Studio.sunk))
-                        }
-                        .buttonStyle(PressableButtonStyle())
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "globe")
+                        Text("Sung in \(Languages.englishName(vocalLanguage))")
+                        Image(systemName: "chevron.up.chevron.down")
                     }
-                    Spacer(minLength: 0)
+                    .font(Studio.mono(10, weight: .semibold))
+                    .foregroundColor(Studio.accent)
                 }
-                if lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("No lyrics yet — until there are, it will be an instrumental.")
-                        .font(Studio.text(12))
-                        .foregroundColor(Studio.mute)
-                }
-            } else {
-                Text("An instrumental, built in sections — intro, verses, choruses, a bridge and an outro.")
-                    .font(Studio.text(12))
-                    .foregroundColor(Studio.mute)
-                    .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("Vocal language, \(Languages.englishName(vocalLanguage))")
             }
+            editor($lyrics, placeholder: "Type or paste the words to sing",
+                   focus: $lyricsFocused, minHeight: 120, size: 14)
+            Text(sendsLyrics
+                 ? "Put a blank line between verses. A verse you repeat is sung as the chorus."
+                 : "Leave empty for an instrumental.")
+                .font(Studio.text(12))
+                .foregroundColor(Studio.mute)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

@@ -66,6 +66,32 @@ enum ACEPipeline {
     static let instrumentalStructure =
         "[Intro]\n\n[Verse]\n\n[Chorus]\n\n[Verse]\n\n[Chorus]\n\n[Bridge]\n\n[Chorus]\n\n[Outro]"
 
+    /// Lyrics as the model reads them, from lyrics as people type them.
+    /// Upstream's lyrics carry section tags; the app no longer asks for
+    /// them. Each stanza (lines between blank lines) becomes a [Verse], and
+    /// a stanza sung again word for word becomes the [Chorus]. One long
+    /// unbroken block is laid out as verses of four lines. Lyrics that
+    /// already carry tags are left as written.
+    static func sectioned(_ lyrics: String) -> String {
+        let lines = lyrics.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard lines.contains(where: { !$0.isEmpty }),
+              !lines.contains(where: { $0.hasPrefix("[") && $0.hasSuffix("]") }) else { return lyrics }
+        var stanzas: [[String]] = [[]]
+        for line in lines {
+            if !line.isEmpty { stanzas[stanzas.count - 1].append(line) }
+            else if !stanzas[stanzas.count - 1].isEmpty { stanzas.append([]) }
+        }
+        if stanzas.count == 1, stanzas[0].count > 8 {
+            let block = stanzas[0]
+            stanzas = stride(from: 0, to: block.count, by: 4).map { Array(block[$0 ..< min($0 + 4, block.count)]) }
+        }
+        let keys = stanzas.map { $0.joined(separator: "\n").lowercased() }
+        return zip(stanzas, keys).map { stanza, key in
+            "[\(keys.filter { $0 == key }.count > 1 ? "Chorus" : "Verse")]\n" + stanza.joined(separator: "\n")
+        }.joined(separator: "\n\n")
+    }
+
     /// Lyrics with their language. An instrumental is not an empty lyric
     /// slot but the literal "[Instrumental]", and without a planner to say
     /// otherwise its language is "unknown".
@@ -367,7 +393,7 @@ struct ACEGenerator {
         // tags where lyrics would go, sung in no language.
         let structured = !hasLyrics && usesPlanner && givesInstrumentalsStructure
             && (known?.sections.isEmpty ?? true)
-        let modelLyrics = structured ? ACEPipeline.instrumentalStructure : lyrics
+        let modelLyrics = structured ? ACEPipeline.instrumentalStructure : ACEPipeline.sectioned(lyrics)
         // A timeline in the prompt is planned part by part (see
         // `ACEPlanner.plan`) — for instrumentals, where nothing else gives
         // the piece its shape. The rest of the prompt is then the caption:

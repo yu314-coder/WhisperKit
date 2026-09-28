@@ -268,6 +268,14 @@ after a short phrase it drops into a comma list ("beat,airy drums,moody"),
 where Qwen's merged tokens (",s", ",p") left it writing fragments —
 "sively,emporary", "BPPM" — at any temperature or min-p.
 
+**Plain lyrics (1.2 (34)).** The lyrics box takes words only: no section
+buttons, no vocals switch (empty means instrumental). `ACEPipeline.sectioned`
+adds upstream's tags for the model — each blank-line stanza a [Verse], a
+stanza repeated word for word the [Chorus], one long block split into
+verses of four lines; tagged lyrics pass through. English test lyrics with
+the tags removed, 2B at 45 s: Whisper heard 98% / 93% of the words (90% /
+93% with tags).
+
 **Versions.** Both share every file but the transformer:
 
 - *ACE-Step 1.5* runs the 2B transformer on the Neural Engine
