@@ -20,12 +20,15 @@ import MLX
 enum MappedWeights {
     enum Failure: LocalizedError {
         case unreadable(String)
+        case unmappable(String, Int32)
         case badHeader(String)
         case unsupportedType(String)
 
         var errorDescription: String? {
             switch self {
             case .unreadable(let name):     return "Could not open \(name)."
+            case .unmappable(let name, let code):
+                return "Could not map \(name) into memory (\(String(cString: strerror(code)))). The model's files are larger than iOS lets this app address at once."
             case .badHeader(let name):      return "\(name) is not a valid weights file."
             case .unsupportedType(let type): return "Unsupported tensor type \(type)."
             }
@@ -45,8 +48,11 @@ enum MappedWeights {
         let page = Int(vm_page_size)
         let length = (size + page - 1) / page * page
 
+        // XL's transformer alone maps 8.1 GB; without the
+        // extended-virtual-addressing entitlement iOS ran out of address
+        // space partway through it and this failed.
         guard let base = mmap(nil, length, PROT_READ, MAP_SHARED, descriptor, 0),
-              base != MAP_FAILED else { throw Failure.unreadable(name) }
+              base != MAP_FAILED else { throw Failure.unmappable(name, errno) }
 
         let headerLength = Int(UInt64(littleEndian: base.load(as: UInt64.self)))
         guard headerLength > 0, 8 + headerLength <= size,
