@@ -57,10 +57,10 @@ enum MusicModel: String, CaseIterable, Identifiable {
             return nil
         case .aceStep15XL:
             guard gigabytes < 7 else { return nil }
-            return String(format: "XL's 4.7 GB transformer is too large to hold in this device's %.0f GB, so it is read from storage as it runs: slower. ACE-Step 1.5 is the faster choice here.", gigabytes.rounded())
+            return String(format: "XL runs here. With %.0f GB on this device, its 4.7 GB transformer is read from storage as it goes, so songs take longer.", gigabytes.rounded())
         case .aceStep15XLFull:
             guard gigabytes < 11 else { return nil }
-            return String(format: "XL Full's transformer is 8.1 GB, more than this device's %.0f GB, so it is read from storage at every step: much slower than XL, which holds its 4.7 GB in memory and measured nearly the same (velocity cosine 0.99878 against 0.99918, both against the official model).", gigabytes.rounded())
+            return String(format: "XL Full runs here. Its 8.1 GB transformer is more than this device's %.0f GB, so it is read from storage at every step and songs take longer. XL sounds nearly the same and holds its weights in memory.", gigabytes.rounded())
         }
     }
 

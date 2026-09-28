@@ -55,7 +55,9 @@ struct MusicView: View {
                     promptCard
                     vocalsCard
                     if let warning = selectedModel.memoryWarning {
-                        noteRow(icon: "memorychip", tint: Studio.hot, text: warning)
+                        // Advice about the user's own choice, so not in the
+                        // alarm colour: in red it read as "not allowed".
+                        noteRow(icon: "memorychip", tint: Studio.mute, text: warning)
                             .padding(.horizontal, 4)
                     }
                     if engine.isBusy || engine.failureMessage != nil {
@@ -126,7 +128,7 @@ struct MusicView: View {
             Button { showModelPicker = true } label: {
                 HStack(spacing: 5) {
                     Circle()
-                        .fill(selectedModel.memoryWarning == nil ? Studio.ok : Studio.hot)
+                        .fill(Studio.ok)
                         .frame(width: 6, height: 6)
                     Text(selectedModel.displayName)
                         .font(Studio.mono(11))
@@ -716,7 +718,7 @@ struct MusicModelPicker: View {
             HStack(spacing: 7) {
                 chip(model.sizeLabel, tint: Studio.mute)
                 chip("RUNS ON DEVICE", tint: Studio.ok)
-                if model.memoryWarning != nil { chip("SLOWER HERE", tint: Studio.hot) }
+                if model.memoryWarning != nil { chip("SLOWER HERE", tint: Studio.mute) }
                 chip(model.engineLabel, tint: Studio.mute)
             }
         }
