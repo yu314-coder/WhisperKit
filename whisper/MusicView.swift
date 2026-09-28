@@ -26,6 +26,14 @@ struct MusicView: View {
     @State private var interruptionDismissed = false
     @State private var showDetails = false
     @State private var openedClip: SavedMusic?
+    /// What the on-device model found in a prompt: the lines it called
+    /// lyrics, or nil when it couldn't answer. See `LyricsFinder`.
+    @State private var detected: DetectedLyrics?
+    @State private var findingLyrics = false
+    private struct DetectedLyrics {
+        var prompt: String
+        var lines: [String]?
+    }
     /// Bumped when a song is used again, to scroll back to the boxes.
     @State private var reuseCount = 0
     private static let top = "top"
@@ -128,6 +136,8 @@ struct MusicView: View {
         .onChange(of: engine.isBusy) { _, busy in
             if !busy { memory.stop() }
         }
+        // Once typing pauses, ask which words are lyrics.
+        .task(id: prompt) { await findLyrics(in: prompt, afterPause: true) }
         .onChange(of: engine.lastResult) { _, url in
             resultEnvelope = url.flatMap { AudioConverter.peakEnvelope(of: $0, bucketCount: 90)?.buckets }
         }
@@ -320,7 +330,9 @@ struct MusicView: View {
         var pills: [String] = []
         // First, so it is never scrolled out of sight behind the others.
         let fromPrompt = request.lyricLinesFromPrompt
-        if fromPrompt > 0 {
+        if findingLyrics {
+            pills.append("✦ Looking for lyrics…")
+        } else if fromPrompt > 0 {
             pills.append("♪ \(fromPrompt) line\(fromPrompt == 1 ? "" : "s") of lyrics found — sung")
         }
         if let seconds = settings.seconds {
@@ -344,7 +356,26 @@ struct MusicView: View {
 
     /// The two boxes sorted into a description and lyrics, wherever the
     /// lyrics were typed.
-    private var request: MusicRequest { MusicRequest(prompt: prompt, lyrics: lyrics) }
+    private var request: MusicRequest {
+        MusicRequest(prompt: prompt, lyrics: lyrics,
+                     found: detected?.prompt == prompt ? detected?.lines : nil)
+    }
+
+    /// Asks the on-device model which words in `text` are lyrics, unless it
+    /// already has; the rules in `MusicRequest` answer until it does, and
+    /// wherever it can't run.
+    private func findLyrics(in text: String, afterPause: Bool) async {
+        guard LyricsFinder.isAvailable, LyricsFinder.mightHoldLyrics(text), detected?.prompt != text else { return }
+        if afterPause {
+            try? await Task.sleep(for: .milliseconds(700))
+            guard !Task.isCancelled else { return }
+        }
+        findingLyrics = true
+        let lines = await LyricsFinder.lyricLines(in: text)
+        findingLyrics = false
+        if afterPause && Task.isCancelled { return }
+        detected = DetectedLyrics(prompt: text, lines: lines)
+    }
 
     /// The language to sing in: the one chosen, or the lyrics' own.
     private func sungLanguage(for lyrics: String) -> String {
@@ -524,13 +555,21 @@ struct MusicView: View {
                     .foregroundColor(Studio.ink)
                     .lineLimit(3)
             }
-            if let line = engine.lastLyrics.components(separatedBy: .newlines)
-                .map({ $0.trimmingCharacters(in: .whitespaces) })
-                .first(where: { !$0.isEmpty && !MusicRequest.isHeading($0) }) {
-                Label(line, systemImage: "music.mic")
-                    .font(Studio.text(12))
-                    .foregroundColor(Studio.ink.opacity(0.65))
-                    .lineLimit(1)
+            // The words it sang, so a song made from lyrics in the prompt
+            // shows them too; all of them are in History.
+            let sung = engine.lastLyrics.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !MusicRequest.isHeading($0) }
+            if !sung.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "music.mic")
+                        .foregroundColor(Studio.accent)
+                    Text(sung.prefix(4).joined(separator: "\n") + (sung.count > 4 ? "\n…" : ""))
+                        .foregroundColor(Studio.ink.opacity(0.75))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(Studio.text(13))
             }
             if let url = engine.lastResult {
                 TimelineView(.periodic(from: .now, by: 0.1)) { _ in
@@ -732,13 +771,17 @@ struct MusicView: View {
         // fails immediately never lets the view observe the busy state, and
         // the gauge would never appear.
         memory.start()
-        let request = self.request
-        // Lyrics with no description: the planner writes one.
-        engine.generate(model: selectedModel, prompt: request.description,
-                        lyrics: request.lyrics,
-                        language: sungLanguage(for: request.lyrics),
-                        seconds: effectiveSeconds,
-                        expandsPrompt: expandsPrompt || request.description.isEmpty)
+        Task { @MainActor in
+            // A prompt edited within the last moment hasn't been read yet.
+            await findLyrics(in: prompt, afterPause: false)
+            let request = self.request
+            // Lyrics with no description: the planner writes one.
+            engine.generate(model: selectedModel, prompt: request.description,
+                            lyrics: request.lyrics,
+                            language: sungLanguage(for: request.lyrics),
+                            seconds: effectiveSeconds,
+                            expandsPrompt: expandsPrompt || request.description.isEmpty)
+        }
     }
 
     private var generateBar: some View {

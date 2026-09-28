@@ -18,8 +18,22 @@ struct MusicRequest: Equatable {
     /// Lines of lyrics taken from the prompt, so the screen can say so.
     var lyricLinesFromPrompt: Int
 
-    init(prompt: String, lyrics box: String) {
-        let (description, found) = Self.splitLyrics(prompt)
+    /// - Parameter found: lyric lines `LyricsFinder` found in `prompt`, or
+    ///   nil to use the rules below alone. Its answer is used when every line
+    ///   is found in the prompt; an answer of none gives way only to lyrics
+    ///   the prompt marks outright (quotes after "lyrics", a "Lyrics:" label,
+    ///   section headings).
+    init(prompt: String, lyrics box: String, found aiLines: [String]? = nil) {
+        let rules = Self.splitLyrics(prompt)
+        var split = (description: rules.description, lyrics: rules.lyrics)
+        if let aiLines {
+            if aiLines.isEmpty {
+                if !rules.marked { split = (prompt.trimmingCharacters(in: .whitespacesAndNewlines), "") }
+            } else if let located = Self.locate(aiLines, in: prompt) {
+                split = located
+            }
+        }
+        let (description, found) = split
         self.description = description
         lyricLinesFromPrompt = found.split(whereSeparator: \.isNewline)
             .filter { !Self.isHeading(String($0)) }.count
@@ -49,22 +63,34 @@ struct MusicRequest: Equatable {
     /// timeline, and mostly free of the words descriptions are made of.
     /// The first block is always the description unless it opens with one
     /// of the headings.
-    static func splitLyrics(_ prompt: String) -> (description: String, lyrics: String) {
+    static func splitLyrics(_ prompt: String) -> (description: String, lyrics: String, marked: Bool) {
         let lines = prompt.components(separatedBy: .newlines)
         func joined(_ slice: ArraySlice<String>) -> String {
             slice.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
+        // Quoted, after a word that says they are lyrics: lyric is "…",
+        // the lyrics “…”, she sings "…", 歌词是「…」.
+        let whole = NSRange(prompt.startIndex..., in: prompt)
+        for quote in quotation.matches(in: prompt, range: whole) {
+            guard let opening = Range(quote.range, in: prompt),
+                  prompt[..<opening.lowerBound].range(of: lyricLabel + #"$"#, options: .regularExpression) != nil,
+                  let inner = (1 ..< quote.numberOfRanges).lazy.compactMap({ Range(quote.range(at: $0), in: prompt) }).first,
+                  let located = locate(lyricLines(String(prompt[inner])), in: prompt) else { continue }
+            return (located.description, located.lyrics, true)
+        }
+        // After "Lyrics:" anywhere in a line, to the end.
         for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if let heading = trimmed.range(of: #"^(?i:lyrics?|歌词|歌詞)\s*[:：]\s*"#, options: .regularExpression) {
-                let rest = String(trimmed[heading.upperBound...])
-                let lyrics = joined(([rest] + lines[(index + 1)...])[...])
-                return (joined(lines[..<index]), lyrics)
-            }
+            guard let label = line.range(of: #"(?i:\blyrics?(?:\s+(?:is|are|go|goes|should\s+be|will\s+be))?|(?:歌词|歌詞)(?:是|为|為|应该是|應該是)?)\s*[:：]\s*"#, options: .regularExpression) else { continue }
+            let rest = String(line[label.upperBound...])
+            let text = ([rest] + lines[(index + 1)...]).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let sung = text.contains(where: \.isNewline) ? text : lyricLines(text).joined(separator: "\n")
+            let before = (lines[..<index] + [String(line[..<label.lowerBound])]).joined(separator: "\n")
+            return (tidy(before), sung, true)
         }
         if let index = lines.firstIndex(where: isHeading) {
-            return (joined(lines[..<index]), joined(lines[index...]))
+            return (joined(lines[..<index]), joined(lines[index...]), true)
         }
 
         var blocks: [[String]] = [[]]
@@ -76,12 +102,127 @@ struct MusicRequest: Equatable {
         blocks.removeAll { $0.isEmpty }
         guard blocks.count >= 2,
               let first = blocks.indices.dropFirst().first(where: { readsAsLyrics(blocks[$0]) }) else {
-            return (prompt.trimmingCharacters(in: .whitespacesAndNewlines), "")
+            return (prompt.trimmingCharacters(in: .whitespacesAndNewlines), "", false)
         }
         func text(_ part: ArraySlice<[String]>) -> String {
             part.map { $0.joined(separator: "\n") }.joined(separator: "\n\n")
         }
-        return (text(blocks[..<first]), text(blocks[first...]))
+        return (text(blocks[..<first]), text(blocks[first...]), false)
+    }
+
+    // MARK: - Taking known lyrics out of a prompt
+
+    /// Finds `lines` in `prompt` — in order, ignoring case, spacing,
+    /// punctuation and quotes — and returns the prompt without them (or
+    /// the label and quotation marks around them), and the lyrics in the
+    /// prompt's own characters. Nil unless every line is there: a line
+    /// that isn't was written, not found.
+    static func locate(_ lines: [String], in prompt: String) -> (description: String, lyrics: String)? {
+        let source = letters(prompt)
+        var cursor = 0
+        var spans: [Range<String.Index>] = []
+        for line in lines {
+            let wanted = letters(line).map(\.letter)
+            guard !wanted.isEmpty else { continue }
+            guard let start = (cursor ... max(cursor, source.count - wanted.count)).first(where: { at in
+                at + wanted.count <= source.count && (0 ..< wanted.count).allSatisfy { source[at + $0].letter == wanted[$0] }
+            }) else { return nil }
+            let end = start + wanted.count - 1
+            spans.append(source[start].index ..< prompt.index(after: source[end].index))
+            cursor = end + 1
+        }
+        guard let first = spans.first, let last = spans.last else { return nil }
+        var start = first.lowerBound
+        var end = last.upperBound
+
+        // Section headings on the lines just above the lyrics belong to them.
+        let firstLineStart = prompt[..<start].lastIndex(of: "\n").map { prompt.index(after: $0) } ?? prompt.startIndex
+        if prompt[firstLineStart ..< start].allSatisfy(\.isWhitespace) {
+            var lineStart = firstLineStart
+            while lineStart > prompt.startIndex {
+                let newline = prompt.index(before: lineStart)
+                let previousStart = prompt[..<newline].lastIndex(of: "\n").map { prompt.index(after: $0) } ?? prompt.startIndex
+                guard isHeading(String(prompt[previousStart ..< newline])) else { break }
+                lineStart = previousStart
+                start = previousStart
+            }
+        }
+
+        let multiLine = prompt[start ..< end].contains(where: \.isNewline)
+        let sung = multiLine
+            ? String(prompt[start ..< end]).trimmingCharacters(in: .whitespacesAndNewlines)
+            : spans.map { String(prompt[$0]) }.joined(separator: "\n")
+
+        // The label and opening quote before, the closing quote after.
+        if let label = String(prompt[..<start]).range(of: lyricLabel + #"\s*$"#, options: .regularExpression) {
+            start = label.lowerBound
+        } else if let quote = String(prompt[..<start]).range(of: #"["“„«「『'‘]\s*$"#, options: .regularExpression) {
+            start = quote.lowerBound
+        }
+        let after = String(prompt[end...])
+        if let close = after.range(of: #"^[^\S\n]*[!！?？.。…]*[^\S\n]*["”“»」』'’]"#, options: .regularExpression) {
+            end = prompt.index(end, offsetBy: after.distance(from: after.startIndex, to: close.upperBound))
+        }
+        let description = tidy(String(prompt[..<start]) + " " + String(prompt[end...]))
+        return (description, sung)
+    }
+
+    /// A word or phrase that says what follows is lyrics, with any colon
+    /// and opening quotation mark: "lyric is \"", ", the lyrics: “",
+    /// "she sings \"", "歌词是「". For matching at the end of the text
+    /// before a quotation.
+    private static let lyricLabel =
+        #"(?i:[\s,，;；]*(?:(?:(?:and|with)\s+)?(?:the\s+)?(?:lyrics?|words)(?:\s+(?:is|are|go|goes|say|says|read|reads|should\s+be|will\s+be))?|(?:(?:she|he|they|it|the\s+singer)\s+)?(?:sings?|singing|sung)|(?:that|which)\s+goes|(?:歌词|歌詞)(?:是|为|為|应该是|應該是)?|唱(?:着|著|的是)?)[\s:：=]*["“„«「『'‘]?)"#
+
+    /// Text in quotation marks: straight, curly, low, guillemets, corner
+    /// brackets.
+    private static let quotation = try! NSRegularExpression(
+        pattern: #""([^"]+)"|“([^”]+)”|„([^“]+)“|«([^»]+)»|「([^」]+)」|『([^』]+)』|'([^']{3,})'"#)
+
+    /// The letters and digits of `text`, lowercased, with where each is.
+    private static func letters(_ text: String) -> [(letter: String, index: String.Index)] {
+        var result: [(letter: String, index: String.Index)] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if character.isLetter || character.isNumber { result.append((character.lowercased(), index)) }
+            index = text.index(after: index)
+        }
+        return result
+    }
+
+    /// Lyrics written on one line, as lines: at " / " or "|", after a
+    /// sentence's end, and for Chinese and Japanese at their commas and
+    /// spaces.
+    static func lyricLines(_ text: String) -> [String] {
+        var split = text.replacingOccurrences(of: #"\s*[/|｜]\s*"#, with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: #"([.!?])\s+"#, with: "$1\n", options: .regularExpression)
+        if ["zh", "ja"].contains(language(of: text) ?? "") {
+            split = split.replacingOccurrences(of: #"[，、。！？\s]+"#, with: "\n", options: .regularExpression)
+        }
+        return split.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// What is left of a prompt once lyrics are taken out: no doubled or
+    /// dangling separators, no trailing "and" or "with".
+    static func tidy(_ text: String) -> String {
+        let lines = text.components(separatedBy: .newlines).map { line -> String in
+            var line = line.replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"\s+([,，.。;；!！?？])"#, with: "$1", options: .regularExpression)
+                .replacingOccurrences(of: #"([,，;；])(?:\s*[,，;；])+"#, with: "$1", options: .regularExpression)
+            while let tail = line.range(of: #"(?i)(?:[\s,，;；:：\-–—、]+|\s+(?:and|with|the|a))$"#, options: .regularExpression) {
+                line.removeSubrange(tail)
+            }
+            while let lead = line.range(of: #"^[\s,，;；:：\-–—、]+"#, options: .regularExpression) {
+                line.removeSubrange(lead)
+            }
+            return line
+        }
+        return lines.joined(separator: "\n")
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// A section heading on a line of its own: "[Chorus]", "Verse 2:",

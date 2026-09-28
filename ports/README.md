@@ -289,6 +289,22 @@ defaults to the lyrics' own script (Han -> zh, kana -> ja, Hangul -> ko…).
 Songs keep their lyrics, language and arrangement setting, and History
 shows them in full with "Use this prompt again".
 
+**Lyrics found by Apple Intelligence (1.2 (36)).** Inline lyrics —
+`pop song, lyric is "I love you baby"` — were left in the description and
+the song came back instrumental. `LyricsFinder` asks Apple's on-device
+model (Foundation Models, iOS 26+, greedy, a one-field @Generable answer)
+which words are lyrics, 0.4–1 s once typing pauses; every line it returns
+must appear in the prompt letter for letter, and the prompt's own
+characters (plus any label and quotes around them) are cut out of the
+description by `MusicRequest.locate`. On 18 test prompts on the Mac's copy
+of the model it found every set of lyrics — "lyric is", "lyrics:",
+"sings", "that goes", 歌词是「…」, 歌詞：, bare quotations, verse under
+headings — and left titles, topics ("lyrics about love"), styles and
+instrument lists alone. It once wrote lyrics for "a birthday song for my
+mom named Linda" and once turned 你 into "You"; the letter check rejects
+both. Without Apple Intelligence the rules decide, now including quoted
+lyrics after a label and "lyrics:" mid-line.
+
 **Versions.** Both share every file but the transformer:
 
 - *ACE-Step 1.5* runs the 2B transformer on the Neural Engine
