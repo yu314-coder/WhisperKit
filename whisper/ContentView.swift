@@ -1407,7 +1407,7 @@ struct ContentView: View {
 
             modelPreparationStatus
 
-            Text("Each model is downloaded once and runs on this device's Neural Engine. Larger models are slower but more accurate, especially across languages.")
+            Text("Each model is downloaded once and runs entirely on this device, on the GPU or the Neural Engine — your choice below. Larger models are slower but more accurate, especially across languages.")
                 .font(.system(size: 13))
                 .foregroundColor(Self.paperInk.opacity(0.6))
                 .lineSpacing(3)
@@ -1514,12 +1514,14 @@ struct ContentView: View {
                                 .multilineTextAlignment(.leading)
                                 .fixedSize(horizontal: false, vertical: true)
 
-                            // Say it rather than silently doing something else.
+                            // A note, not a verdict: the GPU stays the user's
+                            // call. Worded as a warning in red, it read as
+                            // "not allowed".
                             if mode == .gpu,
                                ComputeMode.gpuMayFail(for: selectedModel, requested: .gpu) {
-                                Text("\(selectedModel.displayName) has closed the app on iPhone GPUs — it may not fit. The Neural Engine is the safe choice.")
+                                Text("\(selectedModel.displayName) runs on the GPU too. It's a big model for an iPhone GPU, so if the app closes while it loads, try the Neural Engine.")
                                     .font(.system(size: 11))
-                                    .foregroundColor(Studio.hot)
+                                    .foregroundColor(Self.paperInk.opacity(0.55))
                                     .multilineTextAlignment(.leading)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .padding(.top, 2)
@@ -1531,8 +1533,12 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(PressableButtonStyle())
+                // Locked while a model loads or runs: a second Core ML load
+                // would start before the first lets go of its memory. Only
+                // the other option fades, so the one chosen doesn't look
+                // refused.
                 .disabled(isPreparingModel || isProcessing)
-                .opacity((isPreparingModel || isProcessing) ? 0.5 : 1)
+                .opacity((isPreparingModel || isProcessing) && mode != computeMode ? 0.5 : 1)
             }
         }
         .padding(.top, 6)
