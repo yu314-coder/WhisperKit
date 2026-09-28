@@ -19,10 +19,10 @@ final class MusicMemoryMonitor {
     private(set) var availableMB: Double = 0
     private(set) var peakMB: Double = 0
     private(set) var history: [Double] = []
-    /// Model weights in memory, read from their files: resident file-backed
-    /// pages. They are the bulk of what a model uses — 8 GB for XL — but
-    /// iOS does not count them in the footprint, so the footprint alone made
-    /// a full-precision model look like it used under a gigabyte.
+    /// Mapped model weights that are in memory. Weights that fit are read
+    /// into memory and show in the footprint; ones too large to fit are
+    /// mapped from storage, which iOS does not count in the footprint, so
+    /// they are measured page by page (`MappedWeights.residentBytes`).
     private(set) var weightsMB: Double = 0
     private(set) var peakWeightsMB: Double = 0
 
@@ -68,7 +68,7 @@ final class MusicMemoryMonitor {
         guard result == KERN_SUCCESS else { return }
 
         footprintMB = Double(info.phys_footprint) / 1_048_576
-        weightsMB = Double(info.external) / 1_048_576
+        weightsMB = Double(MappedWeights.residentBytes) / 1_048_576
         peakWeightsMB = max(peakWeightsMB, weightsMB)
         availableMB = Double(os_proc_available_memory()) / 1_048_576
         peakMB = max(peakMB, footprintMB)
@@ -118,9 +118,11 @@ struct MusicMemoryGauge: View {
                 Spacer()
                 // Not counted by iOS against the app, so kept apart from the
                 // trace and the headroom, which are about being closed.
-                Text(String(format: "+ weights %.1f GB (peak %.1f)",
-                            monitor.weightsMB / 1024, monitor.peakWeightsMB / 1024))
-                Spacer()
+                if monitor.peakWeightsMB > 50 {
+                    Text(String(format: "+ mapped weights %.1f GB (peak %.1f)",
+                                monitor.weightsMB / 1024, monitor.peakWeightsMB / 1024))
+                    Spacer()
+                }
                 if hasHeadroom {
                     Text(String(format: "%.0f MB headroom", monitor.availableMB))
                         .foregroundColor(isTight ? Studio.hot : Studio.mute)

@@ -9,38 +9,41 @@ import Foundation
 enum MusicModel: String, CaseIterable, Identifiable {
     /// The raw value predates the versions; kept so a stored choice still
     /// resolves.
-    case aceStep15   = "ace-step-1.5-2b"
-    case aceStep15XL = "ace-step-1.5-xl-4b"
+    case aceStep15       = "ace-step-1.5-2b"
+    case aceStep15XL     = "ace-step-1.5-xl-4b"
+    case aceStep15XLFull = "ace-step-1.5-xl-4b-f16"
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .aceStep15:   return "ACE-Step 1.5"
-        case .aceStep15XL: return "ACE-Step 1.5 XL"
+        case .aceStep15:       return "ACE-Step 1.5"
+        case .aceStep15XL:     return "ACE-Step 1.5 XL"
+        case .aceStep15XLFull: return "ACE-Step 1.5 XL Full"
         }
     }
 
     /// The diffusion transformer's size, as published.
     var parameterLabel: String {
         switch self {
-        case .aceStep15:   return "2B"
-        case .aceStep15XL: return "4B"
+        case .aceStep15:                     return "2B"
+        case .aceStep15XL, .aceStep15XLFull: return "4B"
         }
     }
 
     var tagline: String {
         switch self {
-        case .aceStep15:   return "Recommended · runs on the Neural Engine"
-        case .aceStep15XL: return "Richer sound · slower"
+        case .aceStep15:       return "Recommended · runs on the Neural Engine"
+        case .aceStep15XL:     return "Richer sound · 4.7 GB, held in memory"
+        case .aceStep15XLFull: return "Full precision · 8.1 GB, best with 12 GB or more"
         }
     }
 
     /// Where the diffusion transformer runs.
     var engineLabel: String {
         switch self {
-        case .aceStep15:   return "NEURAL ENGINE"
-        case .aceStep15XL: return "GPU"
+        case .aceStep15:                     return "NEURAL ENGINE"
+        case .aceStep15XL, .aceStep15XLFull: return "GPU"
         }
     }
 
@@ -48,10 +51,17 @@ enum MusicModel: String, CaseIterable, Identifiable {
     /// M3 reports under 8 GB to apps, and an earlier limit of 7.5 GB shut it
     /// out of XL. The person decides; the app says what to expect.
     var memoryWarning: String? {
-        guard self == .aceStep15XL else { return nil }
         let gigabytes = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
-        guard gigabytes < 11 else { return nil }
-        return String(format: "XL's transformer is 8.1 GB at full precision, more than this device's %.0f GB, so it is read from storage as it runs: slower, and iOS may close the app if other apps are holding memory. ACE-Step 1.5 is the safer choice here.", gigabytes.rounded())
+        switch self {
+        case .aceStep15:
+            return nil
+        case .aceStep15XL:
+            guard gigabytes < 7 else { return nil }
+            return String(format: "XL's 4.7 GB transformer is too large to hold in this device's %.0f GB, so it is read from storage as it runs: slower. ACE-Step 1.5 is the faster choice here.", gigabytes.rounded())
+        case .aceStep15XLFull:
+            guard gigabytes < 11 else { return nil }
+            return String(format: "XL Full's transformer is 8.1 GB, more than this device's %.0f GB, so it is read from storage at every step: much slower than XL, which holds its 4.7 GB in memory and measured nearly the same (velocity cosine 0.99878 against 0.99918, both against the official model).", gigabytes.rounded())
+        }
     }
 
     var supportsLyrics: Bool { true }
@@ -63,20 +73,22 @@ enum MusicModel: String, CaseIterable, Identifiable {
         switch self {
         case .aceStep15:
             generator.transformerEngine = .neuralEngine
-        case .aceStep15XL:
+        case .aceStep15XL, .aceStep15XLFull:
             generator.transformerEngine = .gpu
             generator.transformerShape = .xl
-            generator.transformerFiles = Self.parts("ace_xl_decoder_f16", 5)
-            generator.transformerDType = .float16
             generator.conditionerFiles = [ACEGenerator.File.conditioner, "ace_xl_cond_f16.safetensors"]
-            // Float16, as published in precision: against the official XL
-            // on the same inputs, velocity cosine 0.99918 (int8: 0.99878).
-            // At 8.1 GB it is more than an 8 GB device holds, so there it is
-            // read from storage as it runs — slower, not refused; see
-            // `memoryWarning`.
-            // The 4B planner matched prompts more closely (CLAP 0.501 against
-            // 0.438) but its songs broke apart more: 17 abrupt changes in 196
-            // window pairs against 6. The 1.7B planner stays.
+            if self == .aceStep15XLFull {
+                // Float16: against the official XL on the same inputs,
+                // velocity cosine 0.99918. At 8.1 GB it is more than an 8 GB
+                // device holds — on an iPad Air M3 it is read from storage at
+                // every step, 165 s for 30 seconds of music.
+                generator.transformerFiles = Self.parts("ace_xl_decoder_f16", 5)
+                generator.transformerDType = .float16
+            } else {
+                // Int8, 0.99878 against the official XL: 4.7 GB, which an
+                // 8 GB device holds in memory for the whole run.
+                generator.transformerFiles = Self.parts("ace_xl_decoder_q8", 3)
+            }
         }
     }
 
@@ -139,8 +151,9 @@ enum MusicModel: String, CaseIterable, Identifiable {
 
     var weightFiles: [WeightFile] {
         switch self {
-        case .aceStep15:   return Self.shared + Self.neuralEngineFiles
-        case .aceStep15XL: return Self.shared + Self.xlFiles
+        case .aceStep15:       return Self.shared + Self.neuralEngineFiles
+        case .aceStep15XL:     return Self.shared + Self.xlInt8Files
+        case .aceStep15XLFull: return Self.shared + Self.xlFiles
         }
     }
 
@@ -165,6 +178,13 @@ enum MusicModel: String, CaseIterable, Identifiable {
                                      ("\(folder)/analytics/coremldata.bin", 243),
                                      ("\(folder)/weights/weight.bin", 755_752_384)])
     }
+
+    static let xlInt8Files: [WeightFile] = ([
+        ("ace_xl_decoder_q8.part1.safetensors", 1_895_498_560),
+        ("ace_xl_decoder_q8.part2.safetensors", 1_888_113_216),
+        ("ace_xl_decoder_q8.part3.safetensors", 908_410_816),
+    ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v3") }
+        + [WeightFile(path: "ace_xl_cond_f16.safetensors", bytes: 8_672_128, release: "acestep-v4")]
 
     static let xlFiles: [WeightFile] = ([
         ("ace_xl_decoder_f16.part1.safetensors", 1_893_036_544),

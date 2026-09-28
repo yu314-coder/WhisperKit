@@ -35,6 +35,39 @@ enum MappedWeights {
         }
     }
 
+    /// How much of the weights mapped right now is actually in memory, by
+    /// asking the kernel which pages are resident. iOS counts none of it in
+    /// the app's footprint, and the task's "external" figure did not see it
+    /// either (it read 0.0 GB with XL running), so this is what the memory
+    /// gauge shows for mapped models.
+    static var residentBytes: Int64 { Regions.residentBytes }
+
+    private enum Regions {
+        private static let lock = NSLock()
+        nonisolated(unsafe) private static var lengths: [UnsafeMutableRawPointer: Int] = [:]
+
+        static func add(_ base: UnsafeMutableRawPointer, _ length: Int) {
+            lock.withLock { lengths[base] = length }
+        }
+
+        static func remove(_ base: UnsafeMutableRawPointer) {
+            _ = lock.withLock { lengths.removeValue(forKey: base) }
+        }
+
+        static var residentBytes: Int64 {
+            lock.withLock {
+                let page = Int(vm_page_size)
+                var total: Int64 = 0
+                for (base, length) in lengths {
+                    var flags = [CChar](repeating: 0, count: (length + page - 1) / page)
+                    guard mincore(base, length, &flags) == 0 else { continue }
+                    total += Int64(flags.reduce(0) { $0 + Int($1 & 1) }) * Int64(page)
+                }
+                return total
+            }
+        }
+    }
+
     static func load(url: URL) throws -> [String: MLXArray] {
         let name = url.lastPathComponent
         let descriptor = open(url.path, O_RDONLY)
@@ -67,7 +100,9 @@ enum MappedWeights {
 
         // One array over the whole mapping; unmapped when the last tensor
         // viewing it is released.
+        Regions.add(base, length)
         let whole = MLXArray(rawPointer: base, [length], dtype: .uint8) {
+            Regions.remove(base)
             munmap(base, length)
         }
 

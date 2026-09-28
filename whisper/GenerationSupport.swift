@@ -42,6 +42,18 @@ enum StageMemory {
         }
     }
 
+    /// Whether `bytes` of weights can be read into memory with room to spare,
+    /// by what iOS says this process may still allocate. With the increased
+    /// memory limit entitlement an 8 GB iPad Air M3 reports about 7.5 GB.
+    static func canHold(_ bytes: Int64, spare: Int64 = 1_500_000_000) -> Bool {
+        #if os(iOS)
+        let available = Int64(os_proc_available_memory())
+        #else
+        let available = Int64(ProcessInfo.processInfo.physicalMemory) / 2 - Int64(MemoryFootprint.current)
+        #endif
+        return available > 0 && bytes + spare < available
+    }
+
     /// Runs `body` with MLX keeping no freed buffers for reuse. Measured on
     /// ACE-Step, a zero cache cost nothing in speed and 240 MB less at peak
     /// than a 256 MB one.

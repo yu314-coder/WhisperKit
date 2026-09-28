@@ -217,6 +217,8 @@ struct ACEGenerator {
     /// Map weight files in place rather than reading them into memory; see
     /// `MappedWeights`. Off only to measure the difference.
     var mapsWeights = true
+    /// Read a stage's weights into memory when they fit; see `load`.
+    var holdsWeightsInMemory = true
     /// How much freed memory MLX may keep for reuse while generating.
     var cacheLimit = 0
     /// Run the planner first, as the official pipeline does by default.
@@ -275,13 +277,32 @@ struct ACEGenerator {
     var onPlan: ((ACEPlanner.Plan) -> Void)?
 
     private func load(_ name: String) throws -> [String: MLXArray] {
-        let url = directory.appendingPathComponent(name)
-        return mapsWeights ? try MappedWeights.load(url: url) : try loadArrays(url: url, stream: .cpu)
+        try load([name])
     }
 
+    /// A stage's weights, read into memory when they fit and mapped when
+    /// they do not.
+    ///
+    /// Mapped weights arrive a 16 KB page at a time as the GPU first touches
+    /// them, and when a model is larger than the device's memory the pages
+    /// are dropped and read again at every step. On an 8 GB iPad, XL at
+    /// float16 (8.1 GB) took 165 s for 30 seconds of music that way, with
+    /// the memory gauge near empty. Read in one pass instead, a stage that
+    /// fits is paid for once, sequentially, and stays put until the stage
+    /// ends. Mapping remains for what does not fit — it is what lets such a
+    /// model run at all.
     private func load(_ names: [String]) throws -> [String: MLXArray] {
+        let urls = names.map { directory.appendingPathComponent($0) }
+        let bytes = urls.reduce(Int64(0)) {
+            $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        }
+        let intoMemory = !mapsWeights || (holdsWeightsInMemory && StageMemory.canHold(bytes))
         var merged: [String: MLXArray] = [:]
-        for name in names { merged.merge(try load(name)) { $1 } }
+        for url in urls {
+            let part = intoMemory ? try loadArrays(url: url, stream: .cpu) : try MappedWeights.load(url: url)
+            if intoMemory { eval(Array(part.values)) }
+            merged.merge(part) { $1 }
+        }
         return merged
     }
 

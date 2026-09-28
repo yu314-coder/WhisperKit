@@ -229,6 +229,18 @@ was written clipped (every song peaked at 0 dBFS; 5,843 clipped samples in
 one 1:52 song). As upstream does by default, every song is now scaled to a
 -1 dBFS peak before it is written.
 
+**Held in memory (1.2 (30)).** Weights were always mapped, which kept them
+out of the footprint but on an 8 GB iPad made XL at float16 (8.1 GB) page
+in from storage at every step: 165 s for 30 seconds of music, the gauge
+near empty. A stage's weights are now read into memory in one pass when
+they fit what iOS allows (about 7.5 GB there, with the increased memory
+limit entitlement), and mapped only when they do not. XL ships twice: int8
+(4.7 GB, held in memory) and XL Full (float16). At 81 s on seven prompts
+they score alike — 0.608 / 0.609 own prompt, 6 / 7 abrupt changes, 0.883 /
+0.883 across 15 s — so int8 is the version for 8 GB devices. The 4B
+planner, retested after the rope fix, still did worse with both
+transformers (own prompt 0.573 with 2B, 0.589 with XL).
+
 **Versions.** Both share every file but the transformer:
 
 - *ACE-Step 1.5* runs the 2B transformer on the Neural Engine
