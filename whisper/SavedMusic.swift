@@ -19,6 +19,13 @@ final class SavedMusic {
     /// time so the library can draw each row without decoding the audio again.
     var waveform: [Float]?
 
+    /// What else made it, so it can be read and made again. Optional: clips
+    /// saved before 1.2 (35) have only the prompt.
+    var lyrics: String?
+    /// The language the lyrics were sung in.
+    var language: String?
+    var fullerArrangement: Bool?
+
     init(
         id: UUID = UUID(),
         prompt: String,
@@ -26,7 +33,10 @@ final class SavedMusic {
         duration: Double,
         modelName: String,
         audioFilePath: String? = nil,
-        waveform: [Float]? = nil
+        waveform: [Float]? = nil,
+        lyrics: String? = nil,
+        language: String? = nil,
+        fullerArrangement: Bool? = nil
     ) {
         self.id = id
         self.prompt = prompt
@@ -35,6 +45,9 @@ final class SavedMusic {
         self.modelName = modelName
         self.audioFilePath = audioFilePath
         self.waveform = waveform
+        self.lyrics = lyrics
+        self.language = language
+        self.fullerArrangement = fullerArrangement
     }
 
     /// The stored envelope resampled to `limit` buckets, or nil when this clip

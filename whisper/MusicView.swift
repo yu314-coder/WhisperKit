@@ -2,8 +2,8 @@ import SwiftUI
 import SwiftData
 import AVFoundation
 
-/// The Music tab: describe the music, choose instrumental or vocals, generate,
-/// and play what comes back.
+/// The Music tab: describe the music, add lyrics if it should be sung,
+/// generate, and play what comes back.
 struct MusicView: View {
     @State private var prompt: String = ""
     @State private var lyrics: String = ""
@@ -14,8 +14,6 @@ struct MusicView: View {
     /// default: a short prompt otherwise gets one instrument, thin next to
     /// what Suno makes of the same words.
     @AppStorage("musicExpandsPrompt") private var expandsPrompt = true
-    /// Sung or not. Explicit rather than "empty lyrics means instrumental",
-    /// so switching does not lose the words.
     @State private var showModelPicker = false
     @State private var engine = MusicEngine()
     @State private var showLibrary = false
@@ -27,10 +25,21 @@ struct MusicView: View {
     @State private var memory = MusicMemoryMonitor()
     @State private var interruptionDismissed = false
     @State private var showDetails = false
-    /// The language the lyrics are sung in. ACE-Step conditions on it.
-    @AppStorage("musicVocalLanguage") private var vocalLanguage =
-        Languages.preferred(among: Languages.aceStepCodes)
+    @State private var openedClip: SavedMusic?
+    /// Bumped when a song is used again, to scroll back to the boxes.
+    @State private var reuseCount = 0
+    private static let top = "top"
+    /// The language the lyrics are sung in — ACE-Step conditions on it —
+    /// or "auto", read from the lyrics' script. A new key: the old one
+    /// held a fixed language, and Chinese lyrics sung as English came out
+    /// garbled.
+    @AppStorage("musicSungLanguage") private var sungLanguage = Self.autoLanguage
+    private static let autoLanguage = "auto"
     private static let vocalLanguages = Languages.sortedByName(Languages.aceStepCodes)
+    /// Latin-script languages, for lyrics whose script doesn't say which.
+    private static let latinLanguages = ["en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "da", "no", "fi",
+                                         "cs", "ro", "hu", "tr", "id", "ms", "vi", "ca", "hr", "sk", "lt", "is"]
+        .filter(Languages.aceStepCodes.contains)
 
     /// One tap from an empty box to something that makes good music.
     private static let styles: [(name: String, prompt: String)] = [
@@ -48,8 +57,10 @@ struct MusicView: View {
         VStack(spacing: 0) {
             topBar
             Rectangle().fill(Studio.rule).frame(height: 1)
+            ScrollViewReader { scroller in
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    Color.clear.frame(height: 0).id(Self.top)
                     if MusicRunMarker.wasInterrupted && !interruptionDismissed { interruptedCard }
                     promptCard
                     lyricsCard
@@ -75,6 +86,10 @@ struct MusicView: View {
             // it. Dragging the content dismisses the keyboard, and the
             // toolbar gives a deliberate way out.
             .scrollDismissesKeyboard(.interactively)
+            .onChange(of: reuseCount) { _, _ in
+                withAnimation { scroller.scrollTo(Self.top, anchor: .top) }
+            }
+            }
             generateBar
         }
         .background(Studio.bg.ignoresSafeArea())
@@ -92,6 +107,21 @@ struct MusicView: View {
             if prompt.isEmpty, let preset = UserDefaults.standard.string(forKey: "MusicPromptPreset") {
                 prompt = preset
             }
+            // History can't be made in the Simulator, which can't generate:
+            // `-MusicSeedHistory YES` adds two songs to look at.
+            if clips.isEmpty, UserDefaults.standard.bool(forKey: "MusicSeedHistory") {
+                modelContext.insert(SavedMusic(
+                    prompt: "Soft piano ballad with a female singer, strings in the chorus, 1 minute 30 seconds",
+                    createdAt: Date().addingTimeInterval(-3600), duration: 90, modelName: "ACE-Step 1.5 XL",
+                    waveform: (0 ..< 120).map { _ in Float.random(in: 0.2 ... 1) },
+                    lyrics: "[Verse]\nWalking down the empty street tonight\nCity lights are shining oh so bright\n\n[Chorus]\nHold on to me, don't let go\nWe will find our way back home",
+                    language: "en", fullerArrangement: true))
+                modelContext.insert(SavedMusic(
+                    prompt: "Warm lo-fi hip hop beat with mellow keys, soft drums and vinyl crackle",
+                    createdAt: Date().addingTimeInterval(-86400), duration: 30, modelName: "ACE-Step 1.5",
+                    waveform: (0 ..< 120).map { _ in Float.random(in: 0.1 ... 0.8) },
+                    fullerArrangement: true))
+            }
             #endif
         }
         .onDisappear { memory.stop() }
@@ -106,7 +136,20 @@ struct MusicView: View {
                 .presentationSizing(.page)
         }
         .sheet(isPresented: $showLibrary) {
-            MusicLibraryView().presentationSizing(.page)
+            MusicLibraryView(onReuse: reuse).presentationSizing(.page)
+        }
+        .sheet(item: $openedClip) { clip in
+            NavigationStack {
+                MusicClipDetail(clip: clip,
+                                onReuse: { reuse(clip); openedClip = nil },
+                                onDelete: { delete(clip) })
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Done") { openedClip = nil }
+                        }
+                    }
+            }
+            .presentationSizing(.page)
         }
     }
 
@@ -193,7 +236,7 @@ struct MusicView: View {
 
     private var promptCard: some View {
         card {
-            HStack {
+            HStack(spacing: 14) {
                 StudioLabel(text: "Describe the music")
                 Spacer()
                 if !prompt.isEmpty {
@@ -201,9 +244,19 @@ struct MusicView: View {
                         .font(Studio.mono(10, weight: .semibold))
                         .foregroundColor(Studio.mute)
                 }
+                if !clips.isEmpty {
+                    Button { showLibrary = true } label: {
+                        Label("History", systemImage: "clock.arrow.circlepath")
+                            .font(Studio.mono(10, weight: .semibold))
+                            .foregroundColor(Studio.accent)
+                    }
+                    .accessibilityHint("Earlier prompts and lyrics, to play or use again")
+                }
             }
-            editor($prompt, placeholder: "A slow lo-fi beat with warm bass and vinyl crackle, 1 minute 30 seconds",
-                   focus: $promptFocused, minHeight: 88, size: 15)
+            // Multi-line on purpose: return starts a new line, a pasted
+            // song keeps its shape, and lyrics typed here are sung.
+            editor($prompt, placeholder: "A slow lo-fi beat with warm bass and vinyl crackle, 1 minute 30 seconds\n\nLyrics can go here too, after a blank line",
+                   focus: $promptFocused, minHeight: 96, size: 15)
 
             // Styles: fill an empty box, or add to what is there.
             ScrollView(.horizontal, showsIndicators: false) {
@@ -265,6 +318,11 @@ struct MusicView: View {
     private var settingPills: [String] {
         let settings = promptSettings
         var pills: [String] = []
+        // First, so it is never scrolled out of sight behind the others.
+        let fromPrompt = request.lyricLinesFromPrompt
+        if fromPrompt > 0 {
+            pills.append("♪ \(fromPrompt) line\(fromPrompt == 1 ? "" : "s") of lyrics found — sung")
+        }
         if let seconds = settings.seconds {
             pills.append("⏱ \(Self.formatLength(Double(seconds)))")
         } else {
@@ -280,8 +338,19 @@ struct MusicView: View {
         return pills
     }
 
-    /// Length, tempo, key and meter the prompt itself states.
-    private var promptSettings: PromptMetadata { PromptMetadata(parsing: prompt) }
+    /// Length, tempo, key and meter the prompt itself states — read from
+    /// the description, not from lyrics pasted after it.
+    private var promptSettings: PromptMetadata { PromptMetadata(parsing: request.description) }
+
+    /// The two boxes sorted into a description and lyrics, wherever the
+    /// lyrics were typed.
+    private var request: MusicRequest { MusicRequest(prompt: prompt, lyrics: lyrics) }
+
+    /// The language to sing in: the one chosen, or the lyrics' own.
+    private func sungLanguage(for lyrics: String) -> String {
+        guard sungLanguage == Self.autoLanguage else { return sungLanguage }
+        return MusicRequest.language(of: lyrics) ?? Languages.preferred(among: Self.latinLanguages, fallback: "en")
+    }
 
     /// Used when the prompt names no length.
     private static let defaultSeconds: Double = 30
@@ -292,20 +361,25 @@ struct MusicView: View {
         promptSettings.seconds.map(Double.init) ?? Self.defaultSeconds
     }
 
-    private var sendsLyrics: Bool {
-        !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
+    private var sendsLyrics: Bool { request.hasLyrics }
 
     /// Just a place to type the words. Section tags and a vocals switch
     /// made writing lyrics a chore; the tags are now added for the model
-    /// (`ACEPipeline.sectioned`), and empty lyrics mean an instrumental.
+    /// (`ACEPipeline.sectioned`), and no lyrics means an instrumental.
     private var lyricsCard: some View {
         card {
-            HStack {
+            HStack(spacing: 14) {
                 StudioLabel(text: "Lyrics · optional")
                 Spacer()
+                if !lyrics.isEmpty {
+                    Button("Clear") { lyrics = "" }
+                        .font(Studio.mono(10, weight: .semibold))
+                        .foregroundColor(Studio.mute)
+                }
                 Menu {
-                    Picker("Sung in", selection: $vocalLanguage) {
+                    Picker("Sung in", selection: $sungLanguage) {
+                        Text("Automatic, from the lyrics").tag(Self.autoLanguage)
+                        Divider()
                         ForEach(Self.vocalLanguages, id: \.self) { code in
                             Text(Languages.displayName(code)).tag(code)
                         }
@@ -313,23 +387,38 @@ struct MusicView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "globe")
-                        Text("Sung in \(Languages.englishName(vocalLanguage))")
+                        Text(languageLabel)
                         Image(systemName: "chevron.up.chevron.down")
                     }
                     .font(Studio.mono(10, weight: .semibold))
                     .foregroundColor(Studio.accent)
                 }
-                .accessibilityLabel("Vocal language, \(Languages.englishName(vocalLanguage))")
+                .lineLimit(1)
+                .accessibilityLabel("Sung in \(languageLabel)")
             }
             editor($lyrics, placeholder: "Type or paste the words to sing",
                    focus: $lyricsFocused, minHeight: 120, size: 14)
-            Text(sendsLyrics
-                 ? "Put a blank line between verses. A verse you repeat is sung as the chorus."
-                 : "Leave empty for an instrumental.")
+            Text(lyricsHint)
                 .font(Studio.text(12))
                 .foregroundColor(Studio.mute)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var languageLabel: String {
+        let language = Languages.englishName(sungLanguage(for: request.lyrics))
+        return sungLanguage == Self.autoLanguage
+            ? (sendsLyrics ? "\(language) · auto" : "Language · auto")
+            : language
+    }
+
+    private var lyricsHint: String {
+        if request.lyricLinesFromPrompt > 0 && lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "The lyrics in your prompt will be sung. They can go here instead — either works."
+        }
+        return sendsLyrics
+            ? "Put a blank line between verses. A verse you repeat is sung as the chorus."
+            : "Leave empty for an instrumental, or put lyrics in the prompt above."
     }
 
     // MARK: - Progress and result
@@ -433,7 +522,15 @@ struct MusicView: View {
                 Text(engine.lastPrompt)
                     .font(Studio.text(14, weight: .medium))
                     .foregroundColor(Studio.ink)
-                    .lineLimit(2)
+                    .lineLimit(3)
+            }
+            if let line = engine.lastLyrics.components(separatedBy: .newlines)
+                .map({ $0.trimmingCharacters(in: .whitespaces) })
+                .first(where: { !$0.isEmpty && !MusicRequest.isHeading($0) }) {
+                Label(line, systemImage: "music.mic")
+                    .font(Studio.text(12))
+                    .foregroundColor(Studio.ink.opacity(0.65))
+                    .lineLimit(1)
             }
             if let url = engine.lastResult {
                 TimelineView(.periodic(from: .now, by: 0.1)) { _ in
@@ -471,7 +568,7 @@ struct MusicView: View {
                         Label("New take", systemImage: "arrow.triangle.2.circlepath")
                             .font(Studio.text(13, weight: .medium))
                     }
-                    .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!canGenerate)
                 }
                 .foregroundColor(Studio.accent)
             }
@@ -510,9 +607,35 @@ struct MusicView: View {
                 }
             }
             ForEach(clips.prefix(3)) { clip in
-                MusicRow(clip: clip, isPlaying: playingClipID == clip.id) { toggleClip(clip) }
+                Button { openedClip = clip } label: {
+                    HStack(alignment: .center, spacing: 6) {
+                        MusicRow(clip: clip, isPlaying: playingClipID == clip.id) { toggleClip(clip) }
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(Studio.mute.opacity(0.7))
+                    }
+                }
+                .buttonStyle(.plain)
             }
         }
+    }
+
+    /// Puts a song's prompt, lyrics and settings back in the boxes.
+    private func reuse(_ clip: SavedMusic) {
+        player?.stop()
+        playingClipID = nil
+        prompt = clip.prompt
+        lyrics = clip.lyrics ?? ""
+        if let language = clip.language, language != sungLanguage(for: lyrics) { sungLanguage = language }
+        if let fuller = clip.fullerArrangement { expandsPrompt = fuller }
+        reuseCount += 1
+    }
+
+    private func delete(_ clip: SavedMusic) {
+        if playingClipID == clip.id { player?.stop(); playingClipID = nil }
+        if let path = clip.audioFilePath { AudioFiles.deleteAudio(relativePath: path) }
+        modelContext.delete(clip)
+        try? modelContext.save()
     }
 
     private func toggleClip(_ clip: SavedMusic) {
@@ -597,7 +720,7 @@ struct MusicView: View {
     // MARK: - Generate
 
     private var canGenerate: Bool {
-        engine.isBusy || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        engine.isBusy || !request.description.isEmpty || request.hasLyrics
     }
 
     private func startGenerating() {
@@ -609,11 +732,13 @@ struct MusicView: View {
         // fails immediately never lets the view observe the busy state, and
         // the gauge would never appear.
         memory.start()
-        engine.generate(model: selectedModel, prompt: prompt,
-                        lyrics: sendsLyrics ? lyrics : "",
-                        language: vocalLanguage,
+        let request = self.request
+        // Lyrics with no description: the planner writes one.
+        engine.generate(model: selectedModel, prompt: request.description,
+                        lyrics: request.lyrics,
+                        language: sungLanguage(for: request.lyrics),
                         seconds: effectiveSeconds,
-                        expandsPrompt: expandsPrompt)
+                        expandsPrompt: expandsPrompt || request.description.isEmpty)
     }
 
     private var generateBar: some View {
@@ -624,7 +749,8 @@ struct MusicView: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: engine.isBusy ? "stop.fill" : "wand.and.stars")
-                    Text(engine.isBusy ? "Cancel" : "Generate \(Self.formatLength(effectiveSeconds))")
+                    Text(engine.isBusy ? "Cancel"
+                         : "Generate \(Self.formatLength(effectiveSeconds)) · \(sendsLyrics ? "with vocals" : "instrumental")")
                 }
                 .font(Studio.text(15, weight: .semibold))
                 .foregroundColor(canGenerate ? Studio.onAccent : Studio.mute)

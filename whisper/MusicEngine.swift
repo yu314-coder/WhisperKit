@@ -29,6 +29,7 @@ final class MusicEngine {
     /// works; and the prompt the last result was made from.
     private(set) var startedAt: Date?
     private(set) var lastPrompt: String = ""
+    private(set) var lastLyrics: String = ""
     /// Shown under the download bar while a dropped transfer is recovered.
     private(set) var downloadNote: String?
     private var currentDownload: String?
@@ -279,8 +280,10 @@ extension MusicEngine {
         lastResult = destination
         lastDuration = seconds
         lastPrompt = prompt
+        lastLyrics = lyrics
         elapsedMilliseconds = Int(Date().timeIntervalSince(started) * 1000)
-        save(destination, model: model, prompt: prompt, seconds: seconds)
+        save(destination, model: model, prompt: prompt, seconds: seconds,
+             lyrics: lyrics, language: language, fullerArrangement: expandsPrompt)
         phase = .idle
     }
 
@@ -288,7 +291,8 @@ extension MusicEngine {
     /// audio folder and records it, so it survives the app being closed.
     /// A failure here must not lose the generated audio, so `lastResult` keeps
     /// pointing at whatever the caller can still play.
-    func save(_ url: URL, model: MusicModel, prompt: String, seconds: Double) {
+    func save(_ url: URL, model: MusicModel, prompt: String, seconds: Double,
+              lyrics: String = "", language: String? = nil, fullerArrangement: Bool? = nil) {
         guard let modelContext else { return }
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
@@ -300,7 +304,10 @@ extension MusicEngine {
                                   duration: seconds,
                                   modelName: model.displayName,
                                   audioFilePath: relative,
-                                  waveform: envelope?.buckets)
+                                  waveform: envelope?.buckets,
+                                  lyrics: lyrics.isEmpty ? nil : lyrics,
+                                  language: lyrics.isEmpty ? nil : language,
+                                  fullerArrangement: fullerArrangement)
             modelContext.insert(clip)
             try modelContext.save()
             lastResult = stored

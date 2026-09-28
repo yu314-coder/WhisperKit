@@ -276,6 +276,19 @@ verses of four lines; tagged lyrics pass through. English test lyrics with
 the tags removed, 2B at 45 s: Whisper heard 98% / 93% of the words (90% /
 93% with tags).
 
+**Lyrics in either box, prompts over several lines (1.2 (35)).**
+`MusicRequest` sorts what was typed: lyrics pasted into the prompt (after a
+"Lyrics:" / 歌词： heading, a section heading such as "[Verse]" or
+"Chorus:", or a block of sung-looking lines after a blank line) are taken
+out of the description and sung; a list of instruments or a prose line
+over two lines is left alone. A description typed over several lines had
+reached the planner's YAML reasoning with its line breaks (a malformed
+block); `ACEPipeline.oneLine` joins it first — a three-line prompt now
+renders byte-identically to the same words on one line. The sung language
+defaults to the lyrics' own script (Han -> zh, kana -> ja, Hangul -> ko…).
+Songs keep their lyrics, language and arrangement setting, and History
+shows them in full with "Use this prompt again".
+
 **Versions.** Both share every file but the transformer:
 
 - *ACE-Step 1.5* runs the 2B transformer on the Neural Engine

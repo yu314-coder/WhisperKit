@@ -66,6 +66,23 @@ enum ACEPipeline {
     static let instrumentalStructure =
         "[Intro]\n\n[Verse]\n\n[Chorus]\n\n[Verse]\n\n[Chorus]\n\n[Bridge]\n\n[Chorus]\n\n[Outro]"
 
+    /// A description typed over several lines, as one: lines joined with
+    /// ", " (or a space after punctuation), runs of spaces made one. A line
+    /// break reached the planner's YAML reasoning as it was typed —
+    /// "caption: Soft piano" then "slow tempo" at column 0 — which is not
+    /// the block it was trained on.
+    static func oneLine(_ text: String) -> String {
+        let lines = text.components(separatedBy: .newlines)
+            .map { $0.split(whereSeparator: { $0 == " " || $0 == "\t" }).joined(separator: " ") }
+            .filter { !$0.isEmpty }
+        var result = ""
+        for line in lines {
+            if !result.isEmpty { result += ".,;:!?。，；：！？".contains(result.last!) ? " " : ", " }
+            result += line
+        }
+        return result
+    }
+
     /// Lyrics as the model reads them, from lyrics as people type them.
     /// Upstream's lyrics carry section tags; the app no longer asks for
     /// them. Each stanza (lines between blank lines) becomes a [Verse], and
@@ -400,8 +417,8 @@ struct ACEGenerator {
         // the text encoder keeps 256 tokens, and a long timeline would push
         // the style out.
         let sections = hasLyrics || !usesPlanner || !plansBySection ? [] : known?.sections ?? []
-        let caption = sections.isEmpty ? caption
-            : known.map { $0.style.isEmpty ? sections.map(\.description).joined(separator: ", ") : $0.style } ?? caption
+        let caption = ACEPipeline.oneLine(sections.isEmpty ? caption
+            : known.map { $0.style.isEmpty ? sections.map(\.description).joined(separator: ", ") : $0.style } ?? caption)
 
         // 0. Planner: the song's layout, five tokens a second.
         var plan: ACEPlanner.Plan?
