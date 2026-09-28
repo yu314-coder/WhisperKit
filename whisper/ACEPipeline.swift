@@ -238,6 +238,11 @@ struct ACEGenerator {
     /// Let the planner rewrite the caption, upstream's default. Off: the
     /// user's words are used verbatim (see `generate`).
     var plannerRewritesCaption = false
+    /// Let the planner add a full description of the music after the
+    /// user's words — "Fuller arrangement". A short prompt then gets an
+    /// arrangement to follow, while the words still come first and are
+    /// kept as written; see `ACEPlanner.reason`.
+    var plannerExpandsCaption = false
     /// Fraction of the eight steps that follow the plan before the rest
     /// continue as plain text-to-music — upstream's audio_cover_strength,
     /// whose default is the whole run.
@@ -393,12 +398,14 @@ struct ACEGenerator {
                 // The vocal language is likewise the user's; an
                 // instrumental's is left to the planner, as upstream does.
                 let given = ACEPlanner.Metadata(
-                    bpm: known?.bpm, caption: plannerRewritesCaption ? nil : caption, duration: rendered,
+                    bpm: known?.bpm, caption: plannerRewritesCaption || plannerExpandsCaption ? nil : caption,
+                    duration: rendered,
                     keyscale: known?.keyscale,
                     language: hasLyrics ? language : structured ? "unknown" : nil,
                     timeSignature: known?.timeSignature)
                 return try planner.plan(caption: caption, lyrics: ACEPipeline.lyricBody(modelLyrics),
                                         known: given, seconds: rendered, seed: seed, sections: sections,
+                                        captionLead: plannerExpandsCaption ? caption : nil,
                                         isCancelled: isCancelled) { stage in
                     if case .writing(let done, let total) = stage { progress(.writing(done, total)) }
                 }

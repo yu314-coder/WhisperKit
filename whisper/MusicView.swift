@@ -2,54 +2,75 @@ import SwiftUI
 import SwiftData
 import AVFoundation
 
-/// The Music tab: a prompt, a version of ACE-Step 1.5, and a generated clip.
+/// The Music tab: describe the music, choose instrumental or vocals, generate,
+/// and play what comes back.
 struct MusicView: View {
     @State private var prompt: String = ""
     @State private var lyrics: String = ""
     @FocusState private var promptFocused: Bool
     @FocusState private var lyricsFocused: Bool
     @AppStorage("musicModel") private var selectedModel: MusicModel = .aceStep15
-    /// Let the planner turn the prompt into a full arrangement.
-    @AppStorage("musicExpandsPrompt") private var expandsPrompt = false
+    /// Let the planner turn the prompt into a full arrangement first. On by
+    /// default: a short prompt otherwise gets one instrument, thin next to
+    /// what Suno makes of the same words.
+    @AppStorage("musicExpandsPrompt") private var expandsPrompt = true
+    /// Sung or not. Explicit rather than "empty lyrics means instrumental",
+    /// so switching does not lose the words.
+    @AppStorage("musicWithVocals") private var withVocals = false
     @State private var showModelPicker = false
     @State private var engine = MusicEngine()
     @State private var showLibrary = false
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \SavedMusic.createdAt, order: .reverse) private var clips: [SavedMusic]
     @State private var player: AVAudioPlayer?
-    @State private var isPlaying = false
     @State private var playingClipID: UUID?
+    @State private var resultEnvelope: [Float]?
     @State private var memory = MusicMemoryMonitor()
     @State private var interruptionDismissed = false
-    /// The language the lyrics are sung in. ACE-Step conditions on it; an
-    /// instrumental ignores it and sends "unknown" instead.
+    @State private var showDetails = false
+    /// The language the lyrics are sung in. ACE-Step conditions on it.
     @AppStorage("musicVocalLanguage") private var vocalLanguage =
         Languages.preferred(among: Languages.aceStepCodes)
     private static let vocalLanguages = Languages.sortedByName(Languages.aceStepCodes)
+
+    /// One tap from an empty box to something that makes good music.
+    private static let styles: [(name: String, prompt: String)] = [
+        ("Lo-fi", "Warm lo-fi hip hop beat with mellow keys, soft drums and vinyl crackle"),
+        ("Cinematic", "Epic cinematic orchestral score with soaring strings, brass and big drums"),
+        ("Acoustic", "Warm acoustic folk song with fingerpicked guitar and soft percussion"),
+        ("Pop", "Upbeat modern pop with bright synths, punchy drums and a catchy groove"),
+        ("Jazz", "Smooth jazz trio with piano, upright bass and brushed drums"),
+        ("Ambient", "Calm ambient soundscape with soft pads, gentle textures and slow evolving chords"),
+        ("Rock", "Energetic rock anthem with driving electric guitars, bass and big drums"),
+        ("EDM", "Festival EDM track with a pulsing bassline, bright leads and a big drop"),
+    ]
 
     var body: some View {
         VStack(spacing: 0) {
             topBar
             Rectangle().fill(Studio.rule).frame(height: 1)
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 16) {
                     if MusicRunMarker.wasInterrupted && !interruptionDismissed { interruptedCard }
                     promptCard
-                    if selectedModel.supportsLyrics { lyricsCard }
-                    if engine.isBusy || engine.lastResult != nil || engine.failureMessage != nil {
+                    vocalsCard
+                    if let warning = selectedModel.memoryWarning {
+                        noteRow(icon: "memorychip", tint: Studio.hot, text: warning)
+                            .padding(.horizontal, 4)
+                    }
+                    if engine.isBusy || engine.failureMessage != nil {
                         progressCard
+                    } else if engine.lastResult != nil {
+                        resultCard
                     }
-                    // Shown while working and kept afterwards, so the peak a
-                    // run reached is still readable once it finishes.
-                    if engine.isBusy || memory.peakMB > 0 {
-                        MusicMemoryGauge(monitor: memory)
-                    }
-                    statusCard
+                    // Live while working: how much memory the models hold.
+                    if engine.isBusy { MusicMemoryGauge(monitor: memory) }
                     if !clips.isEmpty { recentSection }
+                    detailsSection
                 }
                 .padding(18)
             }
-            // Two text fields now sit above Generate, and the keyboard covers
+            // Two text fields sit above Generate, and the keyboard covers
             // it. Dragging the content dismisses the keyboard, and the
             // toolbar gives a deliberate way out.
             .scrollDismissesKeyboard(.interactively)
@@ -64,6 +85,7 @@ struct MusicView: View {
         }
         .onAppear {
             engine.modelContext = modelContext
+            if !lyrics.isEmpty { withVocals = true }
             #if DEBUG
             // For testing downloads in the Simulator, whose keyboard covers
             // Generate: launch with `-MusicPromptPreset "…"`.
@@ -75,6 +97,9 @@ struct MusicView: View {
         .onDisappear { memory.stop() }
         .onChange(of: engine.isBusy) { _, busy in
             if !busy { memory.stop() }
+        }
+        .onChange(of: engine.lastResult) { _, url in
+            resultEnvelope = url.flatMap { AudioConverter.peakEnvelope(of: $0, bucketCount: 90)?.buckets }
         }
         .sheet(isPresented: $showModelPicker) {
             MusicModelPicker(selected: $selectedModel)
@@ -107,12 +132,16 @@ struct MusicView: View {
                         .font(Studio.mono(11))
                         .foregroundColor(Studio.ink.opacity(0.82))
                         .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(Studio.mute)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .overlay(Capsule().strokeBorder(Studio.rule, lineWidth: 0.5))
             }
             .buttonStyle(PressableButtonStyle())
+            .accessibilityLabel("Model, \(selectedModel.displayName)")
 
             Button { showLibrary = true } label: {
                 Image(systemName: "music.note.list")
@@ -122,233 +151,222 @@ struct MusicView: View {
             }
             .buttonStyle(PressableButtonStyle())
             .padding(.leading, 8)
+            .accessibilityLabel("Library")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
     }
 
-    /// The last few clips, so a generated piece is one tap away rather than
-    /// behind a sheet.
-    private var recentSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                StudioLabel(text: "Generated")
-                Spacer()
-                Button { showLibrary = true } label: {
-                    Text("All \(clips.count) \u{2192}")
-                        .font(Studio.mono(9, weight: .semibold))
-                        .foregroundColor(Studio.accent)
-                }
-            }
-            ForEach(clips.prefix(3)) { clip in
-                MusicRow(clip: clip, isPlaying: playingClipID == clip.id) { toggleClip(clip) }
-            }
-        }
+    // MARK: - Compose
+
+    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12, content: content)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Studio.panel))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Studio.rule, lineWidth: 0.5))
     }
 
-    private func toggleClip(_ clip: SavedMusic) {
-        if playingClipID == clip.id {
-            player?.stop(); playingClipID = nil; return
-        }
-        guard let url = clip.audioURL, FileManager.default.fileExists(atPath: url.path) else { return }
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-        try? AVAudioSession.sharedInstance().setActive(true)
-        player = try? AVAudioPlayer(contentsOf: url)
-        player?.play()
-        playingClipID = clip.id
-        isPlaying = false
-    }
-
-    // MARK: - Cards
-
-    /// The last run never finished: the app was closed mid-generation. Said
-    /// here rather than on the Transcribe tab, which used to take the blame
-    /// for it when a model happened to be loading at the same time.
-    private var interruptedCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Last generation didn't finish", systemImage: "exclamationmark.triangle")
-                .font(Studio.text(14, weight: .semibold))
-                .foregroundColor(Studio.hot)
-            Text("Whisper was closed while it was generating. If you didn't close it yourself, iOS stopped it — most likely for memory. A shorter piece needs less.")
-                .font(Studio.text(13))
+    private func editor(_ text: Binding<String>, placeholder: String, focus: FocusState<Bool>.Binding,
+                        minHeight: CGFloat, size: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            if text.wrappedValue.isEmpty {
+                Text(placeholder)
+                    .font(Studio.text(size))
+                    .foregroundColor(Studio.mute.opacity(0.7))
+                    .padding(.top, 8)
+                    .padding(.horizontal, 12)
+                    .allowsHitTesting(false)
+            }
+            TextEditor(text: text)
+                .focused(focus)
+                .font(Studio.text(size))
                 .foregroundColor(Studio.ink)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Dismiss") { interruptionDismissed = true }
-                .font(Studio.text(13, weight: .medium))
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .frame(minHeight: minHeight)
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Studio.sunk))
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Studio.sunk))
     }
 
     private var promptCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            StudioLabel(text: "Prompt")
-            ZStack(alignment: .topLeading) {
-                if prompt.isEmpty {
-                    Text("A slow lo-fi beat with warm bass and vinyl crackle, 1 minute 30 seconds")
-                        .font(Studio.text(15))
-                        .foregroundColor(Studio.mute.opacity(0.7))
-                        .padding(.top, 8)
-                        .padding(.horizontal, 12)
-                        .allowsHitTesting(false)
-                }
-                TextEditor(text: $prompt)
-                    .focused($promptFocused)
-                    .font(Studio.text(15))
-                    .foregroundColor(Studio.ink)
-                    .scrollContentBackground(.hidden)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .frame(minHeight: 96)
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Studio.sunk)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Studio.rule, lineWidth: 0.5)
-            )
-            // The length comes from the prompt alone; there is no separate
-            // control to disagree with it. This line says what was read —
-            // or, when the prompt names no length, what will be used.
-            if promptSettings.seconds == nil {
-                Label("No length in your prompt — \(Self.formatLength(Self.defaultSeconds)) will be made. Add one, like “90 seconds” or “2:30”.",
-                      systemImage: "clock")
-                    .font(Studio.mono(10))
-                    .foregroundColor(Studio.mute)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if !promptSettings.isEmpty {
-                Label("From your prompt: \(promptSettingsSummary)", systemImage: "text.badge.checkmark")
-                    .font(Studio.mono(10))
-                    .foregroundColor(Studio.accent)
-            }
-            // A short prompt describes one instrument and gets one; this lets
-            // the planner write out a whole arrangement from it first, as
-            // Suno does. It may add instruments the prompt did not name.
-            Toggle(isOn: $expandsPrompt) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Fuller arrangement")
-                        .font(Studio.text(13, weight: .medium))
-                        .foregroundColor(Studio.ink)
-                    Text("Expands your prompt into a full arrangement before writing the music. May add instruments you didn't name.")
-                        .font(Studio.mono(10))
+        card {
+            HStack {
+                StudioLabel(text: "Describe the music")
+                Spacer()
+                if !prompt.isEmpty {
+                    Button("Clear") { prompt = "" }
+                        .font(Studio.mono(10, weight: .semibold))
                         .foregroundColor(Studio.mute)
-                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            editor($prompt, placeholder: "A slow lo-fi beat with warm bass and vinyl crackle, 1 minute 30 seconds",
+                   focus: $promptFocused, minHeight: 88, size: 15)
+
+            // Styles: fill an empty box, or add to what is there.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 7) {
+                    ForEach(Self.styles, id: \.name) { style in
+                        Button {
+                            let current = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                            prompt = current.isEmpty ? style.prompt : "\(current), \(style.name.lowercased())"
+                        } label: {
+                            Text(style.name)
+                                .font(Studio.text(12, weight: .medium))
+                                .foregroundColor(Studio.ink.opacity(0.8))
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 6)
+                                .background(Capsule().fill(Studio.sunk))
+                        }
+                        .buttonStyle(PressableButtonStyle())
+                    }
+                }
+            }
+
+            // What the prompt set — length always, the rest when stated.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(settingPills, id: \.self) { pill($0) }
+                }
+            }
+
+            Toggle(isOn: $expandsPrompt) {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .foregroundColor(Studio.accent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Fuller arrangement")
+                            .font(Studio.text(13, weight: .medium))
+                            .foregroundColor(Studio.ink)
+                        Text("Adds a full arrangement after your words: bass, drums, pads, how it builds. May bring in instruments you didn't name.")
+                            .font(Studio.text(12))
+                            .foregroundColor(Studio.mute)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             .tint(Studio.accent)
-            .padding(.top, 4)
         }
+    }
+
+    private func pill(_ text: String) -> some View {
+        Text(text)
+            .font(Studio.mono(10, weight: .semibold))
+            .foregroundColor(Studio.accent)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Studio.accent.opacity(0.10)))
+    }
+
+    /// Length, tempo, key and meter the prompt itself states; the length is
+    /// always shown, since it is the default when the prompt names none.
+    private var settingPills: [String] {
+        let settings = promptSettings
+        var pills: [String] = []
+        if let seconds = settings.seconds {
+            pills.append("⏱ \(Self.formatLength(Double(seconds)))")
+        } else {
+            pills.append("⏱ \(Self.formatLength(Self.defaultSeconds)) · say “90 seconds” or “2:30” to change")
+        }
+        if let bpm = settings.bpm { pills.append("\(bpm) BPM") }
+        if let key = settings.keyscale { pills.append(key) }
+        if let beats = settings.timeSignature { pills.append(beats == 6 ? "6/8" : "\(beats)/4") }
+        // A timeline is planned part by part; with lyrics, the lyrics lead.
+        if !settings.sections.isEmpty && !sendsLyrics {
+            pills.append("\(settings.sections.count) timed sections")
+        }
+        return pills
     }
 
     /// Length, tempo, key and meter the prompt itself states.
     private var promptSettings: PromptMetadata { PromptMetadata(parsing: prompt) }
 
-    private var promptSettingsSummary: String {
-        let settings = promptSettings
-        var parts: [String] = []
-        if let seconds = settings.seconds { parts.append(Self.formatLength(Double(seconds))) }
-        // Tempo, key and meter go to the planner as given.
-        if let bpm = settings.bpm { parts.append("\(bpm) BPM") }
-        if let key = settings.keyscale { parts.append(key) }
-        if let beats = settings.timeSignature { parts.append(beats == 6 ? "6/8" : "\(beats)/4") }
-        // A timeline is planned part by part; with lyrics, the lyrics lead.
-        if !settings.sections.isEmpty && lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            parts.append("\(settings.sections.count) timed sections")
-        }
-        return parts.joined(separator: " · ")
-    }
-
     /// Used when the prompt names no length.
     private static let defaultSeconds: Double = 30
 
     /// The length that will be generated: the prompt's, or the default.
-    /// `PromptMetadata` already keeps it within 5 seconds to 6:24, the
-    /// models' own range.
+    /// `PromptMetadata` already keeps it within 5 seconds to 6:24.
     private var effectiveSeconds: Double {
         promptSettings.seconds.map(Double.init) ?? Self.defaultSeconds
     }
 
-    /// Lyrics are conditioning, not a caption: the model sings them, so an
-    /// empty box means an instrumental rather than a missing field.
-    private var lyricsCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                StudioLabel(text: "Lyrics")
-                Spacer()
-                Menu {
-                    Picker("Sung in", selection: $vocalLanguage) {
-                        ForEach(Self.vocalLanguages, id: \.self) { code in
-                            Text(Languages.displayName(code)).tag(code)
+    private var sendsLyrics: Bool {
+        withVocals && !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var vocalsCard: some View {
+        card {
+            Picker("Vocals", selection: $withVocals) {
+                Text("Instrumental").tag(false)
+                Text("With vocals").tag(true)
+            }
+            .pickerStyle(.segmented)
+
+            if withVocals {
+                HStack {
+                    StudioLabel(text: "Lyrics")
+                    Spacer()
+                    Menu {
+                        Picker("Sung in", selection: $vocalLanguage) {
+                            ForEach(Self.vocalLanguages, id: \.self) { code in
+                                Text(Languages.displayName(code)).tag(code)
+                            }
                         }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "globe")
+                            Text("Sung in \(Languages.englishName(vocalLanguage))")
+                            Image(systemName: "chevron.up.chevron.down")
+                        }
+                        .font(Studio.mono(10, weight: .semibold))
+                        .foregroundColor(Studio.accent)
                     }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "globe")
-                        Text("Sung in \(Languages.englishName(vocalLanguage))")
-                        Image(systemName: "chevron.up.chevron.down")
+                    .accessibilityLabel("Vocal language, \(Languages.englishName(vocalLanguage))")
+                }
+                editor($lyrics, placeholder: "[Verse]\nWrite the words to be sung, a line at a time\n\n[Chorus]\n…",
+                       focus: $lyricsFocused, minHeight: 120, size: 14)
+                // Section tags, as the model reads them.
+                HStack(spacing: 6) {
+                    ForEach(["Verse", "Chorus", "Bridge", "Outro"], id: \.self) { tag in
+                        Button {
+                            let spacer = lyrics.isEmpty || lyrics.hasSuffix("\n\n") ? "" : (lyrics.hasSuffix("\n") ? "\n" : "\n\n")
+                            lyrics += "\(spacer)[\(tag)]\n"
+                            lyricsFocused = true
+                        } label: {
+                            Text("+ \(tag)")
+                                .font(Studio.mono(10, weight: .semibold))
+                                .foregroundColor(Studio.ink.opacity(0.75))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(Studio.sunk))
+                        }
+                        .buttonStyle(PressableButtonStyle())
                     }
-                    .font(Studio.mono(10, weight: .semibold))
-                    .foregroundColor(lyrics.isEmpty ? Studio.mute : Studio.accent)
+                    Spacer(minLength: 0)
                 }
-                .accessibilityLabel("Vocal language, \(Languages.englishName(vocalLanguage))")
-            }
-            ZStack(alignment: .topLeading) {
-                if lyrics.isEmpty {
-                    Text("Leave empty for an instrumental, or write a verse to be sung")
-                        .font(Studio.text(14))
-                        .foregroundColor(Studio.mute.opacity(0.7))
-                        .padding(.top, 8)
-                        .padding(.horizontal, 12)
-                        .allowsHitTesting(false)
+                if lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("No lyrics yet — until there are, it will be an instrumental.")
+                        .font(Studio.text(12))
+                        .foregroundColor(Studio.mute)
                 }
-                TextEditor(text: $lyrics)
-                    .focused($lyricsFocused)
-                    .font(Studio.text(14))
-                    .foregroundColor(Studio.ink)
-                    .scrollContentBackground(.hidden)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .frame(minHeight: 78)
+            } else {
+                Text("An instrumental, built in sections — intro, verses, choruses, a bridge and an outro.")
+                    .font(Studio.text(12))
+                    .foregroundColor(Studio.mute)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Studio.sunk))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Studio.rule, lineWidth: 0.5))
         }
     }
 
-    private static func formatBytes(_ bytes: Int64) -> String {
-        bytes >= 1_000_000_000
-            ? String(format: "%.2f GB", Double(bytes) / 1_000_000_000)
-            : "\(bytes / 1_000_000) MB"
-    }
-
-    private static func formatLength(_ seconds: Double) -> String {
-        let total = Int(seconds.rounded())
-        guard total >= 60 else { return "\(total)s" }
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
-
-    /// What the selected model can actually do on this device, stated plainly.
-    private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            StudioLabel(text: "Model")
-            noteRow(icon: "checkmark.circle",
-                    tint: Studio.ok,
-                    text: "\(selectedModel.displayName) runs on this device. Weights are \(selectedModel.sizeLabel), downloaded once; versions share most of them.")
-            if let warning = selectedModel.memoryWarning {
-                noteRow(icon: "memorychip", tint: Studio.hot, text: warning)
-            }
-        }
-    }
+    // MARK: - Progress and result
 
     /// Download and generation share one progress area: from the user's side
     /// it is a single wait, even though the first part only happens once.
     @ViewBuilder
     private var progressCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        card {
             switch engine.phase {
             case .downloading(let file, let completed, let total, let fraction, let received, let expected):
                 HStack {
@@ -375,10 +393,31 @@ struct MusicView: View {
                         .font(Studio.mono(10))
                         .foregroundColor(Studio.hot)
                 }
-            case .generating(let stage):
-                StudioLabel(text: "Generating")
-                ProgressView().tint(Studio.accent)
-                Text(stage).font(Studio.mono(10)).foregroundColor(Studio.mute)
+            case .generating(let stage, let progress):
+                HStack {
+                    StudioLabel(text: "Making your music")
+                    Spacer()
+                    Text("\(Int(progress * 100))%")
+                        .font(Studio.mono(11, weight: .semibold))
+                        .foregroundColor(Studio.accent)
+                }
+                ProgressView(value: progress).tint(Studio.accent)
+                HStack {
+                    Text(stage)
+                        .font(Studio.mono(10))
+                        .foregroundColor(Studio.mute)
+                        .lineLimit(2)
+                    Spacer()
+                    if let started = engine.startedAt {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text(Self.formatLength(context.date.timeIntervalSince(started)))
+                                .font(Studio.mono(10))
+                                .foregroundColor(Studio.mute)
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                stageSteps(progress)
             case .failed(let message):
                 StudioLabel(text: "Failed")
                 Text(message)
@@ -386,46 +425,175 @@ struct MusicView: View {
                     .foregroundColor(Studio.hot)
                     .fixedSize(horizontal: false, vertical: true)
             case .idle:
-                if let url = engine.lastResult {
-                    HStack {
-                        StudioLabel(text: "Result")
-                        Spacer()
-                        Text("\(engine.elapsedMilliseconds) ms")
-                            .font(Studio.mono(10))
-                            .foregroundColor(Studio.mute)
-                    }
+                EmptyView()
+            }
+        }
+    }
+
+    /// Plan, write, render, audio — each ticked off as the run passes it.
+    private func stageSteps(_ progress: Double) -> some View {
+        let steps: [(String, Double)] = [("Plan", 0.02), ("Write", 0.40), ("Render", 0.50), ("Audio", 0.88)]
+        return HStack(spacing: 0) {
+            ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                let done = index + 1 < steps.count ? progress >= steps[index + 1].1 : progress >= 1
+                let active = !done && progress >= step.1
+                HStack(spacing: 4) {
+                    Image(systemName: done ? "checkmark.circle.fill" : (active ? "circle.dotted" : "circle"))
+                        .font(.system(size: 11))
+                    Text(step.0).font(Studio.mono(10, weight: active ? .semibold : .regular))
+                }
+                .foregroundColor(done || active ? Studio.accent : Studio.mute.opacity(0.7))
+                if index + 1 < steps.count { Spacer(minLength: 4) }
+            }
+        }
+    }
+
+    private var resultCard: some View {
+        card {
+            HStack(alignment: .firstTextBaseline) {
+                StudioLabel(text: "Your track")
+                Spacer()
+                Text("\(Self.formatLength(engine.lastDuration)) · made in \(Self.formatLength(Double(engine.elapsedMilliseconds) / 1000))")
+                    .font(Studio.mono(10))
+                    .foregroundColor(Studio.mute)
+            }
+            if !engine.lastPrompt.isEmpty {
+                Text(engine.lastPrompt)
+                    .font(Studio.text(14, weight: .medium))
+                    .foregroundColor(Studio.ink)
+                    .lineLimit(2)
+            }
+            if let url = engine.lastResult {
+                TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+                    let playing = playingClipID == nil && player?.url == url && (player?.isPlaying ?? false)
+                    let position = player?.url == url && (player?.duration ?? 0) > 0
+                        ? (player!.currentTime / player!.duration) : 0
                     HStack(spacing: 12) {
-                        Button { togglePlayback(url) } label: {
-                            Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                                .font(.system(size: 38))
+                        Button { toggleResult(url) } label: {
+                            Image(systemName: playing ? "pause.circle.fill" : "play.circle.fill")
+                                .font(.system(size: 44))
                                 .foregroundColor(Studio.accent)
                         }
                         .buttonStyle(PressableButtonStyle())
-                        ShareLink(item: url) {
-                            Image(systemName: "square.and.arrow.up")
-                                .font(.system(size: 17))
-                                .foregroundColor(Studio.ink.opacity(0.75))
+                        .accessibilityLabel(playing ? "Pause" : "Play")
+                        Group {
+                            if let envelope = resultEnvelope {
+                                WaveformView(buckets: envelope, progress: position, onScrub: { fraction in
+                                    if player?.url != url { preparePlayer(url) }
+                                    if let player { player.currentTime = fraction * player.duration }
+                                })
+                            } else {
+                                WaveformPlaceholder()
+                            }
                         }
-                        Spacer()
+                        .frame(height: 44)
                     }
                 }
+                HStack(spacing: 10) {
+                    ShareLink(item: url) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                            .font(Studio.text(13, weight: .medium))
+                    }
+                    Spacer()
+                    Button { startGenerating() } label: {
+                        Label("New take", systemImage: "arrow.triangle.2.circlepath")
+                            .font(Studio.text(13, weight: .medium))
+                    }
+                    .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .foregroundColor(Studio.accent)
             }
         }
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Studio.sunk))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .strokeBorder(Studio.rule, lineWidth: 0.5))
     }
 
-    private func togglePlayback(_ url: URL) {
-        if isPlaying { player?.pause(); isPlaying = false; return }
-        if player?.url != url {
-            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-            try? AVAudioSession.sharedInstance().setActive(true)
-            player = try? AVAudioPlayer(contentsOf: url)
+    private func preparePlayer(_ url: URL) {
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        player = try? AVAudioPlayer(contentsOf: url)
+        playingClipID = nil
+    }
+
+    private func toggleResult(_ url: URL) {
+        if player?.url == url, playingClipID == nil, player?.isPlaying == true {
+            player?.pause()
+            return
         }
+        if player?.url != url || playingClipID != nil { preparePlayer(url) }
         player?.play()
-        isPlaying = true
+    }
+
+    // MARK: - Library and details
+
+    /// The last few clips, so a generated piece is one tap away rather than
+    /// behind a sheet.
+    private var recentSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                StudioLabel(text: "Recent")
+                Spacer()
+                Button { showLibrary = true } label: {
+                    Text("All \(clips.count) \u{2192}")
+                        .font(Studio.mono(9, weight: .semibold))
+                        .foregroundColor(Studio.accent)
+                }
+            }
+            ForEach(clips.prefix(3)) { clip in
+                MusicRow(clip: clip, isPlaying: playingClipID == clip.id) { toggleClip(clip) }
+            }
+        }
+    }
+
+    private func toggleClip(_ clip: SavedMusic) {
+        if playingClipID == clip.id {
+            player?.stop(); playingClipID = nil; return
+        }
+        guard let url = clip.audioURL, FileManager.default.fileExists(atPath: url.path) else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        player = try? AVAudioPlayer(contentsOf: url)
+        player?.play()
+        playingClipID = clip.id
+    }
+
+    /// The model and memory, out of the way until wanted.
+    private var detailsSection: some View {
+        DisclosureGroup(isExpanded: $showDetails) {
+            VStack(alignment: .leading, spacing: 10) {
+                noteRow(icon: "checkmark.circle",
+                        tint: Studio.ok,
+                        text: "\(selectedModel.displayName) runs on this device. Weights are \(selectedModel.sizeLabel), downloaded once; versions share most of them.")
+                // Kept after a run, so the peak it reached is still readable.
+                if !engine.isBusy && memory.peakMB > 0 {
+                    MusicMemoryGauge(monitor: memory)
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            StudioLabel(text: "Details")
+        }
+        .tint(Studio.mute)
+    }
+
+    // MARK: - Cards
+
+    /// The last run never finished: the app was closed mid-generation. Said
+    /// here rather than on the Transcribe tab, which used to take the blame
+    /// for it when a model happened to be loading at the same time.
+    private var interruptedCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Last generation didn't finish", systemImage: "exclamationmark.triangle")
+                .font(Studio.text(14, weight: .semibold))
+                .foregroundColor(Studio.hot)
+            Text("Whisper was closed while it was generating. If you didn't close it yourself, iOS stopped it — most likely for memory. A shorter piece needs less.")
+                .font(Studio.text(13))
+                .foregroundColor(Studio.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Dismiss") { interruptionDismissed = true }
+                .font(Studio.text(13, weight: .medium))
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Studio.sunk))
     }
 
     private func noteRow(icon: String, tint: Color, text: String) -> some View {
@@ -442,46 +610,58 @@ struct MusicView: View {
         }
     }
 
+    private static func formatBytes(_ bytes: Int64) -> String {
+        bytes >= 1_000_000_000
+            ? String(format: "%.2f GB", Double(bytes) / 1_000_000_000)
+            : "\(bytes / 1_000_000) MB"
+    }
+
+    private static func formatLength(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        guard total >= 60 else { return "\(total)s" }
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
     // MARK: - Generate
 
     private var canGenerate: Bool {
-        engine.isBusy
-            || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        engine.isBusy || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var buttonTitle: String {
-        engine.isBusy ? "Cancel" : "Generate"
+    private func startGenerating() {
+        player?.stop()
+        playingClipID = nil
+        promptFocused = false
+        lyricsFocused = false
+        // Started here rather than from a change in `isBusy`: a run that
+        // fails immediately never lets the view observe the busy state, and
+        // the gauge would never appear.
+        memory.start()
+        engine.generate(model: selectedModel, prompt: prompt,
+                        lyrics: sendsLyrics ? lyrics : "",
+                        language: vocalLanguage,
+                        seconds: effectiveSeconds,
+                        expandsPrompt: expandsPrompt)
     }
 
     private var generateBar: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Studio.rule).frame(height: 1)
             Button {
-                if engine.isBusy {
-                    engine.cancel()
-                } else {
-                    isPlaying = false
-                    player?.stop()
-                    // Started here rather than from a change in `isBusy`: a run
-                    // that fails immediately never lets the view observe the
-                    // busy state, and the gauge would never appear.
-                    memory.start()
-                    engine.generate(model: selectedModel, prompt: prompt,
-                                    lyrics: selectedModel.supportsLyrics ? lyrics : "",
-                                    language: vocalLanguage,
-                                    seconds: effectiveSeconds,
-                                    expandsPrompt: expandsPrompt)
-                }
+                if engine.isBusy { engine.cancel() } else { startGenerating() }
             } label: {
-                Text(buttonTitle)
-                    .font(Studio.text(15, weight: .semibold))
-                    .foregroundColor(canGenerate ? Studio.onAccent : Studio.mute)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 15)
-                    .background(
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .fill(canGenerate ? Studio.accent : Studio.sunk)
-                    )
+                HStack(spacing: 8) {
+                    Image(systemName: engine.isBusy ? "stop.fill" : "wand.and.stars")
+                    Text(engine.isBusy ? "Cancel" : "Generate \(Self.formatLength(effectiveSeconds))")
+                }
+                .font(Studio.text(15, weight: .semibold))
+                .foregroundColor(canGenerate ? Studio.onAccent : Studio.mute)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 15)
+                .background(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(canGenerate ? (engine.isBusy ? Studio.hot : Studio.accent) : Studio.sunk)
+                )
             }
             .buttonStyle(PressableButtonStyle())
             .disabled(!canGenerate)

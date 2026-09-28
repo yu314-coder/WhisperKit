@@ -252,6 +252,22 @@ Letting the planner rewrite the caption (upstream's use_cot_caption) turns
 with a short prompt — but may add what the prompt ruled out, so it is a
 switch ("Fuller arrangement"), off by default.
 
+**Fuller arrangement, on by default (1.2 (32)).** The planner writes its
+own description of the music, as upstream's Think mode does, and the
+user's words go before it, kept as written: "Soft piano" becomes "Soft
+piano. A gentle and introspective instrumental piece led by a clean
+acoustic piano… soft synth pads… a very light shaker…". What it writes may
+not contradict them: an instrumental's description names no voices, a
+prompt naming one voice gets no other ("男歌手", male singer, had been
+described as "breathy female vocal"), and words after "no" or "without"
+are banned ("no drums" had got "a steady drum beat"). Five short prompts,
+two seeds, 45 s on XL, against the prompt alone: CLAP own prompt 0.397 ->
+0.411, rich minus sparse +0.393 -> +0.397, neighbouring windows 0.918 ->
+0.921. Making the planner continue the user's words instead scored 0.376:
+after a short phrase it drops into a comma list ("beat,airy drums,moody"),
+where Qwen's merged tokens (",s", ",p") left it writing fragments —
+"sively,emporary", "BPPM" — at any temperature or min-p.
+
 **Versions.** Both share every file but the transformer:
 
 - *ACE-Step 1.5* runs the 2B transformer on the Neural Engine

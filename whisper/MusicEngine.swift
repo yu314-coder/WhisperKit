@@ -15,7 +15,9 @@ final class MusicEngine {
         case idle
         case downloading(file: String, completed: Int, total: Int,
                          fraction: Double, received: Int64, expected: Int64)
-        case generating(stage: String)
+        /// `progress` runs 0 to 1 over the whole run, weighted by how long
+        /// each stage takes, so one bar can show it.
+        case generating(stage: String, progress: Double = 0)
         case failed(String)
     }
 
@@ -23,6 +25,10 @@ final class MusicEngine {
     private(set) var lastResult: URL?
     private(set) var lastDuration: Double = 0
     private(set) var elapsedMilliseconds: Int = 0
+    /// When the current run started, for the elapsed time shown while it
+    /// works; and the prompt the last result was made from.
+    private(set) var startedAt: Date?
+    private(set) var lastPrompt: String = ""
     /// Shown under the download bar while a dropped transfer is recovered.
     private(set) var downloadNote: String?
     private var currentDownload: String?
@@ -53,8 +59,8 @@ final class MusicEngine {
     /// while the first is still unwinding would hold both in memory.
     func cancel() {
         work?.cancel()
-        if case .generating = phase {
-            phase = .generating(stage: "Stopping")
+        if case .generating(_, let progress) = phase {
+            phase = .generating(stage: "Stopping", progress: progress)
         } else {
             work = nil
             phase = .idle
@@ -69,6 +75,7 @@ final class MusicEngine {
     func generate(model: MusicModel, prompt: String, lyrics: String = "",
                   language: String = "en", seconds: Double, expandsPrompt: Bool = false) {
         guard !isBusy else { return }
+        startedAt = Date()
         work = Task { [weak self] in
             guard let self else { return }
             defer { MusicRunMarker.end() }
@@ -217,14 +224,14 @@ extension MusicEngine {
     func runACEStep(prompt: String, lyrics: String, language: String,
                     seconds: Double, model: MusicModel, expandsPrompt: Bool = false) async throws {
         var generator = ACEGenerator(directory: model.weightsDirectory)
-        generator.plannerRewritesCaption = expandsPrompt
+        generator.plannerExpandsCaption = expandsPrompt
         model.configure(&generator)
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("acestep-\(Int(Date().timeIntervalSince1970)).wav")
         let seed = UInt64.random(in: 0 ... UInt64(UInt32.max))
         let started = Date()
 
-        phase = .generating(stage: "Reading prompt")
+        phase = .generating(stage: "Starting", progress: 0.01)
         // Cancelling `work` does not reach a detached task, and a run left
         // going after Cancel would still hold its memory when the next one
         // starts. The flag carries the request across; the generator checks
@@ -237,22 +244,31 @@ extension MusicEngine {
                                        known: PromptMetadata(parsing: prompt),
                                        isCancelled: { flag.isCancelled }) { stage in
                 let label: String
+                let progress: Double
                 switch stage {
-                case .planning:               label = "Planning the song"
-                case .lengthening:            label = "Filling the full length"
+                case .planning:
+                    (label, progress) = ("Planning the song", 0.02)
+                case .writing(let done, let of):
+                    let part = Double(done) / Double(max(of, 1))
+                    (label, progress) = ("Writing the song", 0.02 + 0.38 * part)
+                case .readingPrompt:
+                    (label, progress) = ("Reading the prompt", 0.41)
+                case .conditioning:
+                    (label, progress) = (lyrics.isEmpty ? "Setting the style" : "Reading the lyrics", 0.44)
                 // iOS compiles each length for the Neural Engine once and
                 // keeps it; a new length can take a minute here.
-                case .preparingEngine:        label = "Preparing the Neural Engine — first time at this length is slow"
-                case .writing(let done, let of):
-                    label = "Writing the song \(Int(Double(done) / Double(max(of, 1)) * 100))%"
-                case .readingPrompt:          label = "Reading prompt"
-                case .conditioning:           label = lyrics.isEmpty ? "Conditioning" : "Reading lyrics"
-                case .step(let step, let of): label = "Step \(step) of \(of)"
-                case .decoding(let fraction): label = "Decoding audio \(Int(fraction * 100))%"
+                case .preparingEngine:
+                    (label, progress) = ("Preparing the Neural Engine — slow the first time at a new length", 0.47)
+                case .step(let step, let of):
+                    (label, progress) = ("Rendering, step \(step) of \(of)", 0.5 + 0.38 * Double(step) / Double(max(of, 1)))
+                case .lengthening:
+                    (label, progress) = ("Filling the full length", 0.5)
+                case .decoding(let fraction):
+                    (label, progress) = ("Making the audio", 0.88 + 0.12 * fraction)
                 }
                 Task { @MainActor [weak self] in
                     guard let self, !flag.isCancelled else { return }
-                    self.phase = .generating(stage: label)
+                    self.phase = .generating(stage: label, progress: progress)
                 }
             }
             }.value
@@ -262,6 +278,7 @@ extension MusicEngine {
 
         lastResult = destination
         lastDuration = seconds
+        lastPrompt = prompt
         elapsedMilliseconds = Int(Date().timeIntervalSince(started) * 1000)
         save(destination, model: model, prompt: prompt, seconds: seconds)
         phase = .idle

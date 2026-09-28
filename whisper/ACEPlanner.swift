@@ -76,8 +76,10 @@ struct ACEPlanner {
     ///     rendered.
     ///   - sections: a timeline from the prompt. Each part is then written
     ///     with its own description, after everything before it.
+    ///   - captionLead: with no caption given, words to put before the
+    ///     description the planner writes; see `reason`.
     func plan(caption: String, lyrics: String, known: Metadata, seconds: Int, seed: UInt64,
-              sections: [PromptMetadata.Section] = [],
+              sections: [PromptMetadata.Section] = [], captionLead: String? = nil,
               isCancelled: () -> Bool, progress: (Stage) -> Void) throws -> Plan {
         var key = MLXRandom.key(seed)
         func nextKey() -> MLXArray {
@@ -88,7 +90,8 @@ struct ACEPlanner {
         let user = Self.userPrompt(caption: caption, lyrics: lyrics)
 
         progress(.reasoning)
-        let (metadata, reasoning) = try reason(user: user, known: known, nextKey: nextKey, isCancelled: isCancelled)
+        let (metadata, reasoning) = try reason(user: user, known: known, captionLead: captionLead,
+                                               nextKey: nextKey, isCancelled: isCancelled)
         let total = seconds * Self.codesPerSecond
         guard !sections.isEmpty else {
             let codes = try writeCodes(user: user, metadata: metadata, count: total,
@@ -129,8 +132,8 @@ struct ACEPlanner {
     /// keep sampled values to one line of plain text. Values that come out
     /// malformed are dropped rather than passed on, as the official parser
     /// does.
-    private func reason(user: String, known: Metadata, nextKey: () -> MLXArray,
-                        isCancelled: () -> Bool) throws -> (Metadata, String) {
+    private func reason(user: String, known: Metadata, captionLead: String? = nil,
+                        nextKey: () -> MLXArray, isCancelled: () -> Bool) throws -> (Metadata, String) {
         let prompt = tokenizer.encode(Self.chatPrompt(user: user), appendEndOfText: false)
         let cache = ACEKVCache(capacity: prompt.count + 512)
         var last = feed(prompt, cache: cache)
@@ -150,11 +153,12 @@ struct ACEPlanner {
         /// value only when what the model would write next is not indented.
         /// Stopping at the first newline — as this once did — cut captions
         /// off mid-phrase.
-        func sampleValue(limit: Int, multiline: Bool = false) -> String {
+        func sampleValue(limit: Int, multiline: Bool = false, mask: MLXArray? = nil) -> String {
             var ids: [Int32] = []
             func text() -> String { tokenizer.decode(ids) }
             for _ in 0 ..< limit {
-                let logits = model.logits(last, rows: textRows)
+                var logits = model.logits(last, rows: textRows)
+                if let mask { logits = logits + mask }
                 let id = Int32(sample(logits, key: nextKey()).item(Int32.self))
                 ids.append(id)
                 written.append(id)
@@ -188,7 +192,29 @@ struct ACEPlanner {
         var result = Metadata(duration: known.duration)
         result.bpm = Int(field("bpm", known.bpm.map(String.init), limit: 6)).flatMap { (30 ... 300).contains($0) ? $0 : nil }
         try checkCancellation(isCancelled)
-        let caption = field("caption", known.caption, limit: 512, multiline: true)
+        // With a lead, the planner writes its own description and the
+        // user's words go before it, so they come first and are never
+        // rewritten. Made to continue the words instead, it fell into a
+        // comma list ("beat,airy drums,moody…") and wrote fragments
+        // ("sively,emporary", "BPPM") at any temperature; written afresh,
+        // as upstream's Think mode does, the description is fluent prose
+        // naming bass, drums, pads and how the piece builds. Five short
+        // prompts, two seeds, 45 s on XL, against the prompt alone: CLAP
+        // own prompt 0.397 -> 0.411, rich minus sparse +0.393 -> +0.397,
+        // neighbouring windows 0.918 -> 0.921. Continuing had scored 0.376.
+        let caption: String
+        if known.caption == nil, let lead = captionLead?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !lead.isEmpty {
+            // What it writes may not contradict the lead: see `bannedWords`.
+            let banned = Self.bannedWords(lead: lead, instrumental: known.language == "unknown")
+            let mask = banned.isEmpty ? nil : Self.wordMask(tokenizer, words: banned, rows: textRows)
+            let stop = ".!?。！？".contains(lead.last!) ? lead : lead + "."
+            force("caption:")
+            let description = sampleValue(limit: 512, multiline: true, mask: mask)
+            caption = description.isEmpty ? lead : "\(stop) \(description)"
+        } else {
+            caption = field("caption", known.caption, limit: 512, multiline: true)
+        }
         result.caption = caption.isEmpty ? nil : caption
         _ = field("duration", String(known.duration), limit: 1)
         let keyscale = field("keyscale", known.keyscale, limit: 8)
@@ -388,6 +414,51 @@ struct ACEPlanner {
             }
         }
         return MLXArray(values, [2, 1, queries, width])
+    }
+
+    /// Words a description written for `lead` may not use. An
+    /// instrumental's names no voices: written freely, "Soft piano" got
+    /// "warmfelt vocals" and a lo-fi beat "male rap". A song whose prompt
+    /// names one voice gets no other: "男歌手" (male singer) was described
+    /// with "breathy female vocal". And nothing the prompt says "no" or
+    /// "without" to: "no drums" got "a steady drum beat".
+    static func bannedWords(lead: String, instrumental: Bool) -> [String] {
+        let voices = ["vocal", "vocals", "vocalist", "voice", "voices", "voiceover", "singer", "singers",
+                      "sing", "sings", "singing", "sung", "rap", "rapper", "rapping", "choir", "choral",
+                      "lyrics", "lyric", "male", "female", "humming", "chant", "chants", "duet", "harmonies"]
+        let male = ["male", "man", "men", "boy", "boys", "masculine", "baritone"]
+        let female = ["female", "woman", "women", "girl", "girls", "feminine", "soprano"]
+        let lower = lead.lowercased()
+        let words = Set(lower.split { !$0.isLetter }.map(String.init))
+        let namesMale = !words.isDisjoint(with: male + ["guy", "tenor"]) || lower.contains("男")
+        let namesFemale = !words.isDisjoint(with: female + ["lady", "alto"]) || lower.contains("女")
+        var banned: [String] = []
+        if instrumental { banned += voices }
+        if namesMale && !namesFemale { banned += female }
+        if namesFemale && !namesMale { banned += male }
+        let negated = try! NSRegularExpression(pattern: #"\b(?:no|without)\s+([a-z]+)"#)
+        for match in negated.matches(in: lower, range: NSRange(lower.startIndex..., in: lower)) {
+            guard let range = Range(match.range(at: 1), in: lower) else { continue }
+            let word = String(lower[range])
+            banned += [word, word.hasSuffix("s") ? String(word.dropLast()) : word + "s"]
+        }
+        return banned
+    }
+
+    /// `words` as an additive mask, in the forms a description writes them.
+    private static func wordMask(_ tokenizer: ACETokenizer, words: [String], rows: Range<Int>) -> MLXArray {
+        var values = [Float](repeating: 0, count: rows.count)
+        for word in words {
+            for form in [word, " " + word, word.capitalized, " " + word.capitalized] {
+                let ids = tokenizer.encode(form, appendEndOfText: false)
+                // Only whole-word tokens: banning the first piece of a
+                // longer word would ban more than it names.
+                if ids.count == 1, rows.contains(Int(ids[0])) {
+                    values[Int(ids[0]) - rows.lowerBound] = -Float.infinity
+                }
+            }
+        }
+        return MLXArray(values, [1, rows.count])
     }
 
     /// Top-p on the untempered distribution, then temperature — mlx-lm's
