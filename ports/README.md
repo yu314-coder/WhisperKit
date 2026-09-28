@@ -158,6 +158,12 @@ top-p 0.9, guidance 2.0, no repetition penalty). Two changes:
 
 **DCW**, upstream's default sampler correction for turbo models, is ported
 (Haar, closed form; latent matches the repository sampler at 0.9999985).
+Its strengths depend on Think: the library default is 0.05 low / 0.02 high,
+but upstream's interface — and its web demo — uses 0.02 / 0.06 with the
+planner on. Builds before 1.2 (28) used the former with the planner. On XL,
+seven prompts at 81 s: abrupt changes 12 -> 7 of 182, windows 15 s apart
+0.870 -> 0.883. Upstream's exact length handling (render only what is
+asked, silence allowed) left 6 of 7 songs with a silent tail again.
 
 Departures from upstream defaults, each deliberate:
 

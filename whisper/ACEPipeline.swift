@@ -85,6 +85,7 @@ enum ACEPipeline {
                         seed: UInt64,
                         noise: MLXArray? = nil,
                         release: (afterStep: Int, conditioning: MLXArray, source: MLXArray)? = nil,
+                        dcw: DCW = .think,
                         onStep: (Int, Int) throws -> Void = { _, _ in }) rethrows -> MLXArray {
         // Context is the source plus a chunk mask of ones: every frame is to
         // be generated. An earlier version sent zeros here — the value
@@ -110,7 +111,7 @@ enum ACEPipeline {
                 x = denoised
             } else {
                 x = x - velocity * (t - schedule[index + 1])
-                x = waveletCorrection(x, denoised: denoised, t: t)
+                x = waveletCorrection(x, denoised: denoised, t: t, strength: dcw)
             }
             eval(x)
             try onStep(index + 1, schedule.count)
@@ -135,19 +136,32 @@ extension ACEPipeline {
         return perSecond.reversed().prefix { $0 < 0.3 }.count
     }
 
+    /// DCW's two strengths.
+    struct DCW: Equatable {
+        var low: Float
+        var high: Float
+        /// What upstream's interface uses with Think on — the planner — and
+        /// so what its web demo runs: 0.02 low, 0.06 high.
+        static let think = DCW(low: 0.02, high: 0.06)
+        /// Upstream's library default, and its interface's with Think off.
+        static let plain = DCW(low: 0.05, high: 0.02)
+    }
+
     /// DCW, the correction the official sampler applies after every turbo
     /// step by default (CVPR 2026, arXiv:2604.16044): split the latent and
     /// the predicted clean sample into low and high bands with a one-level
     /// Haar transform along time, and push each band of the latent away from
-    /// the prediction — the low by t × 0.05, the high by (1 − t) × 0.02.
+    /// the prediction — the low by t × low strength, the high by
+    /// (1 − t) × high strength.
     ///
     /// For Haar the transform pairs neighbouring frames, so the whole
     /// correction is a per-pair formula: with d = x − denoised, frames 2i and
     /// 2i+1 gain low·(d₀+d₁)/2 ± high·(d₀−d₁)/2. An odd final frame pairs
     /// with zero, as pytorch_wavelets pads it. Checked against
     /// pytorch_wavelets to 1e-6.
-    static func waveletCorrection(_ x: MLXArray, denoised: MLXArray, t: Float) -> MLXArray {
-        let (low, high) = (t * 0.05, (1 - t) * 0.02)
+    static func waveletCorrection(_ x: MLXArray, denoised: MLXArray, t: Float,
+                                  strength: DCW = .think) -> MLXArray {
+        let (low, high) = (t * strength.low, (1 - t) * strength.high)
         let (frames, channels) = (x.dim(1), x.dim(2))
         var d = x - denoised
         if frames % 2 == 1 {
@@ -251,6 +265,12 @@ struct ACEGenerator {
     /// Where the transformer's layers run.
     enum Engine { case gpu, neuralEngine }
     var transformerEngine = Engine.gpu
+    /// DCW strengths. With the planner, upstream's Think values; without,
+    /// its plain ones. Build 27 and earlier used the plain values with the
+    /// planner, unlike the official demo.
+    var dcw: ACEPipeline.DCW?
+    /// Keep the silence token out of the plan; see `ACEPlanner.bansSilence`.
+    var plannerBansSilence = true
     /// Sees the planner's output; for diagnostics.
     var onPlan: ((ACEPlanner.Plan) -> Void)?
 
@@ -324,6 +344,7 @@ struct ACEGenerator {
                 var planner = ACEPlanner(model: model, tokenizer: tokenizer)
                 planner.guidance = plannerGuidance
                 planner.copyAllowance = plannerCopyAllowance
+                planner.bansSilence = plannerBansSilence
                 // The caption is the user's, written in verbatim. Upstream
                 // lets the planner rewrite it by default, and at its sampling
                 // temperature a "restrained underscore with soft granular
@@ -445,7 +466,8 @@ struct ACEGenerator {
             }
             func render(release: (Int, MLXArray, MLXArray)?) throws -> MLXArray {
                 try ACEPipeline.diffuse(dit: transformer, conditioning: conditioning, source: source,
-                                        frames: renderFrames, seed: seed, noise: noise, release: release) { step, total in
+                                        frames: renderFrames, seed: seed, noise: noise, release: release,
+                                        dcw: dcw ?? (plan == nil ? .plain : .think)) { step, total in
                     progress(.step(step, total))
                     try checkCancellation()
                 }

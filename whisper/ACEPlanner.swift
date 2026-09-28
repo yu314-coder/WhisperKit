@@ -55,6 +55,8 @@ struct ACEPlanner {
     /// How long an exact copy of earlier tokens may run before continuing
     /// it is discouraged; nil turns the guard off. See `copyPenalties`.
     var copyAllowance: Int? = 12
+    /// Keep the silence token out of what is written.
+    var bansSilence = true
 
     static func chatPrompt(user: String) -> String {
         "<|im_start|>system\n# Instruction\n\(instruction)\n\n<|im_end|>\n"
@@ -263,7 +265,7 @@ struct ACEPlanner {
             let scores = model.logits(last, rows: codeRows)        // (2, codes)
             let (c, u) = (scores[0 ..< 1], scores[1 ..< 2])
             var guided = u + guidance * (c - u)
-            guided = guided + noSilence
+            if bansSilence { guided = guided + noSilence }
             if let allowance = copyAllowance {
                 let penalties = Self.copyPenalties(prefix + codes, allowance: allowance)
                 if !penalties.isEmpty {
