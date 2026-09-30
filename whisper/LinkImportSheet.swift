@@ -114,19 +114,29 @@ struct LinkImportSheet: View {
         failure = nil
         fraction = nil
         downloading = true
+        // Keeps downloading if the app is left; transcription then carries
+        // on in its own background job.
+        let job = BackgroundWork.shared.begin(title: "Downloading for transcription", subtitle: link.host ?? link.absoluteString)
         task = Task {
             do {
                 let file = try await MediaLink.download(link) { value in
-                    Task { @MainActor in fraction = value }
+                    Task { @MainActor in
+                        fraction = value
+                        if let value { job.update(value) }
+                    }
                 }
+                job.finish(success: true)
                 downloading = false
                 onFile(file)
                 dismiss()
             } catch is CancellationError {
+                job.finish(success: false)
                 downloading = false
             } catch let error as URLError where error.code == .cancelled {
+                job.finish(success: false)
                 downloading = false
             } catch {
+                job.finish(success: false)
                 downloading = false
                 failure = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }

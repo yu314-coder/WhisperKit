@@ -36,7 +36,7 @@ Whisper only asks for permissions strictly required for its features:
 - **Microphone** — to record audio you explicitly choose to record.
 - **Photos / Files** — only when you tap the corresponding button to import a file you select.
 - **Notifications** (optional) — to notify you when a long transcription finishes.
-- **Background audio / processing** — so transcription can continue if the app is briefly backgrounded.
+- **Background audio / processing** — so a recording, a transcription, a download or music generation can continue when you switch to another app.
 
 Each permission is requested through the system prompt and can be revoked at any time in iOS Settings.
 

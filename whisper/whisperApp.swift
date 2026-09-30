@@ -3,39 +3,21 @@ import UIKit
 import SwiftData
 import BackgroundTasks
 
-/// Registers background-task handlers at the only moment iOS allows.
+/// Launch setup, and the wake-ups iOS sends for background weight downloads.
 ///
-/// `BGTaskScheduler.register` must be called before
-/// `application(_:didFinishLaunchingWithOptions:)` returns. This used to run
-/// from ContentView's `.onAppear`, which is after launch completes — iOS
-/// raises NSInternalInconsistencyException for that on device, and again if the
-/// same identifier is registered twice. `.onAppear` fires every time a sheet is
-/// dismissed, so opening export or the model picker and coming back was enough
-/// to hit the second case. The Simulator enforces neither, which is why it only
-/// ever crashed on real hardware.
+/// Background work itself is `BackgroundWork`: its continued-processing
+/// tasks register when first used, which iOS allows for that kind of task
+/// only. Any other `BGTaskScheduler.register` must run before
+/// `application(_:didFinishLaunchingWithOptions:)` returns — from a view's
+/// `.onAppear` it crashed on device, and again on a second registration.
 final class AppDelegate: NSObject, UIApplicationDelegate {
-    static let transcriptionTaskID = "com.whisper.transcription"
-
-    /// Set by ContentView so the handler can reach the running view's logic.
-    static var transcriptionHandler: ((BGTask) -> Void)?
-
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         _ = MusicRunMarker.wasInterrupted   // what the last run left, before anything changes it
+        BackgroundWork.shared.start()
         DispatchQueue.global(qos: .utility).async { MusicModel.removeRetiredWeights() }
-        BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: Self.transcriptionTaskID,
-            using: nil
-        ) { task in
-            guard let handler = Self.transcriptionHandler else {
-                // Nothing is listening yet — end cleanly rather than hang.
-                task.setTaskCompleted(success: false)
-                return
-            }
-            handler(task)
-        }
         return true
     }
 

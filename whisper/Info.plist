@@ -12,7 +12,7 @@
 	<string>Whisper sends a notification when a long transcription finishes, so you don't have to keep the app open.</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.whisper.transcription</string>
+		<string>euleryu.whisper.work.*</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>

@@ -137,8 +137,8 @@ struct ContentView: View {
     
     // Background handling
     @Environment(\.scenePhase) private var scenePhase
-    @State private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
-    @State private var backgroundTaskProgress: Progress?
+    /// Keeps a transcription going when the app is left; see `BackgroundWork`.
+    @State private var transcriptionJob: BackgroundWork.Job?
     
     // Live Activity
     @State private var currentActivity: Activity<TranscriptionAttributes>?
@@ -316,7 +316,13 @@ struct ContentView: View {
         }
         .onChange(of: incoming.file) { _, _ in takeIncomingFile() }
         .onChange(of: isModelLoaded) { _, _ in takeIncomingFile() }
-        .onChange(of: isProcessing) { _, _ in takeIncomingFile() }
+        .onChange(of: isProcessing) { _, processing in
+            if !processing {
+                transcriptionJob?.finish(success: errorMessage == nil)
+                transcriptionJob = nil
+            }
+            takeIncomingFile()
+        }
         .onAppear {
             // Fires again whenever a sheet is dismissed, so everything here
             // must be safe to repeat.
@@ -340,11 +346,7 @@ struct ContentView: View {
                     updateLiveActivity()
                 }
             }
-            setupBackgroundAudio()
             requestNotificationPermissions()
-            AppDelegate.transcriptionHandler = { task in
-                handleBackgroundTranscription(task: task)
-            }
             cleanupStaleActivities()
         }
         .onDisappear {
@@ -1829,48 +1831,6 @@ struct ContentView: View {
     // MARK: - Background Processing
 
 
-    func handleBackgroundTranscription(task: BGTask) {
-        // Setup progress reporting for BGContinuedProcessingTask
-        let progress = Progress(totalUnitCount: 100)
-        backgroundTaskProgress = progress
-
-        task.expirationHandler = {
-            // Task is about to expire
-            task.setTaskCompleted(success: false)
-        }
-
-        // The actual transcription continues with progress updates
-        // Progress is automatically synced through our existing progress reporting
-    }
-
-    func setupBackgroundAudio() {
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            // Use .playback for background audio processing
-            // This keeps the app active in background for audio processing
-            try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers, .duckOthers, .allowAirPlay])
-            try audioSession.setActive(true)
-
-            // Play silent audio to keep session active
-            playSilentAudio()
-        } catch {
-            print("Failed to setup background audio: \(error)")
-        }
-    }
-
-    func playSilentAudio() {
-        // This keeps the audio session active in background
-        // which helps maintain app processing capability
-        Task {
-            do {
-                let audioSession = AVAudioSession.sharedInstance()
-                try audioSession.setActive(true)
-            } catch {
-                print("Failed to activate audio session: \(error)")
-            }
-        }
-    }
-    
     func requestNotificationPermissions() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             if let error = error {
@@ -1892,18 +1852,18 @@ struct ContentView: View {
                 loadAwayFromScreen = modelLoadInFlightVariant
                 modelLoadInFlight = false
             }
-            if isProcessing {
-                // Ensure audio session is active
-                setupBackgroundAudio()
-                beginBackgroundTask()
+            // A transcription carries on by itself (`BackgroundWork`); on iOS
+            // 26 the system shows its progress, earlier the Live Activity does.
+            if isProcessing && !isRecording && !BackgroundWork.shared.systemShowsProgress {
                 startLiveActivity()
 
-                // Show alert about background limitations
+                // Before iOS 26 the app only gets a short time in the
+                // background; say so, once.
                 if !UserDefaults.standard.bool(forKey: "hasSeenBackgroundWarning") {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                         let content = UNMutableNotificationContent()
                         content.title = "Processing in Background"
-                        content.body = "Keep app in foreground for best performance. Background processing may be limited."
+                        content.body = "Transcription pauses soon after you leave the app on this version of iOS, and continues when you come back."
                         content.sound = .default
 
                         let request = UNNotificationRequest(identifier: "bg-warning", content: content, trigger: nil)
@@ -1919,48 +1879,10 @@ struct ContentView: View {
                 modelLoadInFlight = true
                 modelLoadInFlightVariant = variant
             }
-            endBackgroundTask()
-            // Reactivate audio session when returning to foreground
-            if isProcessing {
-                setupBackgroundAudio()
-            }
         case .inactive:
             break
         @unknown default:
             break
-        }
-    }
-    
-    func beginBackgroundTask() {
-        // For iOS 26+, submit BGContinuedProcessingTask
-        if #available(iOS 16.0, *) {
-            submitContinuedProcessingTask()
-        }
-
-        // Also use traditional background task as fallback
-        backgroundTask = UIApplication.shared.beginBackgroundTask { [self] in
-            self.endBackgroundTask()
-        }
-    }
-
-    func submitContinuedProcessingTask() {
-        if #available(iOS 16.0, *) {
-            let request = BGProcessingTaskRequest(identifier: "com.whisper.transcription")
-            request.requiresNetworkConnectivity = false
-            request.requiresExternalPower = false
-
-            do {
-                try BGTaskScheduler.shared.submit(request)
-            } catch {
-                print("Could not schedule background task: \(error)")
-            }
-        }
-    }
-    
-    func endBackgroundTask() {
-        if backgroundTask != .invalid {
-            UIApplication.shared.endBackgroundTask(backgroundTask)
-            backgroundTask = .invalid
         }
     }
     
@@ -2192,15 +2114,24 @@ struct ContentView: View {
             if findModelDirectory(for: model) == nil {
                 statusMessage = "Downloading \(model.displayName) — \(model.sizeLabel)"
                 downloadProgress = 0
-                _ = try await WhisperKit.download(
-                    variant: model.rawValue,
-                    downloadBase: modelsDir,
-                    progressCallback: { progress in
-                        Task { @MainActor in
-                            self.downloadProgress = progress.fractionCompleted
+                // The download keeps going if the app is left.
+                let job = BackgroundWork.shared.begin(title: "Downloading \(model.displayName)", subtitle: model.sizeLabel)
+                do {
+                    _ = try await WhisperKit.download(
+                        variant: model.rawValue,
+                        downloadBase: modelsDir,
+                        progressCallback: { progress in
+                            Task { @MainActor in
+                                self.downloadProgress = progress.fractionCompleted
+                                job.update(progress.fractionCompleted)
+                            }
                         }
-                    }
-                )
+                    )
+                    job.finish(success: true)
+                } catch {
+                    job.finish(success: false)
+                    throw error
+                }
                 try Task.checkCancellation()
                 downloadStatus[model] = true
             }
@@ -2718,6 +2649,13 @@ struct ContentView: View {
         await MainActor.run {
             statusMessage = "Reading file…"
             isProcessing = true
+            // Everything from here — reading the file, transcribing it —
+            // keeps going if the app is left. GPU mode needs background GPU
+            // time; where the device has none, decoding pauses until return.
+            if transcriptionJob == nil {
+                transcriptionJob = BackgroundWork.shared.begin(
+                    title: "Transcribing", subtitle: sourceURL.lastPathComponent, usesGPU: computeMode == .gpu)
+            }
             streamingTranscript = ""
             resetResult()
             // Start sampling here rather than in transcribeAudio: copying and
@@ -2782,8 +2720,9 @@ struct ContentView: View {
                 isProcessing = false
                 statusMessage = ""
                 monitor.stopSystemMonitoring()
-                endBackgroundTask()
                 endLiveActivity()
+                transcriptionJob?.finish(success: false)
+                transcriptionJob = nil
             }
         }
     }
@@ -3015,8 +2954,9 @@ struct ContentView: View {
             lastProgressUpdate = Date()
             monitor.startSystemMonitoring()
 
-            // Only start Live Activity if in background
-            if scenePhase == .background {
+            // Only start Live Activity if in background, and only where iOS
+            // isn't already showing the progress itself.
+            if scenePhase == .background && !BackgroundWork.shared.systemShowsProgress {
                 startLiveActivity()
             }
         }
@@ -3038,11 +2978,6 @@ struct ContentView: View {
                 userInfo: [NSLocalizedDescriptionKey:
                     "The transcription model isn't loaded. Open the model picker and tap Reload, then try again."]
             )
-        }
-
-        // Ensure we're keeping the app active
-        await MainActor.run {
-            setupBackgroundAudio()
         }
 
         // Convert any input to 16 kHz mono 16-bit PCM WAV. This avoids
@@ -3131,11 +3066,15 @@ struct ContentView: View {
         // returns, so dropping trailing intermediate frames costs nothing.
         let throttle = ProgressThrottle(interval: 0.1)
         let stream = StreamingTranscriptBuffer()
+        // Core ML on the GPU can't run off screen without background GPU
+        // time: wait between tokens until it can.
+        let usesGPU = await MainActor.run { computeMode == .gpu }
 
         let results = try await whisper.transcribe(
             audioPath: workURL.path,
             decodeOptions: options,
             callback: { progress in
+                if usesGPU { GPUGate.waitUntilOpen() }
                 guard throttle.shouldPush() else { return nil }
                 let windowId = progress.windowId
                 let text = progress.text
@@ -3152,10 +3091,8 @@ struct ContentView: View {
                         // Clamp between 0 and 0.99 (never show 100% until complete)
                         self.transcriptionProgress = min(0.99, max(0.0, rawProgress))
 
-                        // Update background task progress
-                        if let bgProgress = self.backgroundTaskProgress {
-                            bgProgress.completedUnitCount = Int64(self.transcriptionProgress * 100)
-                        }
+                        // Mirror it into the system's background banner.
+                        self.transcriptionJob?.update(self.transcriptionProgress)
                     }
                     
                     // Update streaming text. Merged across windows so the live
@@ -3256,8 +3193,9 @@ struct ContentView: View {
             statusMessage = ""
             transcriptionProgress = 0.0
             monitor.stopSystemMonitoring()
-            endBackgroundTask()
             endLiveActivity()
+            transcriptionJob?.finish(success: errorMessage == nil)
+            transcriptionJob = nil
         }
     }
 }

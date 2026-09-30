@@ -1,6 +1,8 @@
 import Foundation
 import Observation
 import SwiftData
+import UIKit
+import UserNotifications
 import MLX
 
 /// Fetches model weights and runs generation for the Music tab.
@@ -21,7 +23,9 @@ final class MusicEngine {
         case failed(String)
     }
 
-    private(set) var phase: Phase = .idle
+    private(set) var phase: Phase = .idle {
+        didSet { reportProgressToSystem() }
+    }
     private(set) var lastResult: URL?
     private(set) var lastDuration: Double = 0
     private(set) var elapsedMilliseconds: Int = 0
@@ -35,6 +39,10 @@ final class MusicEngine {
     private var currentDownload: String?
 
     private var work: Task<Void, Never>?
+    /// Keeps the run going when the app is left; see `BackgroundWork`.
+    private var backgroundJob: BackgroundWork.Job?
+    /// iOS ended the run in the background, to say so rather than just stop.
+    private var endedInBackground = false
 
     /// Set by the view so a finished clip can be filed in the library.
     var modelContext: ModelContext?
@@ -77,21 +85,72 @@ final class MusicEngine {
                   language: String = "en", seconds: Double, expandsPrompt: Bool = false) {
         guard !isBusy else { return }
         startedAt = Date()
+        endedInBackground = false
+        // The whole run — download, then generation — keeps going when the
+        // app is left. It needs the GPU throughout (MLX), so where the device
+        // can't lend it to the background, it pauses until the app is back.
+        let job = BackgroundWork.shared.begin(title: "Making music", subtitle: Self.shortened(prompt), usesGPU: true)
+        job.onExpire = { [weak self] in
+            self?.endedInBackground = true
+            self?.cancel()
+        }
+        backgroundJob = job
         work = Task { [weak self] in
             guard let self else { return }
-            defer { MusicRunMarker.end() }
+            defer {
+                MusicRunMarker.end()
+                self.backgroundJob = nil
+            }
             do {
                 try await self.fetchWeightsIfNeeded(for: model)
                 try Task.checkCancellation()
                 try await self.runGeneration(model: model, prompt: prompt, lyrics: lyrics,
                                              language: language, seconds: seconds,
                                              expandsPrompt: expandsPrompt)
+                job.finish(success: true)
+                self.notifyIfAway(title: "Your music is ready", body: Self.shortened(prompt))
             } catch is CancellationError {
-                self.phase = .idle
+                job.finish(success: false)
+                if self.endedInBackground {
+                    self.phase = .failed("Stopped in the background — iOS needed the device's resources. Generate again with the app open.")
+                    self.notifyIfAway(title: "Music stopped", body: "iOS stopped the generation in the background. Open Whisper to try again.")
+                } else {
+                    self.phase = .idle
+                }
             } catch {
+                job.finish(success: false)
                 self.phase = .failed(error.localizedDescription)
+                self.notifyIfAway(title: "Music couldn't be made", body: error.localizedDescription)
             }
         }
+    }
+
+    /// Mirrors the run's progress into the system's background banner.
+    private func reportProgressToSystem() {
+        guard let backgroundJob else { return }
+        switch phase {
+        case .downloading(_, _, _, let fraction, _, _):
+            backgroundJob.update(fraction, "Downloading the music model")
+        case .generating(let stage, let progress):
+            backgroundJob.update(progress, stage)
+        case .idle, .failed:
+            break
+        }
+    }
+
+    /// A notification when a run ends while the user is in another app.
+    private func notifyIfAway(title: String, body: String) {
+        guard UIApplication.shared.applicationState != .active else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
+    private static func shortened(_ text: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        return line.count > 60 ? String(line.prefix(57)) + "…" : line
     }
 
     // MARK: - Weights
@@ -243,7 +302,11 @@ extension MusicEngine {
             _ = try generator.generate(caption: prompt, lyrics: lyrics, language: language,
                                        seconds: seconds, seed: seed, to: destination,
                                        known: PromptMetadata(parsing: prompt),
-                                       isCancelled: { flag.isCancelled }) { stage in
+                                       // Off screen without background GPU time,
+                                       // wait here: MLX would crash on a
+                                       // refused command buffer.
+                                       isCancelled: { GPUGate.waitUntilOpen(); return flag.isCancelled }) { stage in
+                GPUGate.waitUntilOpen()
                 let label: String
                 let progress: Double
                 switch stage {
