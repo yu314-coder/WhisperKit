@@ -111,9 +111,13 @@ struct MusicView: View {
             engine.modelContext = modelContext
             #if DEBUG
             // For testing downloads in the Simulator, whose keyboard covers
-            // Generate: launch with `-MusicPromptPreset "…"`.
+            // Generate: launch with `-MusicPromptPreset "…"` (and
+            // `-MusicLyricsPreset "…"` for App Store screenshots).
             if prompt.isEmpty, let preset = UserDefaults.standard.string(forKey: "MusicPromptPreset") {
                 prompt = preset
+            }
+            if lyrics.isEmpty, let preset = UserDefaults.standard.string(forKey: "MusicLyricsPreset") {
+                lyrics = preset
             }
             // History can't be made in the Simulator, which can't generate:
             // `-MusicSeedHistory YES` adds two songs to look at.

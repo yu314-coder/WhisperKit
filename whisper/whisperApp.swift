@@ -70,6 +70,7 @@ struct whisperApp: App {
 struct RootView: View {
     private enum Tab { case transcribe, music }
     @State private var tab = Tab.transcribe
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     init() {
         // The "Beta" badge in the app's colour: in the default red it read
@@ -92,7 +93,9 @@ struct RootView: View {
                 .tag(Tab.transcribe)
             MusicView()
                 .tabItem { Label("Music", systemImage: "music.note") }
-                .badge("Beta")
+                // iPad's floating tab bar draws badges only in red, over the
+                // label; there the Music page's own BETA tag says it.
+                .badge(sizeClass == .compact ? Text("Beta") : nil)
                 .tag(Tab.music)
         }
         .tint(Studio.accent)

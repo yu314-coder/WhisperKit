@@ -650,6 +650,9 @@ struct ContentView: View {
                 .font(.system(size: isRegularWidth ? 44 : 36, weight: .semibold))
                 .foregroundColor(Self.paperInk)
                 .lineSpacing(2)
+                // Both lines, always: on the 6.9" iPhone, where the page is
+                // centred in a taller screen, it was cut to "A quiet place…".
+                .fixedSize(horizontal: false, vertical: true)
 
             Text(emptyStateBlurb)
                 .font(.system(size: 16))

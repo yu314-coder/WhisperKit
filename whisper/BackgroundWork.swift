@@ -18,8 +18,9 @@ import BackgroundTasks
 final class BackgroundWork {
     static let shared = BackgroundWork()
 
-    /// Submitted identifiers are this plus a unique suffix; Info.plist's
-    /// BGTaskSchedulerPermittedIdentifiers permits "euleryu.whisper.work.*".
+    /// Each task's identifier is this plus a unique suffix, registered on
+    /// its own; Info.plist's BGTaskSchedulerPermittedIdentifiers permits
+    /// "euleryu.whisper.work.*".
     private static let prefix = "euleryu.whisper.work"
 
     /// One piece of work, from `begin` until `finish`.
@@ -53,7 +54,6 @@ final class BackgroundWork {
     }
 
     private var jobs: [String: Job] = [:]
-    private var registered = false
 
     private init() {}
 
@@ -133,13 +133,27 @@ final class BackgroundWork {
 
     @available(iOS 26.0, *)
     private func submit(_ job: Job) -> Bool {
-        registerIfNeeded()
         // Work that needs the GPU but can't have it in the background would
         // sit at `GPUGate` making no progress, and iOS ends stalled tasks. It
         // takes the short background task instead, pauses, and carries on
         // when the app is opened again.
         let gpuSupported = BGTaskScheduler.supportedResources.contains(.gpu)
         guard !job.wantsGPU || gpuSupported else { return false }
+        // Each task registers under its own full identifier, which the
+        // wildcard in Info.plist permits. iOS rejects registering the
+        // wildcard itself ("not advertised in the application's
+        // Info.plist"), and submitting an unregistered task isn't an error
+        // it returns: it ends the app — build 38 closed whenever a download,
+        // transcription or song started. So: register, and submit only if
+        // that worked.
+        let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: job.id, using: nil) { task in
+            guard let task = task as? BGContinuedProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            Task { @MainActor in BackgroundWork.shared.attach(task) }
+        }
+        guard registered else { return false }
         let request = BGContinuedProcessingTaskRequest(identifier: job.id, title: job.title, subtitle: job.subtitle)
         // Fail rather than queue: queued work would sit suspended in the
         // background without anyone knowing. The short background task is
@@ -152,19 +166,6 @@ final class BackgroundWork {
             return true
         } catch {
             return false    // busy, or the GPU entitlement was refused
-        }
-    }
-
-    @available(iOS 26.0, *)
-    private func registerIfNeeded() {
-        guard !registered else { return }
-        registered = true
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.prefix + ".*", using: nil) { task in
-            guard let task = task as? BGContinuedProcessingTask else {
-                task.setTaskCompleted(success: false)
-                return
-            }
-            Task { @MainActor in BackgroundWork.shared.attach(task) }
         }
     }
 
