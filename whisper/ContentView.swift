@@ -71,6 +71,9 @@ struct ContentView: View {
     /// A model the app was terminated while loading. It is not loaded again
     /// automatically until a load of it completes — see `checkModelStatus()`.
     @AppStorage("crashedModelVariant") private var crashedModelVariant = ""
+    /// Models whose folder is known to be complete, so they may load
+    /// straight from it; see `attemptModelPreparation`.
+    @AppStorage("verifiedWhisperModels") private var verifiedModels = ""
     /// A load that was in flight when the app went to the background. The
     /// persisted flag is lowered for as long as the app is away and raised
     /// again on return if the load is still going; see
@@ -2117,6 +2120,7 @@ struct ContentView: View {
             if findModelDirectory(for: model) == nil {
                 statusMessage = "Downloading \(model.displayName) — \(model.sizeLabel)"
                 downloadProgress = 0
+                setVerified(model, false)
                 // The download keeps going if the app is left.
                 let job = BackgroundWork.shared.begin(title: "Downloading \(model.displayName)", subtitle: model.sizeLabel)
                 do {
@@ -2131,6 +2135,8 @@ struct ContentView: View {
                         }
                     )
                     job.finish(success: true)
+                    // Every file fetched and checked against Hugging Face.
+                    setVerified(model, true)
                 } catch {
                     job.finish(success: false)
                     throw error
@@ -2181,11 +2187,41 @@ struct ContentView: View {
             // stall becomes a recoverable error instead of a dead end.
             // Generous, because a cold Core ML specialisation of a large model
             // genuinely can take minutes on older hardware.
+            // Straight from the downloaded folder. Given only the model's
+            // name, WhisperKit first asked Hugging Face about every one of its
+            // files (44 for Turbo) on every launch: timed on the Mac with the
+            // model already cached, 11.5 s on the GPU and 6.9 s on the Neural
+            // Engine, against 1.3 s for either from the folder — the check
+            // alone was 5 s of network. But Core ML doesn't report a missing
+            // weights file, it crashes the process, so only a folder known to
+            // be complete takes this path: one that a finished download or a
+            // load through the checking path has confirmed.
+            let folder = findModelDirectory(for: model).flatMap { isVerified(model) && Self.hasWeights($0) ? $0 : nil }
+            let options = computeMode.computeOptions(for: model)
             let kit = try await withModelLoadTimeout(seconds: needsPrewarm ? 420 : 180) {
-                try await WhisperKit(
+                if let folder {
+                    do {
+                        return try await WhisperKit(
+                            downloadBase: modelsDir,
+                            modelFolder: folder.path,
+                            computeOptions: options,
+                            verbose: false,
+                            logLevel: .error,
+                            prewarm: needsPrewarm,
+                            load: true,
+                            download: false
+                        )
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        // Damaged after all: let the download path repair it.
+                        await MainActor.run { setVerified(model, false) }
+                    }
+                }
+                return try await WhisperKit(
                     model: model.rawValue,
                     downloadBase: modelsDir,
-                    computeOptions: computeMode.computeOptions(for: model),
+                    computeOptions: options,
                     verbose: false,
                     logLevel: .error,
                     prewarm: needsPrewarm,
@@ -2193,6 +2229,7 @@ struct ContentView: View {
                 )
             }
             try Task.checkCancellation()
+            setVerified(model, true)
             modelLoadInFlight = false
             modelLoadInFlightVariant = ""
             loadAwayFromScreen = nil
@@ -2362,7 +2399,32 @@ struct ContentView: View {
 
     /// Frees a downloaded model's files. The full lineup runs to ~2.9 GB, so
     /// reclaiming space needs to be possible in-app.
+    /// Whether `model`'s folder is known complete (see `attemptModelPreparation`).
+    private func isVerified(_ model: WhisperModel) -> Bool {
+        verifiedModels.split(separator: ",").contains { $0 == model.rawValue }
+    }
+
+    private func setVerified(_ model: WhisperModel, _ verified: Bool) {
+        var set = Set(verifiedModels.split(separator: ",").map(String.init))
+        if verified { set.insert(model.rawValue) } else { set.remove(model.rawValue) }
+        verifiedModels = set.sorted().joined(separator: ",")
+    }
+
+    /// The three models' weights are all there and not empty — a last check
+    /// before a load that would crash on a missing file.
+    private static func hasWeights(_ folder: URL) -> Bool {
+        ["MelSpectrogram", "AudioEncoder", "TextDecoder"].allSatisfy { name in
+            let compiled = folder.appendingPathComponent("\(name).mlmodelc")
+            let weights = compiled.appendingPathComponent("weights/weight.bin")
+            let size = (try? FileManager.default.attributesOfItem(atPath: weights.path)[.size] as? Int) ?? 0
+            // The mel spectrogram model may carry no weights file at all.
+            return size > 0 || (name == "MelSpectrogram"
+                && FileManager.default.fileExists(atPath: compiled.appendingPathComponent("coremldata.bin").path))
+        }
+    }
+
     func deleteModel(_ model: WhisperModel) {
+        setVerified(model, false)
         if let dir = findModelDirectory(for: model) {
             try? FileManager.default.removeItem(at: dir)
         }
