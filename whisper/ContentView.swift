@@ -74,6 +74,9 @@ struct ContentView: View {
     /// Models whose folder is known to be complete, so they may load
     /// straight from it; see `attemptModelPreparation`.
     @AppStorage("verifiedWhisperModels") private var verifiedModels = ""
+    /// How long the last model load took, and where the time went — shown in
+    /// the model sheet, to find what makes opening the app slow on a device.
+    @AppStorage("lastModelLoadReport") private var lastLoadReport = ""
     /// A load that was in flight when the app went to the background. The
     /// persisted flag is lowered for as long as the app is away and raised
     /// again on return if the load is still going; see
@@ -1450,6 +1453,16 @@ struct ContentView: View {
                 .buttonStyle(PressableButtonStyle())
             }
 
+            // Where the last load's time went, to see what makes opening
+            // slow on this device.
+            if !lastLoadReport.isEmpty && !isPreparingModel {
+                Label(lastLoadReport, systemImage: "stopwatch")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(Self.paperMute)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+
             modelPreparationStatus
 
             Text("Each model is downloaded once and runs entirely on this device, on the GPU or the Neural Engine — your choice below. Larger models are slower but more accurate, especially across languages.")
@@ -2196,12 +2209,13 @@ struct ContentView: View {
             // weights file, it crashes the process, so only a folder known to
             // be complete takes this path: one that a finished download or a
             // load through the checking path has confirmed.
+            let loadStart = Date()
             let folder = findModelDirectory(for: model).flatMap { isVerified(model) && Self.hasWeights($0) ? $0 : nil }
             let options = computeMode.computeOptions(for: model)
-            let kit = try await withModelLoadTimeout(seconds: needsPrewarm ? 420 : 180) {
+            let (kit, fromFolder) = try await withModelLoadTimeout(seconds: needsPrewarm ? 420 : 180) {
                 if let folder {
                     do {
-                        return try await WhisperKit(
+                        return (try await WhisperKit(
                             downloadBase: modelsDir,
                             modelFolder: folder.path,
                             computeOptions: options,
@@ -2210,7 +2224,7 @@ struct ContentView: View {
                             prewarm: needsPrewarm,
                             load: true,
                             download: false
-                        )
+                        ), true)
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
@@ -2218,7 +2232,7 @@ struct ContentView: View {
                         await MainActor.run { setVerified(model, false) }
                     }
                 }
-                return try await WhisperKit(
+                return (try await WhisperKit(
                     model: model.rawValue,
                     downloadBase: modelsDir,
                     computeOptions: options,
@@ -2226,9 +2240,12 @@ struct ContentView: View {
                     logLevel: .error,
                     prewarm: needsPrewarm,
                     load: true
-                )
+                ), false)
             }
             try Task.checkCancellation()
+            lastLoadReport = Self.loadReport(model: model, mode: effectiveMode(for: model), prewarmed: needsPrewarm,
+                                             fromFolder: fromFolder, total: Date().timeIntervalSince(loadStart),
+                                             timings: kit.currentTimings)
             setVerified(model, true)
             modelLoadInFlight = false
             modelLoadInFlightVariant = ""
@@ -2399,6 +2416,20 @@ struct ContentView: View {
 
     /// Frees a downloaded model's files. The full lineup runs to ~2.9 GB, so
     /// reclaiming space needs to be possible in-app.
+    /// "Turbo on the GPU: ready in 58.2 s — encoder 51.0 s, decoder 4.1 s…"
+    private static func loadReport(model: WhisperModel, mode: ComputeMode, prewarmed: Bool, fromFolder: Bool,
+                                   total: TimeInterval, timings: TranscriptionTimings) -> String {
+        func s(_ t: TimeInterval) -> String { String(format: "%.1f s", t) }
+        var parts = ["encoder \(s(timings.encoderLoadTime))", "decoder \(s(timings.decoderLoadTime))",
+                     "tokenizer \(s(timings.tokenizerLoadTime))"]
+        if prewarmed {
+            parts.append("first-time preparation \(s(timings.prewarmLoadTime))")
+        }
+        let source = fromFolder ? "from the downloaded folder" : "after checking the files with Hugging Face"
+        let when = Date().formatted(date: .abbreviated, time: .shortened)
+        return "\(model.displayName) on the \(mode.shortName): ready in \(s(total)) — \(parts.joined(separator: ", ")). Loaded \(source). (\(when))"
+    }
+
     /// Whether `model`'s folder is known complete (see `attemptModelPreparation`).
     private func isVerified(_ model: WhisperModel) -> Bool {
         verifiedModels.split(separator: ",").contains { $0 == model.rawValue }
