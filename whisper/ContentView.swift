@@ -112,6 +112,9 @@ struct ContentView: View {
     }
     @State private var downloadStatus: [WhisperModel: Bool] = [:]
     @State private var showingFilePicker = false
+    @State private var showLinkSheet = false
+    /// Files shared to the app from elsewhere; see `takeIncomingFile`.
+    @State private var incoming = IncomingMedia.shared
     @State private var statusMessage = ""
     @State private var selectedPhotoItem: PhotosPickerItem?
     @AppStorage("selectedLanguage") private var selectedLanguage: String = "auto"
@@ -302,6 +305,18 @@ struct ContentView: View {
         ) { result in
             handleFileImport(result)
         }
+        .sheet(isPresented: $showLinkSheet) {
+            LinkImportSheet { file in
+                Task {
+                    await importAndTranscribeFile(from: file)
+                    try? FileManager.default.removeItem(at: file)
+                }
+            }
+            .presentationDetents([.medium, .large])
+        }
+        .onChange(of: incoming.file) { _, _ in takeIncomingFile() }
+        .onChange(of: isModelLoaded) { _, _ in takeIncomingFile() }
+        .onChange(of: isProcessing) { _, _ in takeIncomingFile() }
         .onAppear {
             // Fires again whenever a sheet is dismissed, so everything here
             // must be safe to repeat.
@@ -565,6 +580,8 @@ struct ContentView: View {
                         .overlay(Circle().strokeBorder(Self.paperRule, lineWidth: 0.5))
                 }
                 .buttonStyle(PressableButtonStyle())
+
+                HelpButton(topic: .transcribe)
             }
         }
         .padding(.horizontal, gutter)
@@ -648,14 +665,35 @@ struct ContentView: View {
                 // The model is already on disk and simply loading. Showing the
                 // whole "choose a model" grid here implied a decision the user
                 // had already made, and hid the fact that they can just record.
+                waitingFileNote
                 modelPreparationStatus
                     .padding(.top, 4)
             } else {
+                waitingFileNote
                 inlineModelPicker
                     .padding(.top, 8)
             }
 
             recentSection
+        }
+    }
+
+    /// A shared file waiting for a model, named above the model picker.
+    @ViewBuilder
+    var waitingFileNote: some View {
+        if let file = incoming.file {
+            Label {
+                Text("\(file.lastPathComponent) is ready to transcribe. It starts as soon as a model is loaded — choose one below if you haven't yet.")
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "waveform.badge.plus")
+                    .foregroundColor(Studio.accent)
+            }
+            .font(Studio.text(14))
+            .foregroundColor(Studio.ink)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Studio.accent.opacity(0.08)))
         }
     }
 
@@ -1308,12 +1346,11 @@ struct ContentView: View {
                 .buttonStyle(PressableButtonStyle())
                 .disabled(isProcessing && !isRecording)
 
-                Button {
-                    showLibrary = true
-                } label: {
-                    editorialIconButtonLabel(icon: "books.vertical")
+                // Was a second library button; the library is in the top bar.
+                editorialIconButton(icon: "link", disabled: !canCapture || isProcessing) {
+                    showLinkSheet = true
                 }
-                .buttonStyle(PressableButtonStyle())
+                .accessibilityLabel("Transcribe a link")
             }
         }
         .padding(.horizontal, gutter)
@@ -2558,6 +2595,19 @@ struct ContentView: View {
     
     // MARK: - File Import
     
+    /// A file shared to the app or opened with it: transcribed once a model
+    /// is loaded and nothing else is running. Until then it waits — and if
+    /// no model is loaded yet, the model picker says so (`waitingFileNote`).
+    func takeIncomingFile() {
+        guard let url = incoming.file else { return }
+        guard isModelLoaded, !isProcessing else { return }
+        incoming.file = nil
+        Task {
+            await importFileDirectly(from: url)
+            IncomingMedia.removeIfCopied(url)
+        }
+    }
+
     func handleFileImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):

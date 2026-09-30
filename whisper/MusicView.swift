@@ -174,6 +174,16 @@ struct MusicView: View {
                 Text("music")
                     .font(Studio.mono(13, weight: .semibold))
                     .foregroundColor(Studio.ink)
+                // Said on the tab and here, so App Store users know the
+                // feature is still being improved.
+                Text("BETA")
+                    .font(Studio.mono(9, weight: .bold))
+                    .tracking(1)
+                    .foregroundColor(Studio.accent)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Studio.accent.opacity(0.12)))
+                    .accessibilityLabel("Beta")
             }
             Spacer()
             Button { showModelPicker = true } label: {
@@ -205,6 +215,9 @@ struct MusicView: View {
             .buttonStyle(PressableButtonStyle())
             .padding(.leading, 8)
             .accessibilityLabel("Library")
+
+            HelpButton(topic: .music)
+                .padding(.leading, 6)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
