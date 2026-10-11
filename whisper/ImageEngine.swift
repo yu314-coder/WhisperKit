@@ -109,19 +109,22 @@ final class ImageEngine {
             guard let self else { return }
             defer { self.backgroundJob = nil }
             do {
-                // The model, then the picture check all three share.
-                for (files, directory) in [(model.weightFiles, model.weightsDirectory),
-                                           (ImageModel.safetyFiles, ImageModel.safetyDirectory)] {
-                    try await WeightFetcher.fetch(files, into: directory, expected: WeightFile.topLevelNames(files),
-                                                  progress: { [weak self] update in
-                        self?.phase = .downloading(file: update.file, completed: update.completed, total: update.total,
-                                                   fraction: update.fraction, received: update.received,
-                                                   expected: update.expected)
-                    }, note: { [weak self] line in
-                        self?.downloadNote = line
-                    })
-                    try Task.checkCancellation()
-                }
+                // The model and the picture check all three share, as one
+                // download: every file in flight at once, so all of it
+                // arrives even if the app is closed partway.
+                try await WeightFetcher.fetch([
+                    .init(files: model.weightFiles, directory: model.weightsDirectory,
+                          expected: WeightFile.topLevelNames(model.weightFiles)),
+                    .init(files: ImageModel.safetyFiles, directory: ImageModel.safetyDirectory,
+                          expected: WeightFile.topLevelNames(ImageModel.safetyFiles)),
+                ], progress: { [weak self] update in
+                    self?.phase = .downloading(file: update.file, completed: update.completed, total: update.total,
+                                               fraction: update.fraction, received: update.received,
+                                               expected: update.expected)
+                }, note: { [weak self] line in
+                    self?.downloadNote = line
+                })
+                try Task.checkCancellation()
                 try await self.run(model: model, prompt: prompt, size: size,
                                    seed: seed ?? UInt64.random(in: 0 ... UInt64(UInt32.max)))
                 job.finish(success: true)

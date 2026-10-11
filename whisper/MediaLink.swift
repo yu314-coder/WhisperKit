@@ -161,60 +161,40 @@ enum MediaLink {
         }
     }
 
+    /// At launch: a link download left by an earlier run has no one waiting
+    /// for it — the transcription it was for ended with that run — so it is
+    /// stopped, and anything it left is removed.
+    static func discardOrphanedDownloads() async {
+        await WeightDownloadService.shared.cancelTransfers(into: Download.folder)
+        try? FileManager.default.removeItem(at: Download.folder)
+    }
+
     // MARK: - Downloading with progress
 
-    /// One download, with progress, as an async call.
-    private final class Download: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-        private let progress: @Sendable (Double?) -> Void
-        private var continuation: CheckedContinuation<(URL, HTTPURLResponse), Error>?
-        private var kept: URL?
-
-        private init(progress: @escaping @Sendable (Double?) -> Void) { self.progress = progress }
+    /// One download, through the app's background session: a long file keeps
+    /// coming while the app is in the background, and a dropped connection
+    /// resumes rather than starting over (WeightDownloadService).
+    private enum Download {
+        static var folder: URL {
+            FileManager.default.temporaryDirectory.appendingPathComponent("LinkDownloads", isDirectory: true)
+        }
 
         static func run(_ url: URL, progress: @escaping @Sendable (Double?) -> Void) async throws -> (URL, HTTPURLResponse) {
-            let download = Download(progress: progress)
-            let session = URLSession(configuration: .default, delegate: download, delegateQueue: nil)
-            defer { session.finishTasksAndInvalidate() }
-            let task = session.downloadTask(with: url)
-            return try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { continuation in
-                    download.continuation = continuation
-                    task.resume()
-                }
-            } onCancel: {
-                task.cancel()
+            let file = folder.appendingPathComponent(UUID().uuidString)
+            do {
+                // A link that answers 404 is wrong, not expired: no restarts.
+                let response = try await WeightDownloadService.shared.download(
+                    from: url, to: file, restartOnClientError: false,
+                    progress: { update in progress(update.expected > 0 ? update.fraction : nil) })
+                guard let response else { throw Failure.notMedia }
+                return (file, response)
+            } catch MusicDownloaderError.http(let code) {
+                try? FileManager.default.removeItem(at: file)
+                throw Failure.http(code)
+            } catch {
+                try? FileManager.default.removeItem(at: file)
+                throw error
             }
-        }
-
-        func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
-                        totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-            progress(totalBytesExpectedToWrite > 0 ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) : nil)
-        }
-
-        func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-            // The file is deleted when this returns; move it somewhere ours.
-            let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            try? FileManager.default.moveItem(at: location, to: copy)
-            kept = copy
-        }
-
-        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-            defer { continuation = nil }
-            if let error {
-                if let kept { try? FileManager.default.removeItem(at: kept) }
-                continuation?.resume(throwing: error)
-                return
-            }
-            guard let response = task.response as? HTTPURLResponse, let kept else {
-                continuation?.resume(throwing: Failure.notMedia)
-                return
-            }
-            guard (200 ..< 300).contains(response.statusCode) else {
-                try? FileManager.default.removeItem(at: kept)
-                continuation?.resume(throwing: Failure.http(response.statusCode))
-                return
-            }
-            continuation?.resume(returning: (kept, response))
         }
     }
 }

@@ -339,6 +339,27 @@ struct ContentView: View {
             // The one-time maintenance below walks every stored segment, which
             // on a large library is slow enough to visibly delay it.
             checkModelStatus()
+            #if DEBUG
+            // Testing downloads unattended: `-DebugDownloadModel <variant>`.
+            if let raw = UserDefaults.standard.string(forKey: "DebugDownloadModel"),
+               let model = WhisperModel(rawValue: raw) {
+                prepareModel(model)
+            }
+            // `-DebugImportLink <https URL>`: what the link sheet does.
+            if let raw = UserDefaults.standard.string(forKey: "DebugImportLink"), let link = URL(string: raw) {
+                Task {
+                    do {
+                        let file = try await MediaLink.download(link) { _ in }
+                        let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                        print("DebugImportLink: \(file.lastPathComponent), \(size) bytes")
+                        await importAndTranscribeFile(from: file)
+                        try? FileManager.default.removeItem(at: file)
+                    } catch {
+                        print("DebugImportLink failed: \(error.localizedDescription)")
+                    }
+                }
+            }
+            #endif
             Task { @MainActor in
                 removeRetiredModelDownloads()
                 sanitiseStoredSegmentsIfNeeded()
@@ -2130,29 +2151,38 @@ struct ContentView: View {
         try FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
         do {
 
-            if findModelDirectory(for: model) == nil {
-                statusMessage = "Downloading \(model.displayName) — \(model.sizeLabel)"
-                downloadProgress = 0
+            // A missing model is downloaded; a folder not known to be complete
+            // — a download cut short, or one from before builds kept track — is
+            // checked file by file against Hugging Face and finished. Either
+            // way through the background downloader, so it carries on while
+            // the app is away (WhisperModelDownload).
+            let existing = findModelDirectory(for: model)
+            if existing == nil || !isVerified(model) {
+                statusMessage = existing == nil
+                    ? "Downloading \(model.displayName) — \(model.sizeLabel)"
+                    : "Checking \(model.displayName)…"
                 setVerified(model, false)
-                // The download keeps going if the app is left.
-                let job = BackgroundWork.shared.begin(title: "Downloading \(model.displayName)", subtitle: model.sizeLabel)
+                // The job, and the bar, only once there is something to fetch.
+                var job: BackgroundWork.Job?
                 do {
-                    _ = try await WhisperKit.download(
-                        variant: model.rawValue,
-                        downloadBase: modelsDir,
-                        progressCallback: { progress in
-                            Task { @MainActor in
-                                self.downloadProgress = progress.fractionCompleted
-                                job.update(progress.fractionCompleted)
-                            }
+                    try await WhisperModelDownload.fetch(variant: model.rawValue, base: modelsDir) { fraction in
+                        if job == nil {
+                            job = BackgroundWork.shared.begin(title: "Downloading \(model.displayName)",
+                                                              subtitle: model.sizeLabel)
+                            self.statusMessage = "Downloading \(model.displayName) — \(model.sizeLabel)"
                         }
-                    )
-                    job.finish(success: true)
-                    // Every file fetched and checked against Hugging Face.
+                        self.downloadProgress = fraction
+                        job?.update(fraction)
+                    }
+                    job?.finish(success: true)
+                    // Every file fetched or found whole, by Hugging Face's sizes.
                     setVerified(model, true)
                 } catch {
-                    job.finish(success: false)
-                    throw error
+                    job?.finish(success: false)
+                    // A folder that couldn't be checked — offline, say — still
+                    // loads the way it always did, through WhisperKit's own
+                    // checks. A missing one can't.
+                    if existing == nil || error is CancellationError || Task.isCancelled { throw error }
                 }
                 try Task.checkCancellation()
                 downloadStatus[model] = true

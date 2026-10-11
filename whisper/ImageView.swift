@@ -79,6 +79,10 @@ struct ImageView: View {
             #if DEBUG
             if prompt.isEmpty, let preset = UserDefaults.standard.string(forKey: "ImagePromptPreset") {
                 prompt = preset
+                // `-ImageAutoGenerate YES` starts it, for testing downloads unattended.
+                if UserDefaults.standard.bool(forKey: "ImageAutoGenerate"), !engine.isBusy {
+                    engine.generate(model: selectedModel, prompt: preset, size: selectedModel.sizes[0])
+                }
             }
             #endif
         }

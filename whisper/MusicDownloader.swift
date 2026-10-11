@@ -3,7 +3,8 @@ import Foundation
 import System
 import UIKit
 
-/// Downloads model weights, continuing while the app is in the background.
+/// Every download in the app — model weights for all three tabs and files
+/// from pasted links — continuing while the app is in the background.
 ///
 /// A background `URLSession` keeps multi-gigabyte transfers alive when the app
 /// is suspended, and iOS relaunches the app to hand over the finished files if
@@ -65,7 +66,10 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
 
     private var session: URLSession!
     private let lock = NSLock()
-    private var continuations: [Int: CheckedContinuation<Void, Error>] = [:]
+    private var continuations: [Int: CheckedContinuation<HTTPURLResponse?, Error>] = [:]
+    /// The server's answer for each finished task, kept from the moment the
+    /// file lands until its continuation is resumed.
+    private var responses: [Int: HTTPURLResponse] = [:]
     private var lastReported: [Int: Date] = [:]
     private var lastActivity: [Int: Date] = [:]
     /// Tasks this class cancelled for stalling. Their completion is delivered
@@ -102,12 +106,18 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
     /// one instead of starting a second copy.
     ///
     /// - Parameters:
+    ///   - restartOnClientError: start over from `remote` on a 4xx answer.
+    ///     Right for release assets, whose redirected address expires after
+    ///     an hour; a pasted link that answers 404 should fail at once.
     ///   - progress: how much of this file has arrived.
     ///   - status: a line for the user while a dropped transfer is being
     ///     recovered, and nil once it is moving again.
-    func download(from remote: URL, to destination: URL,
+    /// - Returns: the server's final answer — its type, name and address
+    ///   after redirects — when the transfer finished in this run.
+    @discardableResult
+    func download(from remote: URL, to destination: URL, restartOnClientError: Bool = true,
                   progress: @escaping @Sendable (Progress) -> Void = { _ in },
-                  status: @escaping @Sendable (String?) -> Void = { _ in }) async throws {
+                  status: @escaping @Sendable (String?) -> Void = { _ in }) async throws -> HTTPURLResponse? {
         let key = destination.path
         lock.withLock { watchers[key] = Watcher(progress: progress, status: status) }
         defer {
@@ -122,9 +132,9 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
         var attempt = 1
         while true {
             do {
-                try await run(task)
+                let response = try await run(task)
                 setStatus(nil)
-                return
+                return response
             } catch let interruption as Interrupted {
                 try Task.checkCancellation()
                 guard attempt < maximumAttempts else {
@@ -142,7 +152,8 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
                     try await Task.sleep(for: .seconds(2))
                     task = newTask(from: remote, to: destination)
                 }
-            } catch MusicDownloaderError.http(let code) where (400 ..< 500).contains(code) && attempt < maximumAttempts {
+            } catch MusicDownloaderError.http(let code)
+                        where restartOnClientError && (400 ..< 500).contains(code) && attempt < maximumAttempts {
                 // A resumed request goes to the address GitHub redirected to,
                 // which expires after an hour. Starting from the release URL
                 // again gets a fresh one.
@@ -151,6 +162,14 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
                 setStatus("Download link expired — restarting this file")
                 task = newTask(from: remote, to: destination)
             }
+        }
+    }
+
+    /// Cancels every unfinished transfer bound for somewhere inside `folder`.
+    func cancelTransfers(into folder: URL) async {
+        let prefix = folder.path + "/"
+        for task in await session.allTasks where (task.taskDescription ?? "").hasPrefix(prefix) {
+            task.cancel()
         }
     }
 
@@ -169,7 +188,7 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
     }
 
     /// Runs one task to completion, watching it for stalls.
-    private func run(_ task: URLSessionDownloadTask) async throws {
+    private func run(_ task: URLSessionDownloadTask) async throws -> HTTPURLResponse? {
         let identifier = task.taskIdentifier
         lock.withLock { lastActivity[identifier] = Date() }
         let watchdog = Task { [weak self] in
@@ -179,9 +198,12 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
                 let idle = Date().timeIntervalSince(self.lock.withLock { self.lastActivity[identifier] } ?? Date())
                 // Only while on screen: in the background iOS may be
                 // deliberately holding the transfer, and this process may be
-                // suspended anyway.
+                // suspended anyway. And only once the server has answered:
+                // a model's files are all handed to the system at once, and
+                // it runs a few at a time — one still waiting its turn isn't
+                // stalled.
                 let onScreen = await MainActor.run { UIApplication.shared.applicationState == .active }
-                if idle > self.stallTimeout, onScreen {
+                if idle > self.stallTimeout, onScreen, task.response != nil {
                     self.recoverStalled(task)
                     return
                 }
@@ -189,8 +211,8 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
         }
         defer { watchdog.cancel() }
 
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<HTTPURLResponse?, Error>) in
                 lock.withLock { continuations[identifier] = continuation }
                 if task.state == .suspended { task.resume() }
             }
@@ -209,14 +231,14 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
     }
 
     private func finish(_ identifier: Int, with result: Result<Void, Error>) {
-        let continuation = lock.withLock {
+        let (continuation, response) = lock.withLock {
             lastReported.removeValue(forKey: identifier)
             lastActivity.removeValue(forKey: identifier)
             stalled.remove(identifier)
-            return continuations.removeValue(forKey: identifier)
+            return (continuations.removeValue(forKey: identifier), responses.removeValue(forKey: identifier))
         }
         switch result {
-        case .success:          continuation?.resume()
+        case .success:          continuation?.resume(returning: response)
         case .failure(let e):   continuation?.resume(throwing: e)
         }
     }
@@ -275,6 +297,9 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
                 at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.moveItem(at: location, to: destination)
+            if let http = downloadTask.response as? HTTPURLResponse {
+                lock.withLock { responses[downloadTask.taskIdentifier] = http }
+            }
             finish(downloadTask.taskIdentifier, with: .success(()))
         } catch {
             finish(downloadTask.taskIdentifier, with: .failure(error))

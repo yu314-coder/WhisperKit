@@ -18,11 +18,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ = MusicRunMarker.wasInterrupted   // what the last run left, before anything changes it
         BackgroundWork.shared.start()
         DispatchQueue.global(qos: .utility).async { MusicModel.removeRetiredWeights() }
+        // The download session, at once: files that finished while the app
+        // was closed are moved into place as soon as it exists.
+        _ = WeightDownloadService.shared
+        Task { await MediaLink.discardOrphanedDownloads() }
         return true
     }
 
-    /// iOS relaunched (or resumed) the app because a background weight
-    /// download finished. The session's delegate does the work; this hands
+    /// iOS relaunched (or resumed) the app because a background download
+    /// finished. The session's delegate does the work; this hands
     /// back the completion handler it must call once every event has been
     /// delivered, or the system counts the wake-up as a hang.
     func application(_ application: UIApplication,
@@ -68,8 +72,16 @@ struct whisperApp: App {
 /// Transcription, music and pictures are separate enough to be separate
 /// tabs: they share storage and the model downloader, but nothing on screen.
 struct RootView: View {
-    private enum Tab { case transcribe, music, image }
-    @State private var tab = Tab.transcribe
+    private enum Tab: String { case transcribe, music, image }
+    @State private var tab = Self.firstTab
+
+    /// The Transcribe tab, or in Debug builds `-AppStartTab music|image`.
+    private static var firstTab: Tab {
+        #if DEBUG
+        if let raw = UserDefaults.standard.string(forKey: "AppStartTab"), let tab = Tab(rawValue: raw) { return tab }
+        #endif
+        return .transcribe
+    }
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     init() {
