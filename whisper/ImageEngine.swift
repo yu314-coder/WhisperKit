@@ -22,7 +22,7 @@ extension ImageModel {
     var sizes: [ImageSize] {
         switch self {
         case .dreamShaper: return [ImageSize(width: 512, height: 512)]
-        case .sanaSprint:  return [ImageSize(width: 1024, height: 1024)]
+        case .sanaSprint, .sanaSprintLarge: return [ImageSize(width: 1024, height: 1024)]
         case .fluxKlein, .zImage:
                            return [ImageSize(width: 768, height: 768), ImageSize(width: 1024, height: 1024),
                                    ImageSize(width: 768, height: 1024), ImageSize(width: 1024, height: 768),
@@ -115,7 +115,7 @@ final class ImageEngine {
                 // arrives even if the app is closed partway.
                 try await WeightFetcher.fetch([
                     .init(files: model.weightFiles, directory: model.weightsDirectory,
-                          expected: WeightFile.topLevelNames(model.weightFiles)),
+                          expected: WeightFile.topLevelNames(model.folderFiles)),
                     .init(files: ImageModel.safetyFiles, directory: ImageModel.safetyDirectory,
                           expected: WeightFile.topLevelNames(ImageModel.safetyFiles)),
                 ], progress: { [weak self] update in
@@ -204,11 +204,11 @@ final class ImageEngine {
         case .dreamShaper:
             return try SDPipeline(directory: directory).generate(prompt: prompt, seed: seed,
                                                                  isCancelled: isCancelled, progress: stage)
-        case .sanaSprint:
+        case .sanaSprint, .sanaSprintLarge:
             // Gemma and the decoder's first half run on the GPU. Off screen
             // without background GPU time they wait between layers: MLX
             // would crash on a refused command buffer.
-            return try SanaPipeline(directory: directory).generate(prompt: prompt, seed: seed,
+            return try SanaPipeline(directory: directory, large: model == .sanaSprintLarge).generate(prompt: prompt, seed: seed,
                                                                    isCancelled: { GPUGate.waitUntilOpen(); return isCancelled() },
                                                                    progress: stage)
         case .fluxKlein:

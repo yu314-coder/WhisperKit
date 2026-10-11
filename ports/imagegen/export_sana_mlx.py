@@ -32,8 +32,12 @@ from safetensors_aligned import save_aligned, save_parts  # noqa: E402
 from safetensors.torch import load_file
 from diffusers import SanaTransformer2DModel
 
-repo, out = sys.argv[1], sys.argv[2]
-bits = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+# --extras-only: just sana_extras.safetensors, for another size of SANA-Sprint
+# (1.6B) that shares the 0.6B's Gemma, decoder and tokenizer byte for byte.
+extras_only = '--extras-only' in sys.argv
+args = [a for a in sys.argv[1:] if a != '--extras-only']
+repo, out = args[0], args[1]
+bits = int(args[2]) if len(args) > 2 else 8
 os.makedirs(out, exist_ok=True)
 
 
@@ -42,20 +46,21 @@ def to_mx(t, dtype=mx.float16):
 
 
 # Gemma -----------------------------------------------------------------------
-gemma = {}
-for path in sorted(glob.glob(f'{repo}/text_encoder/*.safetensors')):
-    gemma.update(load_file(path))
-tensors = {}
-for name, weight in gemma.items():
-    if weight.ndim == 2:
-        wq, scales, biases = mx.quantize(to_mx(weight, mx.float32), group_size=64, bits=bits)
-        tensors[name + '.wq'], tensors[name + '.scales'], tensors[name + '.biases'] = \
-            wq, scales.astype(mx.float16), biases.astype(mx.float16)
-    else:
-        tensors[name] = to_mx(weight, mx.float32)
-mx.eval(tensors)
-print('Gemma parts:', save_parts(f'{out}/sana_gemma_q{bits}', tensors))
-del gemma, tensors
+if not extras_only:
+    gemma = {}
+    for path in sorted(glob.glob(f'{repo}/text_encoder/*.safetensors')):
+        gemma.update(load_file(path))
+    tensors = {}
+    for name, weight in gemma.items():
+        if weight.ndim == 2:
+            wq, scales, biases = mx.quantize(to_mx(weight, mx.float32), group_size=64, bits=bits)
+            tensors[name + '.wq'], tensors[name + '.scales'], tensors[name + '.biases'] = \
+                wq, scales.astype(mx.float16), biases.astype(mx.float16)
+        else:
+            tensors[name] = to_mx(weight, mx.float32)
+    mx.eval(tensors)
+    print('Gemma parts:', save_parts(f'{out}/sana_gemma_q{bits}', tensors))
+    del gemma, tensors
 
 # Caption projection and modulation ------------------------------------------
 transformer = SanaTransformer2DModel.from_pretrained(repo, subfolder='transformer', torch_dtype=torch.float32).eval()
@@ -73,18 +78,19 @@ extras['embedded'] = mx.array(torch.cat([r[1] for r in rows]).numpy())
 save_aligned(f'{out}/sana_extras.safetensors', extras)
 
 # DC-AE decoder, first three stages ------------------------------------------
-vae = load_file(glob.glob(f'{repo}/vae/*.safetensors')[0])
-head = {}
-for name, weight in vae.items():
-    if not name.startswith('decoder.'):
-        continue
-    name = name[len('decoder.'):]
-    if not name.startswith(('conv_in.', 'up_blocks.3.', 'up_blocks.4.', 'up_blocks.5.')):
-        continue
-    if weight.ndim == 4:              # conv (out, in, kh, kw) -> (out, kh, kw, in)
-        weight = weight.permute(0, 2, 3, 1).contiguous()
-    head[name] = to_mx(weight)
-save_aligned(f'{out}/sana_decoder_head.safetensors', head)
+if not extras_only:
+    vae = load_file(glob.glob(f'{repo}/vae/*.safetensors')[0])
+    head = {}
+    for name, weight in vae.items():
+        if not name.startswith('decoder.'):
+            continue
+        name = name[len('decoder.'):]
+        if not name.startswith(('conv_in.', 'up_blocks.3.', 'up_blocks.4.', 'up_blocks.5.')):
+            continue
+        if weight.ndim == 4:              # conv (out, in, kh, kw) -> (out, kh, kw, in)
+            weight = weight.permute(0, 2, 3, 1).contiguous()
+        head[name] = to_mx(weight)
+    save_aligned(f'{out}/sana_decoder_head.safetensors', head)
 
 
 # Tokenizer --------------------------------------------------------------------
@@ -128,5 +134,5 @@ def write_tokenizer(path):
           f'{len(added)} added tokens, {os.path.getsize(path):,} bytes')
 
 
-if __name__ == '__main__':
+if __name__ == '__main__' and not extras_only:
     write_tokenizer(f'{out}/gemma_bpe.bin')

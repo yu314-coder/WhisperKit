@@ -146,7 +146,8 @@ enum SanaCaption {
 
     /// Gemma's states for `tokens` to the transformer's caption: the kept
     /// positions, projected and normed, zero past the prompt's end.
-    /// Returns the caption (1, 300, 1152) and how many positions are real.
+    /// Returns the caption (1, 300, width: 1152 for the 0.6B, 2240 for the
+    /// 1.6B) and how many positions are real.
     static func project(_ states: MLXArray, extras: [String: MLXArray]) -> (MLXArray, Int) {
         let count = states.dim(0)
         let kept = [0] + Array(min(firstKept, count) ..< count)
@@ -157,6 +158,6 @@ enum SanaCaption {
         var x = matmul(rows, weight("caption_projection.linear_1.weight").T) + weight("caption_projection.linear_1.bias")
         x = matmul(geluTanh(x), weight("caption_projection.linear_2.weight").T) + weight("caption_projection.linear_2.bias")
         x = rmsNorm(x, weight: weight("caption_norm.weight"), eps: 1e-5)
-        return (x.reshaped(1, length, 1152), kept.count)
+        return (x.reshaped(1, length, x.dim(-1)), kept.count)
     }
 }

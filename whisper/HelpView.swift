@@ -114,7 +114,7 @@ struct HelpView: View {
                 Section(icon: "wand.and.stars", title: "2. Generate",
                         body: "The first time, the model downloads (1 to 11 GB, shown in the model menu), and the first picture also prepares the chip it runs on, which takes longer. After that DreamShaper takes a few seconds, SANA-Sprint a little longer, and FLUX.2 klein and Z-Image Turbo a minute or more."),
                 Section(icon: "square.stack.3d.up", title: "Models",
-                        body: "Tap the model name at the top. DreamShaper is the fastest and smallest, at 512 × 512. SANA-Sprint makes sharp 1024 × 1024 pictures in two steps. FLUX.2 klein follows long, detailed prompts closely and offers several shapes. Z-Image Turbo makes the most lifelike pictures, with a prompt reader that has had its refusals removed; it and FLUX are the slowest and largest downloads."),
+                        body: "Tap the model name at the top. DreamShaper is the fastest and smallest, at 512 × 512. SANA-Sprint makes sharp 1024 × 1024 pictures in two steps; its 1.6B version makes better ones, still in seconds, and shares most of its download. FLUX.2 klein follows long, detailed prompts closely and offers several shapes. Z-Image Turbo makes the most lifelike pictures, with a prompt reader that has had its refusals removed; it and FLUX are the slowest and largest downloads."),
                 Section(icon: "photo.stack", title: "History",
                         body: "Every picture is kept with its prompt. Open one to share it, save it to Photos, or use its prompt again."),
                 Section(icon: "tag", title: "Marked as AI-made",

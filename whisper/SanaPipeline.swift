@@ -50,6 +50,12 @@ struct SanaPipeline {
     private static let angles = [1.5708, 1.3]
 
     let directory: URL
+    /// SANA-Sprint 1.6B rather than 0.6B: its own transformer and caption
+    /// projection, the same Gemma, decoder and tokenizer.
+    var large = false
+
+    private var transformerFile: String { large ? "sana16_transformer.mlmodelc" : File.transformer }
+    private var extrasFile: String { large ? "sana16_extras.safetensors" : File.extras }
 
     /// - Parameter noise: the starting latents and the second step's noise,
     ///   instead of ones drawn from `seed` — for checking against the
@@ -70,7 +76,7 @@ struct SanaPipeline {
             progress(.loading)
             let configuration = MLModelConfiguration()
             configuration.computeUnits = .cpuAndGPU
-            let transformer = try MLModel(contentsOf: directory.appendingPathComponent(File.transformer),
+            let transformer = try MLModel(contentsOf: directory.appendingPathComponent(transformerFile),
                                           configuration: configuration)
             if isCancelled() { throw CancellationError() }
 
@@ -83,11 +89,11 @@ struct SanaPipeline {
                 let gemma = Gemma2Encoder(weights: try Self.load(File.gemma, from: directory))
                 let states = try gemma(ids, isCancelled: isCancelled)
                 eval(states)
-                let extras = try MappedWeights.load(url: directory.appendingPathComponent(File.extras))
+                let extras = try MappedWeights.load(url: directory.appendingPathComponent(extrasFile))
                 let (projected, real) = SanaCaption.project(states, extras: extras)
                 var bias = [Float](repeating: -10_000, count: SanaCaption.length)
                 for index in 0 ..< real { bias[index] = 0 }
-                return (try SDPipeline.multiArray(projected.asArray(Float.self), shape: [1, SanaCaption.length, 1152]),
+                return (try SDPipeline.multiArray(projected.asArray(Float.self), shape: [1, SanaCaption.length, projected.dim(2)]),
                         try SDPipeline.multiArray(bias, shape: [1, 1, SanaCaption.length]),
                         (0 ..< Self.steps).map { extras["modulation"]![$0].asArray(Float.self) },
                         (0 ..< Self.steps).map { extras["embedded"]![$0].asArray(Float.self) })

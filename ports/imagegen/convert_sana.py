@@ -49,15 +49,62 @@ which = sys.argv[3] if len(sys.argv) > 3 else 'transformer'
 # normal float16 keeps 0 / x = 0.
 SMALLEST_NORMAL = 2.0 ** -14
 
+def scaled_rms(x, norm, prescale=1.0):
+    """`norm` (an RMSNorm over the last axis) of `x * prescale`, without
+    float16 overflow: each vector is divided by its largest entry first and
+    the epsilon by that squared, which leaves the result the same."""
+    scale = x.abs().amax(dim=-1, keepdim=True).clamp(min=1.0)
+    y = x / scale
+    y = y * torch.rsqrt((y * y).mean(dim=-1, keepdim=True) + norm.eps / (prescale * scale) ** 2)
+    return y * norm.weight if norm.weight is not None else y
+
+
+# SANA-Sprint 1.6B's cross-attention queries reach 114,466 in its last blocks,
+# past float16's 65,504, and its norms across heads squared them: the whole
+# program came out NaN. The projection runs on input scaled by this, and the
+# norm, which doesn't depend on scale, undoes it.
+QUERY_PRESCALE = 8.0
+
+
+def scaled_projection(linear, x, prescale):
+    bias = linear.bias / prescale if linear.bias is not None else None
+    return F.linear(x / prescale, linear.weight, bias)
+
+
+class ScaledCrossAttention:
+    """SANA's cross-attention (SanaAttnProcessor2_0) with its query
+    projected at 1/QUERY_PRESCALE scale and overflow-free norms."""
+    def __call__(self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None):
+        batch_size, sequence_length, _ = encoder_hidden_states.shape
+        if attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+        if attn.norm_q is not None:
+            query = scaled_rms(scaled_projection(attn.to_q, hidden_states, QUERY_PRESCALE), attn.norm_q, QUERY_PRESCALE)
+        else:
+            query = attn.to_q(hidden_states)
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+        if attn.norm_k is not None:
+            key = scaled_rms(key, attn.norm_k)
+        head_dim = key.shape[-1] // attn.heads
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        hidden = F.scaled_dot_product_attention(query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False)
+        hidden = hidden.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim).to(query.dtype)
+        return attn.to_out[1](attn.to_out[0](hidden))
+
+
 class ScaledLinearAttention:
     def __call__(self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None):
         query = attn.to_q(hidden_states)
         key = attn.to_k(hidden_states)
         value = attn.to_v(hidden_states)
         if attn.norm_q is not None:
-            query = attn.norm_q(query)
+            query = scaled_rms(query, attn.norm_q)
         if attn.norm_k is not None:
-            key = attn.norm_k(key)
+            key = scaled_rms(key, attn.norm_k)
         n = hidden_states.shape[1]
         query = F.relu(query.transpose(1, 2).unflatten(1, (attn.heads, -1)))              # B H D N
         key = F.relu(key.transpose(1, 2).unflatten(1, (attn.heads, -1)).transpose(2, 3)) / n  # B H N D
@@ -142,10 +189,13 @@ if which == 'transformer':
     model = SanaTransformer2DModel.from_pretrained(repo, subfolder='transformer', torch_dtype=torch.float32).eval()
     for block in model.transformer_blocks:
         block.attn1.set_processor(ScaledLinearAttention())
+        if block.attn2 is not None and block.attn2.norm_q is not None:
+            block.attn2.set_processor(ScaledCrossAttention())
     replace_silu(model)
     wrapper = Transformer(model).eval()
-    example = (torch.randn(1, 32, 32, 32), torch.randn(1, 300, 1152), torch.zeros(1, 1, 300),
-               torch.randn(1, 6 * 1152), torch.randn(1, 1152))
+    width = model.config.num_attention_heads * model.config.attention_head_dim   # 1152 for 0.6B, 2240 for 1.6B
+    example = (torch.randn(1, 32, 32, 32), torch.randn(1, 300, width), torch.zeros(1, 1, 300),
+               torch.randn(1, 6 * width), torch.randn(1, width))
     with torch.no_grad():
         traced = torch.jit.trace(wrapper, example)
     names = ['hidden', 'caption', 'caption_bias', 'modulation', 'embedded']

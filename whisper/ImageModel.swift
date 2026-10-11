@@ -5,6 +5,7 @@ import Foundation
 enum ImageModel: String, CaseIterable, Identifiable {
     case dreamShaper = "dreamshaper-8-hyper"
     case sanaSprint  = "sana-sprint-0.6b"
+    case sanaSprintLarge = "sana-sprint-1.6b"
     case fluxKlein   = "flux2-klein-4b"
     case zImage      = "z-image-turbo"
 
@@ -14,6 +15,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         switch self {
         case .dreamShaper: return "DreamShaper"
         case .sanaSprint:  return "SANA-Sprint"
+        case .sanaSprintLarge: return "SANA-Sprint 1.6B"
         case .fluxKlein:   return "FLUX.2 klein"
         case .zImage:      return "Z-Image Turbo"
         }
@@ -23,6 +25,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         switch self {
         case .dreamShaper: return "1B"
         case .sanaSprint:  return "0.6B"
+        case .sanaSprintLarge: return "1.6B"
         case .fluxKlein:   return "4B"
         case .zImage:      return "6B"
         }
@@ -32,6 +35,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         switch self {
         case .dreamShaper: return "Fastest · 512 × 512 · Stable Diffusion 1.5, four steps"
         case .sanaSprint:  return "Sharp 1024 × 1024 in two steps"
+        case .sanaSprintLarge: return "Better pictures than the 0.6B, still in seconds"
         case .fluxKlein:   return "Follows long prompts closely · several shapes"
         case .zImage:      return "Most lifelike · nothing steers your prompt away"
         }
@@ -40,7 +44,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
     var engineLabel: String {
         switch self {
         case .dreamShaper:           return "NEURAL ENGINE"
-        case .sanaSprint, .fluxKlein, .zImage: return "GPU"
+        case .sanaSprint, .sanaSprintLarge, .fluxKlein, .zImage: return "GPU"
         }
     }
 
@@ -52,7 +56,8 @@ enum ImageModel: String, CaseIterable, Identifiable {
     var licence: String {
         switch self {
         case .dreamShaper: return "DreamShaper 8 and Stable Diffusion 1.5: CreativeML OpenRAIL-M. Hyper-SD: CreativeML OpenRAIL++-M."
-        case .sanaSprint:  return "SANA-Sprint: Apache 2.0. Its text encoder, Gemma 2: Gemma Terms of Use."
+        case .sanaSprint, .sanaSprintLarge:
+            return "SANA-Sprint: Apache 2.0. Its text encoder, Gemma 2: Gemma Terms of Use."
         case .fluxKlein:   return "FLUX.2 [klein] 4B and Qwen3: Apache 2.0."
         case .zImage:      return "Z-Image-Turbo (Tongyi-MAI) and its abliterated Qwen3 prompt reader: Apache 2.0."
         }
@@ -60,9 +65,19 @@ enum ImageModel: String, CaseIterable, Identifiable {
 
     // MARK: - Weights
 
+    /// SANA-Sprint 1.6B shares the 0.6B's folder: the two read the same
+    /// Gemma 2, decoder and tokenizer, byte for byte, so whichever comes
+    /// second downloads only its own transformer.
     var weightsDirectory: URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return documents.appendingPathComponent("ImageModels/\(rawValue)", isDirectory: true)
+        let folder = self == .sanaSprintLarge ? Self.sanaSprint.rawValue : rawValue
+        return documents.appendingPathComponent("ImageModels/\(folder)", isDirectory: true)
+    }
+
+    /// Every file that any model keeps in this model's folder: what a
+    /// download there must leave alone.
+    var folderFiles: [WeightFile] {
+        Self.allCases.filter { $0.weightsDirectory == weightsDirectory }.flatMap(\.weightFiles)
     }
 
     private static let release = "imagegen-v1"
@@ -71,6 +86,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         switch self {
         case .dreamShaper: return Self.dreamShaperFiles
         case .sanaSprint:  return Self.sanaFiles
+        case .sanaSprintLarge: return Self.sanaLargeFiles
         case .fluxKlein:   return Self.fluxFiles
         case .zImage:      return Self.zImageFiles
         }
@@ -110,12 +126,8 @@ enum ImageModel: String, CaseIterable, Identifiable {
     /// and fixed-schedule modulation, the decoder's first half for MLX, the
     /// transformer (8-bit palettized) and the decoder's second half as Core
     /// ML programs, and the tokenizer's tables.
-    static let sanaFiles: [WeightFile] = [
-        WeightFile(path: "gemma_bpe.bin", bytes: 9462292, release: release),
-        WeightFile(path: "sana_gemma_q8.part1.safetensors", bytes: 1890696320, release: release),
-        WeightFile(path: "sana_gemma_q8.part2.safetensors", bytes: 887825856, release: release),
+    static let sanaFiles: [WeightFile] = sanaShared + [
         WeightFile(path: "sana_extras.safetensors", bytes: 8034688, release: release),
-        WeightFile(path: "sana_decoder_head.safetensors", bytes: 273609920, release: release),
         archive("sana_transformer.mlmodelc", 578926700, [
             ("analytics/coremldata.bin", 243),
             ("coremldata.bin", 615),
@@ -123,6 +135,24 @@ enum ImageModel: String, CaseIterable, Identifiable {
             ("model.mil", 1031631),
             ("weights/weight.bin", 579330688),
         ]),
+    ]
+    /// SANA-Sprint 1.6B: its own transformer and caption projection; the
+    /// rest is the 0.6B's.
+    static let sanaLargeFiles: [WeightFile] = sanaShared + [
+        WeightFile(path: "sana16_extras.safetensors", bytes: 20496704, release: release),
+        archive("sana16_transformer.mlmodelc", 1550705807, [
+            ("analytics/coremldata.bin", 243),
+            ("coremldata.bin", 619),
+            ("metadata.json", 3788),
+            ("model.mil", 857470),
+            ("weights/weight.bin", 1560031104),
+        ]),
+    ]
+    private static let sanaShared: [WeightFile] = [
+        WeightFile(path: "gemma_bpe.bin", bytes: 9462292, release: release),
+        WeightFile(path: "sana_gemma_q8.part1.safetensors", bytes: 1890696320, release: release),
+        WeightFile(path: "sana_gemma_q8.part2.safetensors", bytes: 887825856, release: release),
+        WeightFile(path: "sana_decoder_head.safetensors", bytes: 273609920, release: release),
         archive("sana_decoder_tail.mlmodelc", 41698134, [
             ("analytics/coremldata.bin", 243),
             ("coremldata.bin", 510),
@@ -192,7 +222,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
     var memoryWarning: String? {
         let gigabytes = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
         switch self {
-        case .dreamShaper, .sanaSprint:
+        case .dreamShaper, .sanaSprint, .sanaSprintLarge:
             return nil
         case .fluxKlein, .zImage:
             guard gigabytes < 7 else { return nil }
