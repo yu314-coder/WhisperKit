@@ -6,6 +6,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
     case dreamShaper = "dreamshaper-8-hyper"
     case sanaSprint  = "sana-sprint-0.6b"
     case fluxKlein   = "flux2-klein-4b"
+    case zImage      = "z-image-turbo"
 
     var id: String { rawValue }
 
@@ -14,6 +15,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .dreamShaper: return "DreamShaper"
         case .sanaSprint:  return "SANA-Sprint"
         case .fluxKlein:   return "FLUX.2 klein"
+        case .zImage:      return "Z-Image Turbo"
         }
     }
 
@@ -22,6 +24,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .dreamShaper: return "1B"
         case .sanaSprint:  return "0.6B"
         case .fluxKlein:   return "4B"
+        case .zImage:      return "6B"
         }
     }
 
@@ -29,14 +32,15 @@ enum ImageModel: String, CaseIterable, Identifiable {
         switch self {
         case .dreamShaper: return "Fastest · 512 × 512 · Stable Diffusion 1.5, four steps"
         case .sanaSprint:  return "Sharp 1024 × 1024 in two steps"
-        case .fluxKlein:   return "Best quality · follows long prompts closely"
+        case .fluxKlein:   return "Follows long prompts closely · several shapes"
+        case .zImage:      return "Most lifelike · nothing steers your prompt away"
         }
     }
 
     var engineLabel: String {
         switch self {
         case .dreamShaper:           return "NEURAL ENGINE"
-        case .sanaSprint, .fluxKlein: return "GPU"
+        case .sanaSprint, .fluxKlein, .zImage: return "GPU"
         }
     }
 
@@ -50,6 +54,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .dreamShaper: return "DreamShaper 8 and Stable Diffusion 1.5: CreativeML OpenRAIL-M. Hyper-SD: CreativeML OpenRAIL++-M."
         case .sanaSprint:  return "SANA-Sprint: Apache 2.0. Its text encoder, Gemma 2: Gemma Terms of Use."
         case .fluxKlein:   return "FLUX.2 [klein] 4B and Qwen3: Apache 2.0."
+        case .zImage:      return "Z-Image-Turbo (Tongyi-MAI) and its abliterated Qwen3 prompt reader: Apache 2.0."
         }
     }
 
@@ -67,6 +72,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .dreamShaper: return Self.dreamShaperFiles
         case .sanaSprint:  return Self.sanaFiles
         case .fluxKlein:   return Self.fluxFiles
+        case .zImage:      return Self.zImageFiles
         }
     }
 
@@ -138,6 +144,21 @@ enum ImageModel: String, CaseIterable, Identifiable {
         WeightFile(path: "flux_vae.safetensors", bytes: 99257094, release: release),
     ]
 
+    /// Z-Image-Turbo: the abliterated Qwen3 (35 layers) and the transformer,
+    /// 8-bit, in parts under 2 GB; the VAE decoder; Qwen's tokenizer.
+    static let zImageFiles: [WeightFile] = [
+        WeightFile(path: "zimage_vocab.json", bytes: 2776833, release: release),
+        WeightFile(path: "zimage_merges.txt", bytes: 1671853, release: release),
+        WeightFile(path: "zimage_text_q8.part1.safetensors", bytes: 1889803264, release: release),
+        WeightFile(path: "zimage_text_q8.part2.safetensors", bytes: 1874918912, release: release),
+        WeightFile(path: "zimage_text_q8.part3.safetensors", bytes: 402559296, release: release),
+        WeightFile(path: "zimage_transformer_q8.part1.safetensors", bytes: 1884330736, release: release),
+        WeightFile(path: "zimage_transformer_q8.part2.safetensors", bytes: 1880718080, release: release),
+        WeightFile(path: "zimage_transformer_q8.part3.safetensors", bytes: 1880718016, release: release),
+        WeightFile(path: "zimage_transformer_q8.part4.safetensors", bytes: 894918128, release: release),
+        WeightFile(path: "zimage_vae.safetensors", bytes: 99106182, release: release),
+    ]
+
     /// The filter every picture passes before it's shown (SafetyChecker),
     /// shared by all three models and downloaded with the first.
     static let safetyFiles: [WeightFile] = [
@@ -173,9 +194,9 @@ enum ImageModel: String, CaseIterable, Identifiable {
         switch self {
         case .dreamShaper, .sanaSprint:
             return nil
-        case .fluxKlein:
+        case .fluxKlein, .zImage:
             guard gigabytes < 7 else { return nil }
-            return String(format: "FLUX.2 klein runs here. With %.0f GB on this device its weights are read from storage as it goes, so pictures take longer.", gigabytes.rounded())
+            return String(format: "%@ runs here. With %.0f GB on this device its weights are read from storage as it goes, so pictures take longer.", displayName, gigabytes.rounded())
         }
     }
 }

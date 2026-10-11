@@ -46,6 +46,11 @@ struct ACEQwen3 {
         static let fluxText = Config(layerCount: 27, hiddenSize: 2560, headCount: 32,
                                      keyValueHeadCount: 8, headDimension: 128,
                                      ropeTheta: 1_000_000, epsilon: 1e-6)
+        /// Qwen3-4B as Z-Image-Turbo reads prompts (abliterated build): the
+        /// first 35 layers, whose last is the one it reads.
+        static let zimageText = Config(layerCount: 35, hiddenSize: 2560, headCount: 32,
+                                       keyValueHeadCount: 8, headDimension: 128,
+                                       ropeTheta: 1_000_000, epsilon: 1e-6)
     }
 
     let weights: [String: MLXArray]

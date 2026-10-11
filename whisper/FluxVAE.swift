@@ -15,6 +15,21 @@ import MLX
 ///   whole input nine times over.
 struct FluxVAEDecoder {
     let weights: [String: MLXArray]
+    /// float16 for FLUX.2's VAE. Z-Image's (FLUX.1's) overflows float16 —
+    /// upstream marks it force_upcast, and here it decoded to NaN — so it
+    /// runs in bfloat16: float32's range at float16's size.
+    let dtype: DType
+
+    init(weights: [String: MLXArray], dtype: DType = .float16) {
+        self.dtype = dtype
+        if dtype == .float16 {
+            self.weights = weights
+        } else {
+            let cast = weights.mapValues { $0.dtype == .float16 ? $0.asType(dtype) : $0 }
+            eval(Array(cast.values))
+            self.weights = cast
+        }
+    }
 
     private static let unfoldBudget = 256 << 20
     private static let statisticsBudget = 64 << 20
@@ -33,8 +48,15 @@ struct FluxVAEDecoder {
         z = z.reshaped(rows, columns, 32, 2, 2).transposed(0, 3, 1, 4, 2)
             .reshaped(1, 2 * rows, 2 * columns, 32).asType(.float16)
 
-        var x = conv(z, "post_quant_conv", padding: 0)
-        x = conv(x, "decoder.conv_in")
+        return try decode(conv(z, "post_quant_conv", padding: 0), isCancelled: isCancelled)
+    }
+
+    /// The decoder proper, from latents (1, h, w, channels) channels-last in
+    /// float16 — shared with Z-Image, whose VAE is FLUX.1's: the same decoder
+    /// over 16 channels, without FLUX.2's latent batch norm or post-quant
+    /// convolution. Returns (3, height, width) in -1...1, float32.
+    func decode(_ z: MLXArray, isCancelled: () -> Bool = { false }) throws -> MLXArray {
+        var x = conv(z.asType(dtype), "decoder.conv_in")
         x = resnet(x, "decoder.mid_block.resnets.0")
         x = midAttention(x, "decoder.mid_block.attentions.0")
         x = resnet(x, "decoder.mid_block.resnets.1")
@@ -82,7 +104,7 @@ struct FluxVAEDecoder {
     }
 
     /// GroupNorm (32 groups, eps 1e-6) with float32 statistics gathered over
-    /// strips of rows; the normalizing itself stays float16.
+    /// strips of rows; the normalizing itself stays in `dtype`.
     private func groupNorm(_ x: MLXArray, _ name: String) -> MLXArray {
         let (height, width, channels) = (x.dim(1), x.dim(2), x.dim(3))
         let perGroup = channels / Self.groups
@@ -99,8 +121,8 @@ struct FluxVAEDecoder {
         let count = Float(height * width * perGroup)
         let mean = sum / count
         let variance = maximum(squares / count - mean * mean, 0)
-        let scale = repeated(rsqrt(variance + 1e-6), count: perGroup, axis: 0).asType(.float16)
-        let shift = repeated(mean, count: perGroup, axis: 0).asType(.float16)
+        let scale = repeated(rsqrt(variance + 1e-6), count: perGroup, axis: 0).asType(dtype)
+        let shift = repeated(mean, count: perGroup, axis: 0).asType(dtype)
         return (x - shift) * (scale * weights["\(name).weight"]!) + weights["\(name).bias"]!
     }
 
