@@ -38,7 +38,7 @@ struct whisperApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var sharedModelContainer: ModelContainer = {
-        let schema = Schema([SavedTranscript.self, SavedSegment.self, SavedMusic.self])
+        let schema = Schema([SavedTranscript.self, SavedSegment.self, SavedMusic.self, SavedImage.self])
         let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
             return try ModelContainer(for: schema, configurations: [config])
@@ -65,10 +65,10 @@ struct whisperApp: App {
     }
 }
 
-/// Transcription and music generation are separate enough to be separate
-/// tabs: they share the library and the audio stack, but nothing on screen.
+/// Transcription, music and pictures are separate enough to be separate
+/// tabs: they share storage and the model downloader, but nothing on screen.
 struct RootView: View {
-    private enum Tab { case transcribe, music }
+    private enum Tab { case transcribe, music, image }
     @State private var tab = Tab.transcribe
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -97,6 +97,10 @@ struct RootView: View {
                 // label; there the Music page's own BETA tag says it.
                 .badge(sizeClass == .compact ? Text("Beta") : nil)
                 .tag(Tab.music)
+            ImageView()
+                .tabItem { Label("Image", systemImage: "photo.artframe") }
+                .badge(sizeClass == .compact ? Text("Beta") : nil)
+                .tag(Tab.image)
         }
         .tint(Studio.accent)
         // An audio or video file shared to the app, or opened with it from

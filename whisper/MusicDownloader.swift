@@ -41,21 +41,22 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
     /// called once its events have all been delivered.
     static var backgroundCompletionHandler: (@Sendable () -> Void)?
 
-    /// Reports progress for whichever download is running.
-    var onProgress: (@Sendable (Progress) -> Void)?
-    /// A line for the user when a transfer is being recovered, nil otherwise.
-    var onStatus: (@Sendable (String?) -> Void)? {
-        get { lock.withLock { statusHandler } }
-        set { lock.withLock { statusHandler = newValue } }
+    /// Who is waiting on each destination: its progress, and a line for the
+    /// user while a transfer is being recovered (nil once it isn't). Kept per
+    /// file, so the Music and Image tabs can each download at once without
+    /// one's progress landing on the other's bar.
+    private struct Watcher {
+        let progress: @Sendable (Progress) -> Void
+        let status: @Sendable (String?) -> Void
     }
-    private var statusHandler: (@Sendable (String?) -> Void)?
+    private var watchers: [String: Watcher] = [:]
 
-    private func setStatus(_ note: String?) {
-        let handler = lock.withLock { () -> (@Sendable (String?) -> Void)? in
-            noteShowing = note != nil
-            return statusHandler
+    private func setStatus(_ note: String?, for destination: String) {
+        let watcher = lock.withLock { () -> Watcher? in
+            if note == nil { notesShowing.remove(destination) } else { notesShowing.insert(destination) }
+            return watchers[destination]
         }
-        handler?(note)
+        watcher?.status(note)
     }
 
     /// No bytes for this long, on screen, counts as stalled.
@@ -71,9 +72,9 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
     /// with the resume data from `cancel(byProducingResumeData:)`, not by the
     /// delegate's generic cancellation error.
     private var stalled: Set<Int> = []
-    /// Whether a recovery note is on screen, so the first bytes after it
-    /// can clear it.
-    private var noteShowing = false
+    /// Destinations with a recovery note on screen, so the first bytes
+    /// after it can clear it.
+    private var notesShowing: Set<String> = []
 
     /// A transfer that ended early, with what is needed to continue it.
     private struct Interrupted: Error {
@@ -99,7 +100,24 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
     /// If a task for this destination is already running — typically because
     /// it was started before the app was last suspended — this continues that
     /// one instead of starting a second copy.
-    func download(from remote: URL, to destination: URL) async throws {
+    ///
+    /// - Parameters:
+    ///   - progress: how much of this file has arrived.
+    ///   - status: a line for the user while a dropped transfer is being
+    ///     recovered, and nil once it is moving again.
+    func download(from remote: URL, to destination: URL,
+                  progress: @escaping @Sendable (Progress) -> Void = { _ in },
+                  status: @escaping @Sendable (String?) -> Void = { _ in }) async throws {
+        let key = destination.path
+        lock.withLock { watchers[key] = Watcher(progress: progress, status: status) }
+        defer {
+            lock.withLock {
+                watchers[key] = nil
+                notesShowing.remove(key)
+            }
+        }
+        func setStatus(_ note: String?) { self.setStatus(note, for: key) }
+
         var task = await existingTask(for: destination) ?? newTask(from: remote, to: destination)
         var attempt = 1
         while true {
@@ -184,7 +202,7 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
     private func recoverStalled(_ task: URLSessionDownloadTask) {
         let identifier = task.taskIdentifier
         _ = lock.withLock { stalled.insert(identifier) }
-        setStatus("No data for \(Int(stallTimeout)) s — reconnecting")
+        setStatus("No data for \(Int(stallTimeout)) s — reconnecting", for: task.taskDescription ?? "")
         task.cancel { [weak self] data in
             self?.finish(identifier, with: .failure(Interrupted(resumeData: data, reason: "The download stalled.")))
         }
@@ -222,8 +240,9 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
         // Reported by time, not by fraction: at 0.5% steps a 1.8 GB file
         // updated only every 9 MB, which on a slow link is indistinguishable
         // from being stuck.
-        let clearNote = lock.withLock { noteShowing }
-        if clearNote { setStatus(nil) }
+        let destination = downloadTask.taskDescription ?? ""
+        let clearNote = lock.withLock { notesShowing.contains(destination) }
+        if clearNote { setStatus(nil, for: destination) }
         let shouldReport = lock.withLock {
             lastActivity[downloadTask.taskIdentifier] = now
             let previous = lastReported[downloadTask.taskIdentifier] ?? .distantPast
@@ -231,11 +250,10 @@ final class WeightDownloadService: NSObject, URLSessionDownloadDelegate, @unchec
             if due { lastReported[downloadTask.taskIdentifier] = now }
             return due
         }
-        guard shouldReport else { return }
-        let name = (downloadTask.taskDescription as NSString?)?.lastPathComponent ?? ""
-        onProgress?(Progress(destinationName: name,
-                             fraction: Double(totalBytesWritten) / Double(totalBytesExpectedToWrite),
-                             received: totalBytesWritten, expected: totalBytesExpectedToWrite))
+        guard shouldReport, let watcher = lock.withLock({ watchers[destination] }) else { return }
+        watcher.progress(Progress(destinationName: (destination as NSString).lastPathComponent,
+                                  fraction: Double(totalBytesWritten) / Double(totalBytesExpectedToWrite),
+                                  received: totalBytesWritten, expected: totalBytesExpectedToWrite))
     }
 
     func urlSession(_ session: URLSession,

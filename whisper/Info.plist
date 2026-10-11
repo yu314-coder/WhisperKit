@@ -8,6 +8,8 @@
 	<string>Whisper uses the microphone only when you tap Record. Audio is transcribed entirely on-device and never leaves your iPhone.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Whisper accesses Photos only to import a video you choose to transcribe. Nothing leaves your device.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Whisper adds a picture you made to Photos only when you tap Save.</string>
 	<key>NSUserNotificationsUsageDescription</key>
 	<string>Whisper sends a notification when a long transcription finishes, so you don't have to keep the app open.</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>

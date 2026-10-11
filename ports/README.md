@@ -1,8 +1,8 @@
 # Model ports
 
-Swift/MLX ports written for the Music tab, kept here because they are not all
-shippable in the iOS app. Each was verified against the PyTorch reference by
-comparing tensors stage by stage, not by listening.
+Swift/MLX ports written for the Music and Image tabs, kept here because they
+are not all shippable in the iOS app. Each was verified against the PyTorch
+reference by comparing tensors stage by stage, not by listening or looking.
 
 ## musicgen/ — MusicGen Small (Meta)
 
@@ -333,6 +333,60 @@ five seconds once cached.
 
 Still missing: the FSQ audio encoder side, which turns supplied audio into
 tokens — so reference audio and covers are unavailable.
+
+## imagegen/ — the Image tab
+
+Three models, all shipping (release `imagegen-v1`), plus the picture check.
+The converters live here; the Swift is `whisper/SDPipeline.swift`,
+`Sana*.swift`, `Gemma*.swift`, `Flux*.swift` and `SafetyChecker.swift`.
+Prompts are never filtered; only a finished picture that looks sexually
+explicit is withheld (App Store 1.1.4).
+
+| model | where it runs | download | M4 Mac |
+|---|---|---|---|
+| DreamShaper 8 + Hyper-SD, 512 px, 4 steps (`convert_sd.py`) | Neural Engine | 1.1 GB | 1.5 s |
+| SANA-Sprint 0.6B, 1024 px, 2 steps (`convert_sana.py`, `export_sana_mlx.py`) | GPU + Neural Engine | 3.7 GB | 4.4 s |
+| FLUX.2 [klein] 4B, 512–1024 px, 4 steps (`export_flux_mlx.py`) | GPU | 7.5 GB | 40 s at 768, 63 s at 1024 |
+| picture check, Falconsai ViT (`convert_safety.py`) | Neural Engine | 86 MB | 40 ms |
+
+Verified against each upstream diffusers pipeline end to end with its own
+noise (PSNR of the final picture), not only stage by stage:
+
+| check | result |
+|---|---|
+| SANA: Gemma tokens, 12 prompts incl. CJK, emoji, added tokens, 506-token cap | identical |
+| SANA: caption (Gemma 8-bit + projection) | cosine 0.99993 |
+| SANA: whole pipeline, shipped weights | 32.7 / 28.1 dB, same picture |
+| FLUX: Qwen tokens with chat template, 8 prompts | identical |
+| FLUX: Qwen3 layers 9/18/27, all 512 positions | cosine 0.99986 |
+| FLUX: one transformer step | cosine 0.99987 |
+| FLUX: whole pipeline, shipped weights | 30.8 / 20.5 dB, same picture |
+| picture check, Core ML vs PyTorch | same scores |
+
+What decided the shipped precisions and placements:
+
+- **8-bit text encoders.** 4-bit Gemma, or a 4-bit embedding table alone,
+  visibly changed faces; 4-bit Qwen3 changed the scene. Both encoders run
+  with float32 activations — their residual streams overflow float16.
+- **FLUX in bfloat16.** Float16 activations go NaN from the second step.
+  A 4-bit transformer drew a different lighthouse.
+- **SANA's transformer on the GPU**, although the Neural Engine runs a step
+  twice as fast: Core ML took 11 s to load it there on every run (an int8
+  linear-quantized build, 33 s), against 2 s once on the GPU.
+- **coremltools compresses more than weights.** Its quantize and palettize
+  passes also take large constants such as SANA's modulation tables and
+  convolution biases, with one scale each (cosine 0.979); `op_name_configs`
+  must exclude them.
+- **DC-AE split in two.** Its linear attention sums reach 400,000 and the
+  Neural Engine's matmul got them wrong, so the three attention stages run in
+  MLX (float32 sums) and the three convolution stages — 90% of the work —
+  on the Neural Engine, with each RMSNorm's input divided by its pixel's
+  largest channel so float16 squares can't overflow.
+- **Memory.** MLX views a mapped file as one array of 32-bit length, so
+  weights over 2 GB ship in parts; MLX unfolds a convolution's whole input,
+  so large images convolve in strips; FLUX's VAE gathers group-norm
+  statistics in float32 strips. Peak footprint: SANA 1.1 GB, FLUX 1.5 GB at
+  768 px and 2.4 GB at 1024 px.
 
 ## What kept going wrong
 

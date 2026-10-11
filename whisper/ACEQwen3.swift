@@ -41,6 +41,11 @@ struct ACEQwen3 {
         static let plannerLarge = Config(layerCount: 36, hiddenSize: 2560, headCount: 32,
                                          keyValueHeadCount: 8, headDimension: 128,
                                          ropeTheta: 1_000_000, epsilon: 1e-6)
+        /// Qwen3-4B as FLUX.2 [klein] reads prompts: the same model, only its
+        /// first 27 layers shipped (FLUX takes states from layers 9, 18, 27).
+        static let fluxText = Config(layerCount: 27, hiddenSize: 2560, headCount: 32,
+                                     keyValueHeadCount: 8, headDimension: 128,
+                                     ropeTheta: 1_000_000, epsilon: 1e-6)
     }
 
     let weights: [String: MLXArray]
@@ -115,6 +120,37 @@ struct ACEQwen3 {
             eval(h)
         }
         return rmsNorm(h, weight: w("norm.weight"), eps: config.epsilon)
+    }
+
+    /// The hidden states after each of `layers` (counted from 1), for a
+    /// prompt padded on the right to its full length, as FLUX.2 reads it.
+    ///
+    /// Padding is computed too — FLUX attends to all 512 positions — but, as
+    /// upstream's attention mask has it, no position attends to padding:
+    /// real tokens see the real tokens before them, padding sees them all.
+    func states(inputIDs: MLXArray, valid: Int, after layers: [Int],
+                isCancelled: () -> Bool = { false }) throws -> [MLXArray] {
+        let length = inputIDs.dim(1)
+        var h = embed(inputIDs: inputIDs)
+        var values = [Float](repeating: 0, count: length * length)
+        for query in 0 ..< length {
+            for key in 0 ..< length where key > query || key >= valid { values[query * length + key] = -1e9 }
+        }
+        let mask = MLXArray(values, [1, 1, length, length]).asType(dtype)
+        var kept: [MLXArray] = []
+        for layer in 0 ..< (layers.max() ?? 0) {
+            if isCancelled() { throw CancellationError() }
+            let prefix = "layers.\(layer)"
+            h = h + attention(prefix: "\(prefix).self_attn",
+                              x: rmsNorm(h, weight: w("\(prefix).input_layernorm.weight"), eps: config.epsilon),
+                              mask: mask)
+            h = h + feedForward(prefix: "\(prefix).mlp",
+                                x: rmsNorm(h, weight: w("\(prefix).post_attention_layernorm.weight"),
+                                           eps: config.epsilon))
+            eval(h)
+            if layers.contains(layer + 1) { kept.append(h) }
+        }
+        return kept
     }
 
     // MARK: - Incremental decoding

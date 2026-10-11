@@ -98,39 +98,10 @@ enum MusicModel: String, CaseIterable, Identifiable {
 
     // MARK: - Weights
 
-    private static let releaseRoot =
-        "https://github.com/yu314-coder/WhisperKit/releases/download"
-
     /// All versions share one folder, so shared files are fetched once.
     var weightsDirectory: URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return documents.appendingPathComponent("MusicModels/ace-step", isDirectory: true)
-    }
-
-    struct WeightFile {
-        /// Relative to `weightsDirectory`.
-        let path: String
-        /// Exact, read from the hosted asset: it doubles as the "already
-        /// downloaded" test.
-        let bytes: Int64
-        let release: String
-        /// For an Apple Archive: the files it unpacks to, relative to
-        /// `weightsDirectory`, with their sizes. The archive is deleted once
-        /// unpacked, so these are what show it was downloaded.
-        var contents: [(path: String, bytes: Int64)] = []
-
-        var isArchive: Bool { !contents.isEmpty }
-
-        /// Bytes on disk once in place.
-        var installedBytes: Int64 { isArchive ? contents.reduce(0) { $0 + $1.bytes } : bytes }
-
-        func isPresent(in directory: URL) -> Bool {
-            func size(_ path: String) -> Int64 {
-                Int64((try? directory.appendingPathComponent(path)
-                    .resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1)
-            }
-            return isArchive ? contents.allSatisfy { size($0.path) == $0.bytes } : size(path) == bytes
-        }
     }
 
     /// The files every version reads: from release acestep-v2, and the
@@ -195,18 +166,6 @@ enum MusicModel: String, CaseIterable, Identifiable {
         ("ace_xl_cond_f16.safetensors", 8_672_128),
     ] as [(String, Int64)]).map { WeightFile(path: $0.0, bytes: $0.1, release: "acestep-v4") }
 
-    func downloadURL(for file: WeightFile) -> URL? {
-        let asset = file.path
-        #if DEBUG
-        // For testing interrupted downloads against a local server:
-        // launch with `-MusicWeightsRootOverride http://127.0.0.1:8765`.
-        if let root = UserDefaults.standard.string(forKey: "MusicWeightsRootOverride") {
-            return URL(string: "\(root)/\(file.release)/\(asset)")
-        }
-        #endif
-        return URL(string: "\(Self.releaseRoot)/\(file.release)/\(asset)")
-    }
-
     var downloadBytes: Int64 { weightFiles.reduce(0) { $0 + $1.bytes } }
 
     var sizeLabel: String {
@@ -217,10 +176,7 @@ enum MusicModel: String, CaseIterable, Identifiable {
     /// Top-level names under `weightsDirectory` that any version uses; the
     /// rest are left over from earlier builds.
     static var expectedTopLevelNames: Set<String> {
-        Set(allCases.flatMap { model in
-            model.weightFiles.flatMap { file in ([file.path] + file.contents.map(\.path)) }
-                .map { String($0.split(separator: "/")[0]) }
-        })
+        WeightFile.topLevelNames(allCases.flatMap(\.weightFiles))
     }
 
     /// Stable Audio 3, which earlier builds offered, left 1.7 to 3.7 GB here.

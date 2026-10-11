@@ -40,3 +40,31 @@ def save_aligned(path, tensors):
     misaligned = [n for n, h in header.items() if (8 + len(text) + h["data_offsets"][0]) % ALIGN]
     print(f"{os.path.basename(path)}: {len(items)} tensors, {os.path.getsize(path):,} bytes, "
           f"{len(misaligned)} not 64-byte aligned")
+
+
+# MLX shapes are 32-bit, so MappedWeights.swift can't view a file over 2 GiB
+# as one array: bigger models are written in parts.
+PART_BYTES = 1_900_000_000
+
+
+def save_parts(stem, tensors):
+    """Writes `<stem>.part1.safetensors`... under PART_BYTES each, split on
+    whole source tensors so a quantized triple stays together. Returns the
+    number of parts."""
+    groups = {}
+    for name, array in tensors.items():
+        base = name.rsplit(".", 1)[0] if name.endswith((".wq", ".scales", ".biases")) else name
+        groups.setdefault(base, {})[name] = array
+    parts, current, size = [], {}, 0
+    for base in sorted(groups):
+        group = groups[base]
+        group_bytes = sum(a.nbytes for a in group.values())
+        if current and size + group_bytes > PART_BYTES:
+            parts.append(current)
+            current, size = {}, 0
+        current.update(group)
+        size += group_bytes
+    parts.append(current)
+    for index, part in enumerate(parts, start=1):
+        save_aligned(f"{stem}.part{index}.safetensors", part)
+    return len(parts)

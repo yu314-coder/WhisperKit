@@ -2,7 +2,7 @@ import SwiftUI
 
 /// How to use a tab, behind the "?" in its top bar.
 struct HelpView: View {
-    enum Topic { case transcribe, music }
+    enum Topic { case transcribe, music, image }
     let topic: Topic
 
     @Environment(\.dismiss) private var dismiss
@@ -35,13 +35,21 @@ struct HelpView: View {
                 .frame(maxWidth: .infinity)
             }
             .background(Studio.bg.ignoresSafeArea())
-            .navigationTitle(topic == .transcribe ? "How to Transcribe" : "How to Make Music")
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+    }
+
+    private var title: String {
+        switch topic {
+        case .transcribe: return "How to Transcribe"
+        case .music:      return "How to Make Music"
+        case .image:      return "How to Make Pictures"
         }
     }
 
@@ -96,6 +104,25 @@ struct HelpView: View {
                         body: "Every song is kept with its prompt and lyrics. Tap one to play it, read everything, share it, or use its prompt again."),
                 Section(icon: "lock.fill", title: "Private",
                         body: "Music is made entirely on this device. Nothing you type leaves it."),
+            ]
+        case .image:
+            return [
+                Section(icon: "flask", title: "Pictures are in beta",
+                        body: "It works, and it keeps improving. Every picture is different — generate again for another take."),
+                Section(icon: "text.cursor", title: "1. Describe the picture",
+                        body: "Say what is in it and how it looks: \"a lighthouse on a cliff at sunset, oil painting\". The style buttons add a look. Real people, places and news events all work — the app doesn't filter topics."),
+                Section(icon: "wand.and.stars", title: "2. Generate",
+                        body: "The first time, the model downloads (1 to 7.5 GB, shown in the model menu), and the first picture also prepares the chip it runs on, which takes longer. After that DreamShaper takes a few seconds, SANA-Sprint a little longer, and FLUX.2 klein a minute or more."),
+                Section(icon: "square.stack.3d.up", title: "Models",
+                        body: "Tap the model name at the top. DreamShaper is the fastest and smallest, at 512 × 512. SANA-Sprint makes sharp 1024 × 1024 pictures in two steps. FLUX.2 klein gives the best pictures, follows long, detailed prompts closely and offers several shapes; it is the slowest and the largest download."),
+                Section(icon: "photo.stack", title: "History",
+                        body: "Every picture is kept with its prompt. Open one to share it, save it to Photos, or use its prompt again."),
+                Section(icon: "tag", title: "Marked as AI-made",
+                        body: "Each picture's file says it was made by AI (the IPTC \"trained algorithmic media\" tag that Photos, news desks and social networks read). Nothing is drawn on the picture."),
+                Section(icon: "checkmark.shield", title: "What you may not make",
+                        body: "The models' licences, which you agree to by using them, forbid using them to break the law; to harm, exploit or sexualise minors; to defame or harass people; to make false information meant to harm others, or to pass AI pictures off as real in order to deceive; and to sexualise real people without consent. Every finished picture passes a check on this device, and one that looks sexually explicit isn't shown or saved; prompts themselves are never filtered. Licences: DreamShaper 8 and Stable Diffusion 1.5, CreativeML OpenRAIL-M; Hyper-SD, CreativeML OpenRAIL++-M; SANA-Sprint, FLUX.2 klein, Qwen3 and the picture check (Falconsai), Apache 2.0; Gemma, the Gemma Terms of Use (ai.google.dev/gemma/terms) and its Prohibited Use Policy."),
+                Section(icon: "lock.fill", title: "Private",
+                        body: "Pictures are made entirely on this device. Nothing you type leaves it."),
             ]
         }
     }
