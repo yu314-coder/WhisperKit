@@ -1,13 +1,13 @@
 import Foundation
 
-/// The Image tab's models: three sizes of picture-maker, each running
-/// entirely on the device.
+/// The Image tab's models, each running entirely on the device — listed
+/// best pictures first, as the model menu shows them.
 enum ImageModel: String, CaseIterable, Identifiable {
-    case dreamShaper = "dreamshaper-8-hyper"
-    case sanaSprint  = "sana-sprint-0.6b"
-    case sanaSprintLarge = "sana-sprint-1.6b"
-    case fluxKlein   = "flux2-klein-4b"
     case zImage      = "z-image-turbo"
+    case fluxKlein   = "flux2-klein-4b"
+    case sanaSprintLarge = "sana-sprint-1.6b"
+    case sanaSprint  = "sana-sprint-0.6b"
+    case dreamShaper = "dreamshaper-8-hyper"
 
     var id: String { rawValue }
 

@@ -6,7 +6,9 @@ import Photos
 struct ImageView: View {
     @State private var prompt: String = ""
     @FocusState private var promptFocused: Bool
-    @AppStorage("imageModel") private var selectedModel: ImageModel = .dreamShaper
+    /// Z-Image Turbo unless chosen otherwise: DreamShaper, the first default,
+    /// is 512 px and looked blurry and fake full-screen on an iPad.
+    @AppStorage("imageModel") private var selectedModel: ImageModel = .zImage
     @AppStorage("imageSize") private var sizeID: String = ""
     @State private var engine = ImageEngine()
     @State private var memory = MusicMemoryMonitor()
