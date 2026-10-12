@@ -10,6 +10,7 @@ struct ImageView: View {
     /// is 512 px and looked blurry and fake full-screen on an iPad.
     @AppStorage("imageModel") private var selectedModel: ImageModel = .zImage
     @AppStorage("imageSize") private var sizeID: String = ""
+    @AppStorage("imageEnhancePrompt") private var enhancePrompt = false
     @State private var engine = ImageEngine()
     @State private var memory = MusicMemoryMonitor()
     @State private var showModelPicker = false
@@ -236,6 +237,23 @@ struct ImageView: View {
                 }
             }
 
+            Toggle(isOn: $enhancePrompt) {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .foregroundColor(Studio.accent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Enhance prompt")
+                            .font(Studio.text(13, weight: .medium))
+                            .foregroundColor(Studio.ink)
+                        Text("Qwen3.5 first writes your idea out as a detailed description, keeping your names, text and counts, then the picture is made from it. About half a minute more; \(ImageModel.rewriterSizeLabel) the first time.\(ImageModel.rewriterMemoryNote.map { " " + $0 } ?? "")")
+                            .font(Studio.text(12))
+                            .foregroundColor(Studio.mute)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .tint(Studio.accent)
+
             if selectedModel.sizes.count > 1 {
                 HStack(spacing: 7) {
                     ForEach(selectedModel.sizes) { option in
@@ -302,6 +320,13 @@ struct ImageView: View {
                         .foregroundColor(Studio.accent)
                 }
                 ProgressView(value: progress).tint(Studio.accent)
+                if let rewritten = engine.rewrittenPrompt {
+                    Text(rewritten)
+                        .font(Studio.text(12))
+                        .foregroundColor(Studio.ink.opacity(0.75))
+                        .lineLimit(5)
+                        .textSelection(.enabled)
+                }
                 HStack(alignment: .top) {
                     Text(stage)
                         .font(Studio.mono(10))
@@ -465,7 +490,7 @@ struct ImageView: View {
     private func startGenerating() {
         promptFocused = false
         memory.start()
-        engine.generate(model: selectedModel, prompt: prompt, size: size)
+        engine.generate(model: selectedModel, prompt: prompt, size: size, enhance: enhancePrompt)
     }
 
     private var generateBar: some View {

@@ -4,6 +4,7 @@ import Foundation
 /// best pictures first, as the model menu shows them.
 enum ImageModel: String, CaseIterable, Identifiable {
     case qwenImage   = "qwen-image-2.1-turbo"
+    case qwenImageSmall = "qwen-image-2.1-turbo-4bit"
     case zImage      = "z-image-turbo"
     case fluxKlein   = "flux2-klein-4b"
     case sanaSprintLarge = "sana-sprint-1.6b"
@@ -20,6 +21,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .fluxKlein:   return "FLUX.2 klein"
         case .zImage:      return "Z-Image Turbo"
         case .qwenImage:   return "Qwen-Image 2.1 Turbo"
+        case .qwenImageSmall: return "Qwen-Image 2.1 Turbo 4-bit"
         }
     }
 
@@ -30,7 +32,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .sanaSprintLarge: return "1.6B"
         case .fluxKlein:   return "4B"
         case .zImage:      return "6B"
-        case .qwenImage:   return "7B"
+        case .qwenImage, .qwenImageSmall: return "7B"
         }
     }
 
@@ -42,13 +44,14 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .fluxKlein:   return "Follows long prompts closely · several shapes"
         case .zImage:      return "Most lifelike · nothing steers your prompt away"
         case .qwenImage:   return "Finest detail and lettering · slowest · nothing steers your prompt away"
+        case .qwenImageSmall: return "Nearly the same pictures at half the download"
         }
     }
 
     var engineLabel: String {
         switch self {
         case .dreamShaper:           return "NEURAL ENGINE"
-        case .sanaSprint, .sanaSprintLarge, .fluxKlein, .zImage, .qwenImage: return "GPU"
+        case .sanaSprint, .sanaSprintLarge, .fluxKlein, .zImage, .qwenImage, .qwenImageSmall: return "GPU"
         }
     }
 
@@ -61,10 +64,10 @@ enum ImageModel: String, CaseIterable, Identifiable {
         switch self {
         case .dreamShaper: return "DreamShaper 8 and Stable Diffusion 1.5: CreativeML OpenRAIL-M. Hyper-SD: CreativeML OpenRAIL++-M."
         case .sanaSprint, .sanaSprintLarge:
-            return "SANA-Sprint: Apache 2.0. Its text encoder, Gemma 2: Gemma Terms of Use."
+            return "SANA-Sprint: Apache 2.0. Its text encoder, Gemma 2 (abliterated build): Gemma Terms of Use."
         case .fluxKlein:   return "FLUX.2 [klein] 4B and its abliterated Qwen3 prompt reader (shared with Z-Image-Turbo): Apache 2.0."
         case .zImage:      return "Z-Image-Turbo (Tongyi-MAI) and its abliterated Qwen3 prompt reader: Apache 2.0."
-        case .qwenImage:
+        case .qwenImage, .qwenImageSmall:
             return "Qwen-Image 2.1 Turbo: Qwen RESEARCH LICENSE AGREEMENT — Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved. Its abliterated Qwen3-VL prompt reader: Apache 2.0."
         }
     }
@@ -73,10 +76,17 @@ enum ImageModel: String, CaseIterable, Identifiable {
 
     /// SANA-Sprint 1.6B shares the 0.6B's folder: the two read the same
     /// Gemma 2, decoder and tokenizer, byte for byte, so whichever comes
-    /// second downloads only its own transformer.
+    /// second downloads only its own transformer. Qwen-Image's 4-bit build
+    /// shares the 8-bit one's the same way, for its decoder, tokenizer and
+    /// licence.
     var weightsDirectory: URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let folder = self == .sanaSprintLarge ? Self.sanaSprint.rawValue : rawValue
+        let folder: String
+        switch self {
+        case .sanaSprintLarge: folder = Self.sanaSprint.rawValue
+        case .qwenImageSmall:  folder = Self.qwenImage.rawValue
+        default:               folder = rawValue
+        }
         return documents.appendingPathComponent("ImageModels/\(folder)", isDirectory: true)
     }
 
@@ -104,6 +114,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .fluxKlein:   return Self.fluxFiles
         case .zImage:      return Self.zImageFiles
         case .qwenImage:   return Self.qwenImageFiles
+        case .qwenImageSmall: return Self.qwenImageSmallFiles
         }
     }
 
@@ -165,8 +176,8 @@ enum ImageModel: String, CaseIterable, Identifiable {
     ]
     private static let sanaShared: [WeightFile] = [
         WeightFile(path: "gemma_bpe.bin", bytes: 9462292, release: release),
-        WeightFile(path: "sana_gemma_q8.part1.safetensors", bytes: 1890696320, release: release),
-        WeightFile(path: "sana_gemma_q8.part2.safetensors", bytes: 887825856, release: release),
+        WeightFile(path: "sana_gemma_abliterated_q8.part1.safetensors", bytes: 1890696320, release: release),
+        WeightFile(path: "sana_gemma_abliterated_q8.part2.safetensors", bytes: 887825856, release: release),
         WeightFile(path: "sana_decoder_head.safetensors", bytes: 273609920, release: release),
         archive("sana_decoder_tail.mlmodelc", 41698134, [
             ("analytics/coremldata.bin", 243),
@@ -210,11 +221,9 @@ enum ImageModel: String, CaseIterable, Identifiable {
     ]
 
     /// Qwen-Image 2.1 Turbo: the abliterated Qwen3-VL's language model and
-    /// the transformer, 8-bit, in parts under 2 GB; the VAE decoder; Qwen's
-    /// tokenizer; and the licence and notice its terms ask to go with it.
-    static let qwenImageFiles: [WeightFile] = [
-        WeightFile(path: "qwenimage_vocab.json", bytes: 3080118, release: release),
-        WeightFile(path: "qwenimage_merges.txt", bytes: 1671853, release: release),
+    /// the transformer, 8-bit, in parts under 2 GB; plus what both builds
+    /// share.
+    static let qwenImageFiles: [WeightFile] = qwenImageShared + [
         WeightFile(path: "qwenimage_text_q8.part1.safetensors", bytes: 1891441856, release: release),
         WeightFile(path: "qwenimage_text_q8.part2.safetensors", bytes: 1898776896, release: release),
         WeightFile(path: "qwenimage_text_q8.part3.safetensors", bytes: 1898776896, release: release),
@@ -225,6 +234,21 @@ enum ImageModel: String, CaseIterable, Identifiable {
         WeightFile(path: "qwenimage_transformer_q8.part3.safetensors", bytes: 1853909312, release: release),
         WeightFile(path: "qwenimage_transformer_q8.part4.safetensors", bytes: 1853909184, release: release),
         WeightFile(path: "qwenimage_transformer_q8.part5.safetensors", bytes: 142616320, release: release),
+    ]
+    /// Its 4-bit build: the same, requantized (ports/imagegen/requantize_mlx.py).
+    static let qwenImageSmallFiles: [WeightFile] = qwenImageShared + [
+        WeightFile(path: "qwenimage_text_q4.part1.safetensors", bytes: 1898288512, release: release),
+        WeightFile(path: "qwenimage_text_q4.part2.safetensors", bytes: 1873903744, release: release),
+        WeightFile(path: "qwenimage_text_q4.part3.safetensors", bytes: 486180800, release: release),
+        WeightFile(path: "qwenimage_transformer_q4.part1.safetensors", bytes: 1898564864, release: release),
+        WeightFile(path: "qwenimage_transformer_q4.part2.safetensors", bytes: 1878051136, release: release),
+        WeightFile(path: "qwenimage_transformer_q4.part3.safetensors", bytes: 226505984, release: release),
+    ]
+    /// The VAE decoder, Qwen's tokenizer, and the licence and notice its
+    /// terms ask to go with it.
+    private static let qwenImageShared: [WeightFile] = [
+        WeightFile(path: "qwenimage_vocab.json", bytes: 3080118, release: release),
+        WeightFile(path: "qwenimage_merges.txt", bytes: 1671853, release: release),
         WeightFile(path: "qwenimage_vae.safetensors", bytes: 506155944, release: release),
         WeightFile(path: "qwenimage_LICENSE.txt", bytes: 7831, release: release),
         WeightFile(path: "qwenimage_NOTICE.txt", bytes: 1602, release: release),
@@ -241,6 +265,36 @@ enum ImageModel: String, CaseIterable, Identifiable {
             ("weights/weight.bin", 86130752),
         ]),
     ]
+
+    /// The prompt rewriter (PromptRewriter): Qwen-Image 2.1's own, a
+    /// Qwen3.5 9B, 4-bit; downloaded the first time "Enhance prompt" is used.
+    static let rewriterFiles: [WeightFile] = [
+        WeightFile(path: "rewriter_q4.part1.safetensors", bytes: 1886029824, release: release),
+        WeightFile(path: "rewriter_q4.part2.safetensors", bytes: 1885385024, release: release),
+        WeightFile(path: "rewriter_q4.part3.safetensors", bytes: 1266733696, release: release),
+        WeightFile(path: "rewriter_vocab.json", bytes: 5730581, release: release),
+        WeightFile(path: "rewriter_merges.txt", bytes: 3353273, release: release),
+        WeightFile(path: "rewriter_specials.json", bytes: 835, release: release),
+        WeightFile(path: "rewriter_system_prompt.txt", bytes: 10045, release: release),
+        WeightFile(path: "rewriter_LICENSE.txt", bytes: 7831, release: release),
+        WeightFile(path: "rewriter_NOTICE.txt", bytes: 333, release: release),
+    ]
+
+    static var rewriterDirectory: URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return documents.appendingPathComponent("ImageModels/prompt-rewriter", isDirectory: true)
+    }
+
+    static var rewriterSizeLabel: String {
+        String(format: "%.1f GB", Double(rewriterFiles.reduce(0) { $0 + $1.bytes }) / 1e9)
+    }
+
+    /// A caution about the rewriter on this device, or nil — never a block.
+    static var rewriterMemoryNote: String? {
+        let gigabytes = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+        guard gigabytes < 7 else { return nil }
+        return "With \(Int(gigabytes.rounded())) GB here it reads its weights from storage as it goes, so it takes longer."
+    }
 
     static var safetyDirectory: URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -265,8 +319,8 @@ enum ImageModel: String, CaseIterable, Identifiable {
         switch self {
         case .dreamShaper, .sanaSprint, .sanaSprintLarge:
             return nil
-        case .fluxKlein, .zImage, .qwenImage:
-            // Qwen-Image's transformer alone is 7.5 GB.
+        case .fluxKlein, .zImage, .qwenImage, .qwenImageSmall:
+            // Qwen-Image's transformer alone is 7.5 GB (4 GB in 4 bits).
             guard gigabytes < (self == .qwenImage ? 11 : 7) else { return nil }
             return String(format: "%@ runs here. With %.0f GB on this device its weights are read from storage as it goes, so pictures take longer.", displayName, gigabytes.rounded())
         }

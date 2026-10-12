@@ -13,6 +13,12 @@ struct ImageSize: Hashable, Identifiable {
     var label: String { "\(width) × \(height)" }
     var shapeName: String { width == height ? "Square" : (width > height ? "Wide" : "Tall") }
     var symbol: String { width == height ? "square" : (width > height ? "rectangle" : "rectangle.portrait") }
+    /// Width to height in lowest terms, such as "3:4".
+    var ratio: String {
+        var (a, b) = (width, height)
+        while b != 0 { (a, b) = (b, a % b) }
+        return "\(width / a):\(height / a)"
+    }
 }
 
 extension ImageModel {
@@ -24,7 +30,7 @@ extension ImageModel {
         switch self {
         case .dreamShaper: return [ImageSize(width: 512, height: 512)]
         case .sanaSprint, .sanaSprintLarge: return [ImageSize(width: 1024, height: 1024)]
-        case .fluxKlein, .zImage, .qwenImage:
+        case .fluxKlein, .zImage, .qwenImage, .qwenImageSmall:
                            return [ImageSize(width: 768, height: 768), ImageSize(width: 1024, height: 1024),
                                    ImageSize(width: 768, height: 1024), ImageSize(width: 1024, height: 768),
                                    ImageSize(width: 512, height: 512)]
@@ -65,6 +71,8 @@ final class ImageEngine {
     private(set) var lastImage: SavedImage?
     private(set) var startedAt: Date?
     private(set) var downloadNote: String?
+    /// The rewriter's description, once written, while its picture is made.
+    private(set) var rewrittenPrompt: String?
 
     private var work: Task<Void, Never>?
     private var backgroundJob: BackgroundWork.Job?
@@ -95,13 +103,16 @@ final class ImageEngine {
         }
     }
 
-    func generate(model: ImageModel, prompt: String, size: ImageSize, seed: UInt64? = nil) {
+    /// - Parameter enhance: have the prompt rewriter (PromptRewriter) turn
+    ///   the prompt into a detailed description first.
+    func generate(model: ImageModel, prompt: String, size: ImageSize, seed: UInt64? = nil, enhance: Bool = false) {
         guard !isBusy else { return }
         startedAt = Date()
         endedInBackground = false
         lastImage = nil
+        rewrittenPrompt = nil
         let job = BackgroundWork.shared.begin(title: "Making a picture", subtitle: Self.shortened(prompt),
-                                              usesGPU: model.usesGPU)
+                                              usesGPU: model.usesGPU || enhance)
         job.onExpire = { [weak self] in
             self?.endedInBackground = true
             self?.cancel()
@@ -125,6 +136,12 @@ final class ImageEngine {
                     batches.append(.init(files: borrowed.files, directory: borrowed.model.weightsDirectory,
                                          expected: WeightFile.topLevelNames(borrowed.model.folderFiles)))
                 }
+                if enhance {
+                    // The system prompt's state, saved there on first use, stays.
+                    batches.append(.init(files: ImageModel.rewriterFiles, directory: ImageModel.rewriterDirectory,
+                                         expected: WeightFile.topLevelNames(ImageModel.rewriterFiles)
+                                            .union([PromptRewriter.File.systemState])))
+                }
                 try await WeightFetcher.fetch(batches, progress: { [weak self] update in
                     self?.phase = .downloading(file: update.file, completed: update.completed, total: update.total,
                                                fraction: update.fraction, received: update.received,
@@ -134,7 +151,7 @@ final class ImageEngine {
                 })
                 try Task.checkCancellation()
                 try await self.run(model: model, prompt: prompt, size: size,
-                                   seed: seed ?? UInt64.random(in: 0 ... UInt64(UInt32.max)))
+                                   seed: seed ?? UInt64.random(in: 0 ... UInt64(UInt32.max)), enhance: enhance)
                 job.finish(success: true)
                 self.notifyIfAway(title: "Your picture is ready", body: Self.shortened(prompt))
             } catch is CancellationError {
@@ -159,11 +176,11 @@ final class ImageEngine {
 
     // MARK: - Generation
 
-    private func run(model: ImageModel, prompt: String, size: ImageSize, seed: UInt64) async throws {
+    private func run(model: ImageModel, prompt: String, size: ImageSize, seed: UInt64, enhance: Bool) async throws {
         // MLX crashes on the Simulator's Metal device (see MusicEngine);
         // DreamShaper is Core ML only and runs there, slowly.
         #if targetEnvironment(simulator)
-        if model.usesGPU { throw SimulatorUnsupported(model: model.displayName) }
+        if model.usesGPU || enhance { throw SimulatorUnsupported(model: enhance ? "Enhance prompt" : model.displayName) }
         #endif
         phase = .generating(stage: "Starting", progress: 0.01)
         let started = Date()
@@ -175,18 +192,38 @@ final class ImageEngine {
                 self.phase = .generating(stage: label, progress: progress)
             }
         }
-        let image: CGImage = try await withTaskCancellationHandler {
+        let shown: @Sendable (String) -> Void = { [weak self] text in
+            Task { @MainActor [weak self] in self?.rewrittenPrompt = text }
+        }
+        let (image, used): (CGImage, String) = try await withTaskCancellationHandler {
             try await Task.detached(priority: .userInitiated) {
-                let image = try Self.render(model: model, prompt: prompt, size: size, seed: seed, directory: directory,
+                var used = prompt
+                if enhance {
+                    // On the GPU: off screen without background GPU time it
+                    // waits between tokens.
+                    report("Writing a detailed prompt", 0.01)
+                    used = try PromptRewriter(directory: ImageModel.rewriterDirectory)
+                        .rewrite(prompt, ratio: size.ratio,
+                                 isCancelled: { GPUGate.waitUntilOpen(); return flag.isCancelled },
+                                 progress: { count in
+                                     if count % 8 == 0 {
+                                         report("Writing a detailed prompt · \(count) tokens", 0.01 + 0.06 * min(1, Double(count) / 450))
+                                     }
+                                 }).prompt
+                    shown(used)
+                }
+                let image = try Self.render(model: model, prompt: used, size: size, seed: seed, directory: directory,
                                             isCancelled: { flag.isCancelled }, report: report)
                 report("Checking the picture", 0.97)
                 if try SafetyChecker(directory: ImageModel.safetyDirectory).isExplicit(image) { throw Withheld() }
-                return image
+                return (image, used)
             }.value
         } onCancel: {
             flag.cancel()
         }
-        try save(image, model: model, prompt: prompt, size: size, seed: seed,
+        // Saved under the prompt that made it — the rewriter's, when used —
+        // so making it again gives the same picture.
+        try save(image, model: model, prompt: used, size: size, seed: seed,
                  seconds: Date().timeIntervalSince(started))
         phase = .idle
     }
@@ -230,8 +267,8 @@ final class ImageEngine {
                                                                      seed: seed,
                                                                      isCancelled: { GPUGate.waitUntilOpen(); return isCancelled() },
                                                                      progress: stage)
-        case .qwenImage:
-            return try QwenImagePipeline(directory: directory).generate(prompt: prompt, width: size.width,
+        case .qwenImage, .qwenImageSmall:
+            return try QwenImagePipeline(directory: directory, bits: model == .qwenImageSmall ? 4 : 8).generate(prompt: prompt, width: size.width,
                                                                         height: size.height, seed: seed,
                                                                         isCancelled: { GPUGate.waitUntilOpen(); return isCancelled() },
                                                                         progress: stage)

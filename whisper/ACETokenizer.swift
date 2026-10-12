@@ -28,6 +28,13 @@ struct ACETokenizer {
         "<think>": 151667, "</think>": 151668,
     ]
 
+    /// Qwen2 and Qwen3's pre-tokenizer: letters, single digits,
+    /// punctuation runs, line breaks and spaces.
+    static let qwen3Pattern = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+    /// Qwen3.5's: the same, but a combining mark stays with its letters.
+    static let qwen35Pattern = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+
+    private let specials: [String: Int32]
     private let vocabulary: [String: Int32]
     private let tokenText: [Int32: String]
     private let ranks: [String: Int]
@@ -35,7 +42,13 @@ struct ACETokenizer {
     private let byteToCharacter: [UInt8: Character]
     private let characterToByte: [Character: UInt8]
 
-    init(vocabularyURL: URL, mergesURL: URL) throws {
+    /// - Parameters:
+    ///   - specials: the special tokens written literally in templates, by
+    ///     text; Qwen3's unless given (Qwen3.5 numbers them differently).
+    ///   - pattern: the pre-tokenizer's split.
+    init(vocabularyURL: URL, mergesURL: URL, specials: [String: Int32] = ACETokenizer.specialTokens,
+         pattern: String = ACETokenizer.qwen3Pattern) throws {
+        self.specials = specials
         let raw = try JSONSerialization.jsonObject(with: Data(contentsOf: vocabularyURL))
         guard let table = raw as? [String: Int] else {
             throw TokenizerError.badVocabulary
@@ -59,8 +72,7 @@ struct ACETokenizer {
         }
         ranks = order
 
-        expression = try NSRegularExpression(
-            pattern: "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+")
+        expression = try NSRegularExpression(pattern: pattern)
 
         byteToCharacter = Self.byteMapping()
         characterToByte = Dictionary(uniqueKeysWithValues: byteToCharacter.map { ($1, $0) })
@@ -80,7 +92,7 @@ struct ACETokenizer {
         var rest = Substring(text.precomposedStringWithCanonicalMapping)
         var ids: [Int32] = []
         while !rest.isEmpty {
-            let next = Self.specialTokens.keys
+            let next = specials.keys
                 .compactMap { marker in rest.range(of: marker).map { (marker, $0) } }
                 .min { $0.1.lowerBound < $1.1.lowerBound }
             guard let (marker, range) = next else {
@@ -88,7 +100,7 @@ struct ACETokenizer {
                 break
             }
             ids.append(contentsOf: encodeOrdinary(String(rest[..<range.lowerBound])))
-            ids.append(Self.specialTokens[marker]!)
+            ids.append(specials[marker]!)
             rest = rest[range.upperBound...]
         }
         if appendEndOfText { ids.append(Self.endOfText) }

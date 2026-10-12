@@ -1,6 +1,7 @@
 //  SANA-Sprint 0.6B, 1024 px (NVIDIA, Apache 2.0), with Gemma 2 2B (Google,
-//  Gemma Terms of Use) reading the prompt. Converted by ports/imagegen/
-//  convert_sana.py and export_sana_mlx.py; see ports/README.md.
+//  Gemma Terms of Use) reading the prompt — an abliterated build, its
+//  refusal direction removed. Converted by ports/imagegen/convert_sana.py
+//  and export_sana_mlx.py; see ports/README.md.
 
 import CoreGraphics
 import CoreML
@@ -30,7 +31,7 @@ import MLX
 struct SanaPipeline {
     enum File {
         /// In parts: MLX can't view a file over 2 GB as one array.
-        static let gemma = ["sana_gemma_q8.part1.safetensors", "sana_gemma_q8.part2.safetensors"]
+        static let gemma = ["sana_gemma_abliterated_q8.part1.safetensors", "sana_gemma_abliterated_q8.part2.safetensors"]
         static let extras = "sana_extras.safetensors"
         static let tokenizer = "gemma_bpe.bin"
         static let transformer = "sana_transformer.mlmodelc"

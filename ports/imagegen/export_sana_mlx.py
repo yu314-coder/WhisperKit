@@ -1,6 +1,7 @@
 """SANA-Sprint's MLX side: what runs on the GPU rather than the Neural Engine.
 
     python export_sana_mlx.py <diffusers repo dir> <out dir> [bits]
+    python export_sana_mlx.py --gemma-from <Gemma 2 2B-it checkpoint dir> <out dir> [bits]
 
 Writes, all 64-byte aligned for MappedWeights.swift:
 
@@ -22,6 +23,14 @@ Writes, all 64-byte aligned for MappedWeights.swift:
   float16, convolution weights in MLX's (out, kh, kw, in) layout. The rest
   of the decoder is a Core ML program (convert_sana.py decoder_tail).
 - gemma_bpe.bin — the tokenizer's tables (see write_tokenizer).
+
+--gemma-from writes only the prompt encoder, as
+sana_gemma_abliterated_q<bits>.partN.safetensors, from a Gemma2ForCausalLM
+checkpoint of the same model: the app's is the abliterated build
+(IlyaGusev/gemma-2-2b-it-abliterated, Gemma terms), which differs from
+SANA's own only in the matrices abliteration orthogonalizes (cosine
+0.9997+), with the refusal direction gone from what it writes into the
+residual stream.
 """
 import glob, json, math, os, struct, sys
 import numpy as np
@@ -35,7 +44,8 @@ from diffusers import SanaTransformer2DModel
 # --extras-only: just sana_extras.safetensors, for another size of SANA-Sprint
 # (1.6B) that shares the 0.6B's Gemma, decoder and tokenizer byte for byte.
 extras_only = '--extras-only' in sys.argv
-args = [a for a in sys.argv[1:] if a != '--extras-only']
+gemma_from = '--gemma-from' in sys.argv
+args = [a for a in sys.argv[1:] if a not in ('--extras-only', '--gemma-from')]
 repo, out = args[0], args[1]
 bits = int(args[2]) if len(args) > 2 else 8
 os.makedirs(out, exist_ok=True)
@@ -48,8 +58,14 @@ def to_mx(t, dtype=mx.float16):
 # Gemma -----------------------------------------------------------------------
 if not extras_only:
     gemma = {}
-    for path in sorted(glob.glob(f'{repo}/text_encoder/*.safetensors')):
-        gemma.update(load_file(path))
+    if gemma_from:
+        # A causal LM: its model's weights under `model.`, and an LM head
+        # (tied to the embeddings) that the encoder doesn't use.
+        for path in sorted(glob.glob(f'{repo}/model-*.safetensors')):
+            gemma.update({k[len('model.'):]: v for k, v in load_file(path).items() if k.startswith('model.')})
+    else:
+        for path in sorted(glob.glob(f'{repo}/text_encoder/*.safetensors')):
+            gemma.update(load_file(path))
     tensors = {}
     for name, weight in gemma.items():
         if weight.ndim == 2:
@@ -59,8 +75,11 @@ if not extras_only:
         else:
             tensors[name] = to_mx(weight, mx.float32)
     mx.eval(tensors)
-    print('Gemma parts:', save_parts(f'{out}/sana_gemma_q{bits}', tensors))
+    stem = 'sana_gemma_abliterated' if gemma_from else 'sana_gemma'
+    print('Gemma parts:', save_parts(f'{out}/{stem}_q{bits}', tensors))
     del gemma, tensors
+    if gemma_from:
+        sys.exit(0)
 
 # Caption projection and modulation ------------------------------------------
 transformer = SanaTransformer2DModel.from_pretrained(repo, subfolder='transformer', torch_dtype=torch.float32).eval()

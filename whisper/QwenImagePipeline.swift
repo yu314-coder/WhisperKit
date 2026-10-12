@@ -132,9 +132,11 @@ struct QwenImageTransformer {
 
     private func linear(_ x: MLXArray, _ name: String) -> MLXArray {
         let key = "\(name).weight"
-        if let packed = weights["\(key).wq"] {
-            return quantizedMatmul(x, packed, scales: weights["\(key).scales"]!, biases: weights["\(key).biases"]!,
-                                   transpose: true, groupSize: 64, bits: 8)
+        if let packed = weights["\(key).wq"], let scales = weights["\(key).scales"] {
+            // 8 or 4 bits, read off the shapes: each 32-bit word packs 32 / bits weights.
+            let bits = packed.dim(-1) * 32 / (scales.dim(-1) * 64)
+            return quantizedMatmul(x, packed, scales: scales, biases: weights["\(key).biases"]!,
+                                   transpose: true, groupSize: 64, bits: bits)
         }
         return matmul(x, weights[key]!.asType(x.dtype).T)
     }
@@ -214,12 +216,20 @@ struct QwenImageTransformer {
 /// last layer's states, before the final norm, of the tokens after the
 /// system message. The step-distilled model needs no guidance, so each step
 /// is one pass, at noise levels upstream ships with the model.
+///
+/// Two builds of the same model share a folder: 8-bit, and 4-bit at about
+/// half the download — the prompt reader and the transformer each in its
+/// own bits, the VAE decoder and tokenizer common to both.
 struct QwenImagePipeline {
     enum File {
         static let vocabulary = "qwenimage_vocab.json"
         static let merges = "qwenimage_merges.txt"
-        static let text = (1 ... 5).map { "qwenimage_text_q8.part\($0).safetensors" }
-        static let transformer = (1 ... 5).map { "qwenimage_transformer_q8.part\($0).safetensors" }
+        static func text(bits: Int) -> [String] {
+            (1 ... (bits == 4 ? 3 : 5)).map { "qwenimage_text_q\(bits).part\($0).safetensors" }
+        }
+        static func transformer(bits: Int) -> [String] {
+            (1 ... (bits == 4 ? 3 : 5)).map { "qwenimage_transformer_q\(bits).part\($0).safetensors" }
+        }
         static let vae = "qwenimage_vae.safetensors"
     }
 
@@ -228,6 +238,8 @@ struct QwenImagePipeline {
     private static let system = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n"
 
     let directory: URL
+    /// 8, or 4 for the smaller build.
+    var bits = 8
 
     /// - Parameter noise: starting latents (64, height/16, width/16) row-major,
     ///   instead of ones drawn from `seed` — for checking against the reference.
@@ -242,9 +254,9 @@ struct QwenImagePipeline {
             let dropped = tokenizer.encode(Self.system, appendEndOfText: false).count
             let ids = tokenizer.encode("\(Self.system)<|im_start|>user\n\(text)<|im_end|>\n<|im_start|>assistant\n",
                                        appendEndOfText: false)
-            var encoder = ACEQwen3(weights: try SanaPipeline.load(File.text, from: directory),
+            var encoder = ACEQwen3(weights: try SanaPipeline.load(File.text(bits: bits), from: directory),
                                    config: .qwenImageText, prefix: "")
-            encoder.quantizationBits = 8
+            encoder.quantizationBits = bits
             let states = try encoder.states(inputIDs: MLXArray(ids).reshaped(1, -1), valid: ids.count,
                                             after: [36], isCancelled: isCancelled)
             let caption = states[0][0, dropped...].asType(.bfloat16)
@@ -259,7 +271,7 @@ struct QwenImagePipeline {
             .transposed(1, 0)
         let sigmas = Self.sigmas
         try StageMemory.withoutCache {
-            let transformer = QwenImageTransformer(weights: try SanaPipeline.load(File.transformer, from: directory))
+            let transformer = QwenImageTransformer(weights: try SanaPipeline.load(File.transformer(bits: bits), from: directory))
             let prefix = try transformer.prefix(caption, isCancelled: isCancelled)
             let rotary = QwenImageTransformer.Rotary.picture(rows: rows, columns: columns, after: caption.dim(0))
             for step in 0 ..< Self.steps {
