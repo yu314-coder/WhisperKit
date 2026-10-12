@@ -21,14 +21,16 @@ ALIGN = 64
 DTYPES = {mx.float16: "F16", mx.float32: "F32", mx.uint32: "U32", mx.bfloat16: "BF16", mx.uint8: "U8"}
 
 
-def save_aligned(path, tensors):
+def save_aligned(path, tensors, metadata=None):
+    """`metadata`, string to string, goes in the header's `__metadata__` —
+    where a licence's "this file was changed" notice can travel with it."""
     items = sorted(tensors.items(), key=lambda kv: (kv[1].nbytes % ALIGN != 0, -kv[1].itemsize, kv[0]))
     header, offset = {}, 0
     for name, array in items:
         header[name] = {"dtype": DTYPES[array.dtype], "shape": list(array.shape),
                         "data_offsets": [offset, offset + array.nbytes]}
         offset += array.nbytes
-    text = json.dumps(header, separators=(",", ":"))
+    text = json.dumps({"__metadata__": metadata, **header} if metadata else header, separators=(",", ":"))
     text += " " * ((-(8 + len(text))) % ALIGN)
     with open(path, "wb") as f:
         f.write(struct.pack("<Q", len(text)))
@@ -47,7 +49,7 @@ def save_aligned(path, tensors):
 PART_BYTES = 1_900_000_000
 
 
-def save_parts(stem, tensors):
+def save_parts(stem, tensors, metadata=None):
     """Writes `<stem>.part1.safetensors`... under PART_BYTES each, split on
     whole source tensors so a quantized triple stays together. Returns the
     number of parts."""
@@ -66,5 +68,5 @@ def save_parts(stem, tensors):
         size += group_bytes
     parts.append(current)
     for index, part in enumerate(parts, start=1):
-        save_aligned(f"{stem}.part{index}.safetensors", part)
+        save_aligned(f"{stem}.part{index}.safetensors", part, metadata)
     return len(parts)

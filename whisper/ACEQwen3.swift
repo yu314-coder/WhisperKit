@@ -51,6 +51,13 @@ struct ACEQwen3 {
         static let zimageText = Config(layerCount: 35, hiddenSize: 2560, headCount: 32,
                                        keyValueHeadCount: 8, headDimension: 128,
                                        ropeTheta: 1_000_000, epsilon: 1e-6)
+        /// Qwen3-VL-8B's language model as Qwen-Image 2.1 reads prompts
+        /// (abliterated build): all 36 layers, read before the final norm.
+        /// Its multimodal rotary embedding is the plain one for text alone —
+        /// every axis at the same position.
+        static let qwenImageText = Config(layerCount: 36, hiddenSize: 4096, headCount: 32,
+                                          keyValueHeadCount: 8, headDimension: 128,
+                                          ropeTheta: 5_000_000, epsilon: 1e-6)
     }
 
     let weights: [String: MLXArray]

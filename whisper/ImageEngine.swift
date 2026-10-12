@@ -17,13 +17,14 @@ struct ImageSize: Hashable, Identifiable {
 
 extension ImageModel {
     /// The sizes each model makes. DreamShaper and SANA-Sprint are built
-    /// for one size each; FLUX.2 klein and Z-Image take any multiple of 16
-    /// (32 for Z-Image's patches), and these are the ones offered.
+    /// for one size each; FLUX.2 klein, Z-Image and Qwen-Image take any
+    /// multiple of 16 (32 for Z-Image's patches), and these are the ones
+    /// offered.
     var sizes: [ImageSize] {
         switch self {
         case .dreamShaper: return [ImageSize(width: 512, height: 512)]
         case .sanaSprint, .sanaSprintLarge: return [ImageSize(width: 1024, height: 1024)]
-        case .fluxKlein, .zImage:
+        case .fluxKlein, .zImage, .qwenImage:
                            return [ImageSize(width: 768, height: 768), ImageSize(width: 1024, height: 1024),
                                    ImageSize(width: 768, height: 1024), ImageSize(width: 1024, height: 768),
                                    ImageSize(width: 512, height: 512)]
@@ -223,6 +224,11 @@ final class ImageEngine {
                                                                      seed: seed,
                                                                      isCancelled: { GPUGate.waitUntilOpen(); return isCancelled() },
                                                                      progress: stage)
+        case .qwenImage:
+            return try QwenImagePipeline(directory: directory).generate(prompt: prompt, width: size.width,
+                                                                        height: size.height, seed: seed,
+                                                                        isCancelled: { GPUGate.waitUntilOpen(); return isCancelled() },
+                                                                        progress: stage)
         }
     }
 
