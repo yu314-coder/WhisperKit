@@ -111,15 +111,21 @@ final class ImageEngine {
             guard let self else { return }
             defer { self.backgroundJob = nil }
             do {
-                // The model and the picture check all three share, as one
-                // download: every file in flight at once, so all of it
-                // arrives even if the app is closed partway.
-                try await WeightFetcher.fetch([
+                // The model, any files it reads from another model's folder,
+                // and the picture check every model shares, as one download:
+                // every file in flight at once, so all of it arrives even if
+                // the app is closed partway.
+                var batches: [WeightFetcher.Batch] = [
                     .init(files: model.weightFiles, directory: model.weightsDirectory,
                           expected: WeightFile.topLevelNames(model.folderFiles)),
                     .init(files: ImageModel.safetyFiles, directory: ImageModel.safetyDirectory,
                           expected: WeightFile.topLevelNames(ImageModel.safetyFiles)),
-                ], progress: { [weak self] update in
+                ]
+                if let borrowed = model.borrowedFiles {
+                    batches.append(.init(files: borrowed.files, directory: borrowed.model.weightsDirectory,
+                                         expected: WeightFile.topLevelNames(borrowed.model.folderFiles)))
+                }
+                try await WeightFetcher.fetch(batches, progress: { [weak self] update in
                     self?.phase = .downloading(file: update.file, completed: update.completed, total: update.total,
                                                fraction: update.fraction, received: update.received,
                                                expected: update.expected)
@@ -215,7 +221,7 @@ final class ImageEngine {
         case .fluxKlein:
             // All on the GPU: off screen without background GPU time it
             // waits between blocks.
-            return try FluxPipeline(directory: directory).generate(prompt: prompt, width: size.width, height: size.height,
+            return try FluxPipeline(directory: directory, textDirectory: ImageModel.zImage.weightsDirectory).generate(prompt: prompt, width: size.width, height: size.height,
                                                                    seed: seed,
                                                                    isCancelled: { GPUGate.waitUntilOpen(); return isCancelled() },
                                                                    progress: stage)

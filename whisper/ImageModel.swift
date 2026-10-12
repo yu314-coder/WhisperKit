@@ -62,7 +62,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .dreamShaper: return "DreamShaper 8 and Stable Diffusion 1.5: CreativeML OpenRAIL-M. Hyper-SD: CreativeML OpenRAIL++-M."
         case .sanaSprint, .sanaSprintLarge:
             return "SANA-Sprint: Apache 2.0. Its text encoder, Gemma 2: Gemma Terms of Use."
-        case .fluxKlein:   return "FLUX.2 [klein] 4B and Qwen3: Apache 2.0."
+        case .fluxKlein:   return "FLUX.2 [klein] 4B and its abliterated Qwen3 prompt reader (shared with Z-Image-Turbo): Apache 2.0."
         case .zImage:      return "Z-Image-Turbo (Tongyi-MAI) and its abliterated Qwen3 prompt reader: Apache 2.0."
         case .qwenImage:
             return "Qwen-Image 2.1 Turbo: Qwen RESEARCH LICENSE AGREEMENT — Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved. Its abliterated Qwen3-VL prompt reader: Apache 2.0."
@@ -87,6 +87,14 @@ enum ImageModel: String, CaseIterable, Identifiable {
     }
 
     private static let release = "imagegen-v1"
+
+    /// Files this model reads from another model's folder. FLUX.2 klein
+    /// reads prompts with Z-Image's Qwen3-4B — the same model, abliterated —
+    /// so one copy serves both, and a FLUX download fetches it into
+    /// Z-Image's folder.
+    var borrowedFiles: (model: ImageModel, files: [WeightFile])? {
+        self == .fluxKlein ? (.zImage, Self.zImageTextFiles) : nil
+    }
 
     var weightFiles: [WeightFile] {
         switch self {
@@ -168,13 +176,14 @@ enum ImageModel: String, CaseIterable, Identifiable {
             ("weights/weight.bin", 44859456),
         ]),
     ]
-    /// FLUX.2 [klein]: Qwen3's first 27 layers and the transformer, 8-bit,
-    /// in parts under 2 GB; the VAE decoder; Qwen's tokenizer.
+    /// FLUX.2 [klein]: the transformer, 8-bit, in parts under 2 GB; the VAE
+    /// decoder; Qwen's tokenizer. Its prompt reader is Z-Image's
+    /// (`borrowedFiles`); the stock Qwen3 it once had, flux_text_q8, stays on
+    /// the release for older builds, and leaves the folder at the next
+    /// download.
     static let fluxFiles: [WeightFile] = [
         WeightFile(path: "flux_vocab.json", bytes: 2776833, release: release),
         WeightFile(path: "flux_merges.txt", bytes: 1671853, release: release),
-        WeightFile(path: "flux_text_q8.part1.safetensors", bytes: 1889803264, release: release),
-        WeightFile(path: "flux_text_q8.part2.safetensors", bytes: 1419417600, release: release),
         WeightFile(path: "flux_transformer_q8.part1.safetensors", bytes: 1890531904, release: release),
         WeightFile(path: "flux_transformer_q8.part2.safetensors", bytes: 1875920128, release: release),
         WeightFile(path: "flux_transformer_q8.part3.safetensors", bytes: 351370048, release: release),
@@ -183,17 +192,21 @@ enum ImageModel: String, CaseIterable, Identifiable {
 
     /// Z-Image-Turbo: the abliterated Qwen3 (35 layers) and the transformer,
     /// 8-bit, in parts under 2 GB; the VAE decoder; Qwen's tokenizer.
-    static let zImageFiles: [WeightFile] = [
+    static let zImageFiles: [WeightFile] = zImageTextFiles + [
         WeightFile(path: "zimage_vocab.json", bytes: 2776833, release: release),
         WeightFile(path: "zimage_merges.txt", bytes: 1671853, release: release),
-        WeightFile(path: "zimage_text_q8.part1.safetensors", bytes: 1889803264, release: release),
-        WeightFile(path: "zimage_text_q8.part2.safetensors", bytes: 1874918912, release: release),
-        WeightFile(path: "zimage_text_q8.part3.safetensors", bytes: 402559296, release: release),
         WeightFile(path: "zimage_transformer_q8.part1.safetensors", bytes: 1884330736, release: release),
         WeightFile(path: "zimage_transformer_q8.part2.safetensors", bytes: 1880718080, release: release),
         WeightFile(path: "zimage_transformer_q8.part3.safetensors", bytes: 1880718016, release: release),
         WeightFile(path: "zimage_transformer_q8.part4.safetensors", bytes: 894918128, release: release),
         WeightFile(path: "zimage_vae.safetensors", bytes: 99106182, release: release),
+    ]
+
+    /// The abliterated Qwen3-4B, Z-Image's prompt reader and FLUX's.
+    static let zImageTextFiles: [WeightFile] = [
+        WeightFile(path: "zimage_text_q8.part1.safetensors", bytes: 1889803264, release: release),
+        WeightFile(path: "zimage_text_q8.part2.safetensors", bytes: 1874918912, release: release),
+        WeightFile(path: "zimage_text_q8.part3.safetensors", bytes: 402559296, release: release),
     ]
 
     /// Qwen-Image 2.1 Turbo: the abliterated Qwen3-VL's language model and
@@ -239,7 +252,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
                    contents: contents.map { (path: "\(folder)/\($0.0)", bytes: $0.1) })
     }
 
-    var downloadBytes: Int64 { weightFiles.reduce(0) { $0 + $1.bytes } }
+    var downloadBytes: Int64 { (weightFiles + (borrowedFiles?.files ?? [])).reduce(0) { $0 + $1.bytes } }
 
     var sizeLabel: String {
         let bytes = Double(downloadBytes)

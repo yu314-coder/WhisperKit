@@ -41,8 +41,9 @@ struct ACEQwen3 {
         static let plannerLarge = Config(layerCount: 36, hiddenSize: 2560, headCount: 32,
                                          keyValueHeadCount: 8, headDimension: 128,
                                          ropeTheta: 1_000_000, epsilon: 1e-6)
-        /// Qwen3-4B as FLUX.2 [klein] reads prompts: the same model, only its
-        /// first 27 layers shipped (FLUX takes states from layers 9, 18, 27).
+        /// Qwen3-4B as FLUX.2 [klein] reads prompts: Z-Image's abliterated
+        /// copy, of which FLUX runs the first 27 layers (it takes states from
+        /// layers 9, 18, 27).
         static let fluxText = Config(layerCount: 27, hiddenSize: 2560, headCount: 32,
                                      keyValueHeadCount: 8, headDimension: 128,
                                      ropeTheta: 1_000_000, epsilon: 1e-6)

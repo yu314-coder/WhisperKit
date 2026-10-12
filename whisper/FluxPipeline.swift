@@ -1,6 +1,6 @@
 //  FLUX.2 [klein] 4B (Black Forest Labs, Apache 2.0), with Qwen3-4B
-//  (Apache 2.0) reading the prompt. Converted by ports/imagegen/
-//  export_flux_mlx.py; see ports/README.md.
+//  (Apache 2.0) reading the prompt — Z-Image's abliterated copy of it.
+//  Converted by ports/imagegen/export_flux_mlx.py; see ports/README.md.
 
 import CoreGraphics
 import Foundation
@@ -18,12 +18,16 @@ import MLX
 /// reads the hidden states after layers 9, 18 and 27 side by side, padding
 /// included. The step-distilled model needs no guidance, so each step is
 /// one pass.
+///
+/// FLUX.2 klein and Z-Image-Turbo read prompts with the same Qwen3-4B, byte
+/// for byte, so FLUX reads Z-Image's copy, from Z-Image's folder: the
+/// abliterated build, with its refusal directions removed, and one download
+/// for the two models. FLUX needs its first 27 layers of the 35 there.
 struct FluxPipeline {
     enum File {
         static let vocabulary = "flux_vocab.json"
         static let merges = "flux_merges.txt"
         /// In parts: MLX can't view a file over 2 GB as one array.
-        static let text = ["flux_text_q8.part1.safetensors", "flux_text_q8.part2.safetensors"]
         static let transformer = ["flux_transformer_q8.part1.safetensors", "flux_transformer_q8.part2.safetensors",
                                   "flux_transformer_q8.part3.safetensors"]
         static let vae = "flux_vae.safetensors"
@@ -34,6 +38,8 @@ struct FluxPipeline {
     private static let textLayers = [9, 18, 27]
 
     let directory: URL
+    /// Where the prompt reader is: Z-Image's folder.
+    let textDirectory: URL
 
     /// - Parameters:
     ///   - width, height: multiples of 16.
@@ -48,7 +54,7 @@ struct FluxPipeline {
             let tokenizer = try ACETokenizer(vocabularyURL: directory.appendingPathComponent(File.vocabulary),
                                              mergesURL: directory.appendingPathComponent(File.merges))
             let (ids, valid) = Self.tokens(for: prompt, tokenizer: tokenizer)
-            var encoder = ACEQwen3(weights: try SanaPipeline.load(File.text, from: directory),
+            var encoder = ACEQwen3(weights: try SanaPipeline.load(ZImagePipeline.File.text, from: textDirectory),
                                    config: .fluxText, prefix: "")
             encoder.quantizationBits = 8
             let states = try encoder.states(inputIDs: MLXArray(ids).reshaped(1, -1), valid: valid,
