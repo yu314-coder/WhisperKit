@@ -65,10 +65,12 @@ struct HelpView: View {
             return [
                 Section(icon: "square.grid.2x2", title: "Choose a model",
                         body: "Tap the model name at the top. Small is fastest, Turbo is the best balance, and the Large models are the most accurate. A model downloads once, then works offline."),
+                Section(icon: "bolt.horizontal", title: "NVIDIA models",
+                        body: "Under the Whisper models. Canary 1B v2 is for English and 24 other European languages, and makes the fewest mistakes in English; it doesn't know Chinese, Japanese or Korean. Nemotron 3.5 ASR is for live transcription: with it chosen, the text appears while you record. It is less accurate than Whisper Turbo, especially in Chinese, so use Whisper for recordings where every word matters. Both run on the GPU. Licences: Canary, CC BY 4.0; Nemotron, OpenMDW 1.1; both NVIDIA's, converted to MLX by Mediform and mlx-community."),
                 Section(icon: "cpu", title: "GPU or Neural Engine",
                         body: "In the same menu, under Run on. The GPU loads in seconds. The Neural Engine uses less battery, but its first load after an update takes a few minutes. Big models can be too large for an iPhone's GPU; if the app closes while loading, switch to the Neural Engine."),
                 Section(icon: "mic.fill", title: "Record",
-                        body: "Tap the red button to start, and again to stop. The recording is transcribed right away."),
+                        body: "Tap the red button to start, and again to stop. The recording is transcribed right away — or, with Nemotron chosen, as you speak."),
                 Section(icon: "folder", title: "Import a file or video",
                         body: "The folder button opens Files; the photo button picks a video from Photos. Audio and video both work."),
                 Section(icon: "square.and.arrow.up", title: "Share to Whisper",

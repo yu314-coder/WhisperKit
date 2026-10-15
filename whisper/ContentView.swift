@@ -117,6 +117,18 @@ struct ContentView: View {
         nonmutating set { selectedModelRaw = newValue.rawValue }
     }
     @State private var downloadStatus: [WhisperModel: Bool] = [:]
+    /// Whisper, or one of NVIDIA's engines (SpeechEngine); for Whisper,
+    /// `selectedModel` says which.
+    @AppStorage("speechEngine") private var speechEngineRaw: String = SpeechEngine.whisper.rawValue
+    private var speechEngine: SpeechEngine { SpeechEngine(rawValue: speechEngineRaw) ?? .whisper }
+    /// What transcribes, by name: the Whisper model, or the engine.
+    private var engineName: String { speechEngine == .whisper ? selectedModel.displayName : speechEngine.displayName }
+    private var engineSizeLabel: String { speechEngine == .whisper ? selectedModel.sizeLabel : speechEngine.sizeLabel }
+    private var engineDownloaded: Bool {
+        speechEngine == .whisper ? (downloadStatus[selectedModel] ?? false) : speechEngine.isDownloaded
+    }
+    /// Recording with Nemotron, which writes as it hears.
+    @State private var liveTranscriber: LiveTranscriber?
     @State private var showingFilePicker = false
     @State private var showLinkSheet = false
     /// Files shared to the app from elsewhere; see `takeIncomingFile`.
@@ -284,6 +296,11 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(
                 for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
                 guard !isProcessing, !isRecording, !isPreparingModel else { return }
+                if speechEngine != .whisper {
+                    // Its runner loads it again by itself, in seconds, when next used.
+                    Task { await SpeechRunner.shared.unload() }
+                    return
+                }
                 whisperKit = nil
                 isModelLoaded = false
             }
@@ -344,6 +361,27 @@ struct ContentView: View {
             if let raw = UserDefaults.standard.string(forKey: "DebugDownloadModel"),
                let model = WhisperModel(rawValue: raw) {
                 prepareModel(model)
+            }
+            // `-DebugSpeechEngine <canary-1b-v2|nemotron-3.5-asr>`, then
+            // `-DebugTranscribeFile <path>` once it's loaded: an NVIDIA engine
+            // end to end, download included.
+            if let raw = UserDefaults.standard.string(forKey: "DebugSpeechEngine"),
+               let engine = SpeechEngine(rawValue: raw), engine != .whisper {
+                selectEngine(engine)
+                if let path = UserDefaults.standard.string(forKey: "DebugTranscribeFile") {
+                    Task {
+                        _ = await modelPrepTask?.value
+                        print("DebugSpeechEngine: \(engine.displayName) loaded: \(isModelLoaded)")
+                        let copy = FileManager.default.temporaryDirectory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
+                        try? FileManager.default.removeItem(at: copy)
+                        try? FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: copy)
+                        await importAndTranscribeFile(from: copy)
+                        print("DebugTranscribeFile: \(currentTranscript?.segments.count ?? -1) segments; error: \(errorMessage ?? "none")")
+                        for segment in (currentTranscript?.segments ?? []).sorted(by: { $0.startTime < $1.startTime }).prefix(3) {
+                            print(String(format: "  %.2f-%.2f %@", segment.startTime, segment.endTime, segment.text))
+                        }
+                    }
+                }
             }
             // `-DebugImportLink <https URL>`: what the link sheet does.
             if let raw = UserDefaults.standard.string(forKey: "DebugImportLink"), let link = URL(string: raw) {
@@ -512,11 +550,11 @@ struct ContentView: View {
                     Circle()
                         .fill(isModelLoaded ? Studio.ok : Studio.mute.opacity(0.5))
                         .frame(width: 6, height: 6)
-                    Text("\(selectedModel.displayName) · \(effectiveMode(for: selectedModel).shortName)")
+                    Text(speechEngine == .whisper ? "\(selectedModel.displayName) · \(effectiveMode(for: selectedModel).shortName)" : "\(engineName) · GPU")
                         .font(Studio.mono(11))
                         .foregroundColor(Studio.ink.opacity(0.82))
                 }
-                Text(isModelLoaded ? "\(selectedModel.sizeLabel) · ready" : (isPreparingModel ? "loading…" : "not loaded"))
+                Text(isModelLoaded ? "\(engineSizeLabel) · ready" : (isPreparingModel ? "loading…" : "not loaded"))
                     .font(Studio.mono(10))
                     .foregroundColor(Studio.mute)
             }
@@ -589,7 +627,7 @@ struct ContentView: View {
                         Circle()
                             .fill(isModelLoaded ? Studio.ok : Studio.mute.opacity(0.5))
                             .frame(width: 6, height: 6)
-                        Text(selectedModel.displayName)
+                        Text(engineName)
                             .font(Studio.mono(11))
                             .foregroundColor(Studio.ink.opacity(0.82))
                     }
@@ -630,7 +668,7 @@ struct ContentView: View {
         GeometryReader { geo in
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    if isProcessing {
+                    if isProcessing || (isRecording && !streamingTranscript.isEmpty) {
                         if !streamingTranscript.isEmpty {
                             liveTranscriptView
                         } else {
@@ -732,7 +770,7 @@ struct ContentView: View {
     /// True when the selected model is already downloaded and is merely being
     /// loaded — as opposed to the user not having chosen one yet.
     private var isReloadingKnownModel: Bool {
-        isPreparingModel && (downloadStatus[selectedModel] ?? false)
+        isPreparingModel && engineDownloaded
     }
 
     private var emptyStateBlurb: String {
@@ -740,7 +778,7 @@ struct ContentView: View {
             return "Press the round button below to start a new recording, or pull in an audio file. Everything you transcribe stays on this device — every page is kept in your library."
         }
         if isReloadingKnownModel {
-            return "\(selectedModel.displayName) is loading onto the \(effectiveMode(for: selectedModel).shortName) — this happens once each time you open the app. Go ahead and record; it will transcribe as soon as the model is ready."
+            return "\(engineName) is loading onto the \(speechEngine == .whisper ? effectiveMode(for: selectedModel).shortName : "GPU") — this happens once each time you open the app. Go ahead and record; it will transcribe as soon as the model is ready."
         }
         return "First, choose a transcription model. It downloads once and runs entirely on this device. Larger models are slower but more accurate."
     }
@@ -851,6 +889,8 @@ struct ContentView: View {
                 }
             }
 
+            engineCards
+
             modelPreparationStatus
 
             Button {
@@ -858,20 +898,22 @@ struct ContentView: View {
                     modelPrepTask?.cancel()
                     isPreparingModel = false
                     statusMessage = ""
-                } else {
+                } else if speechEngine == .whisper {
                     prepareModel(selectedModel)
+                } else {
+                    selectEngine(speechEngine)
                 }
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: isPreparingModel
                           ? "xmark"
-                          : (downloadStatus[selectedModel] ?? false ? "arrow.clockwise" : "arrow.down"))
+                          : (engineDownloaded ? "arrow.clockwise" : "arrow.down"))
                         .font(.system(size: 13, weight: .bold))
                     Text(isPreparingModel
                          ? "Cancel"
-                         : (downloadStatus[selectedModel] ?? false
-                            ? "Reload \(selectedModel.displayName)"
-                            : "Download \(selectedModel.displayName) · \(selectedModel.sizeLabel)"))
+                         : (engineDownloaded
+                            ? "Reload \(engineName)"
+                            : "Download \(engineName) · \(engineSizeLabel)"))
                         .font(.system(size: 14, weight: .semibold))
                 }
                 .foregroundColor(Self.paperBG)
@@ -1501,26 +1543,30 @@ struct ContentView: View {
                 }
             }
 
+            engineCards
+
             // Action button
             Button {
                 if isPreparingModel {
                     modelPrepTask?.cancel()
                     isPreparingModel = false
                     statusMessage = ""
-                } else {
+                } else if speechEngine == .whisper {
                     prepareModel(selectedModel)
+                } else {
+                    selectEngine(speechEngine)
                 }
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: isPreparingModel
                           ? "xmark"
-                          : (downloadStatus[selectedModel] ?? false ? "arrow.clockwise" : "arrow.down"))
+                          : (engineDownloaded ? "arrow.clockwise" : "arrow.down"))
                         .font(.system(size: 14, weight: .bold))
                     Text(isPreparingModel
                          ? "Cancel"
-                         : (downloadStatus[selectedModel] ?? false
-                            ? "Reload \(selectedModel.displayName)"
-                            : "Download \(selectedModel.displayName) · \(selectedModel.sizeLabel)"))
+                         : (engineDownloaded
+                            ? "Reload \(engineName)"
+                            : "Download \(engineName) · \(engineSizeLabel)"))
                         .font(.system(size: 15, weight: .semibold))
                 }
                 .foregroundColor(Self.paperBG)
@@ -1537,7 +1583,7 @@ struct ContentView: View {
             .opacity((isProcessing && !isPreparingModel) ? 0.5 : 1)
             .padding(.top, 6)
 
-            computeModePicker
+            if speechEngine == .whisper { computeModePicker }
 
             // Privacy footnote — reinforces that this is differentiated
             HStack(alignment: .top, spacing: 8) {
@@ -1624,7 +1670,7 @@ struct ContentView: View {
     }
 
     func paperModelCard(_ model: WhisperModel) -> some View {
-        let isSelected = (selectedModel == model)
+        let isSelected = (speechEngine == .whisper && selectedModel == model)
         let isDownloaded = downloadStatus[model] ?? false
         let isActive = isLoaded(model)
 
@@ -1698,6 +1744,108 @@ struct ContentView: View {
         }
     }
 
+    /// NVIDIA's engines (SpeechEngine), under the Whisper models.
+    var engineCards: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Rectangle()
+                    .fill(Self.paperInk.opacity(0.20))
+                    .frame(width: 18, height: 1)
+                Text("NVIDIA · GPU")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .tracking(2)
+                    .foregroundColor(Self.paperMute)
+            }
+            .padding(.top, 4)
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
+                spacing: 10
+            ) {
+                ForEach(SpeechEngine.nvidia) { engine in
+                    engineCard(engine)
+                }
+            }
+        }
+    }
+
+    func engineCard(_ engine: SpeechEngine) -> some View {
+        let isSelected = speechEngine == engine
+        let isDownloaded = engine.isDownloaded
+        let isActive = isSelected && isModelLoaded
+        let green = Color(red: 0.30, green: 0.65, blue: 0.40)
+
+        return Button {
+            selectEngine(engine)
+        } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    Text(engine.displayName)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(Self.paperInk)
+                    Spacer()
+                    if isActive {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(Self.paperAccent)
+                    } else if isDownloaded {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(green)
+                    }
+                }
+
+                Text(engine.tagline)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Self.paperInk.opacity(0.75))
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(engine.detail)
+                    .font(.system(size: 11))
+                    .foregroundColor(Self.paperInk.opacity(0.55))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 6) {
+                    paperBadge(engine.sizeLabel, tint: isDownloaded ? green : Self.paperMute)
+                    if let badge = engine.badge { paperBadge(badge, tint: Self.paperAccent) }
+                    if isActive {
+                        paperBadge("Loaded", tint: Self.paperAccent)
+                    } else if isDownloaded {
+                        paperBadge("On device", tint: green)
+                    }
+                }
+
+                if isSelected, isPreparingModel, let p = downloadProgress {
+                    ProgressView(value: p)
+                        .progressViewStyle(.linear)
+                        .tint(Self.paperAccent)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isSelected ? Self.paperAccentSoft.opacity(0.45) : Self.paperCard)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(isSelected ? Self.paperAccent : Self.paperRule, lineWidth: isSelected ? 1.5 : 0.5)
+            )
+        }
+        .buttonStyle(PressableButtonStyle())
+        .disabled(isProcessing || isRecording)
+        .contextMenu {
+            if isDownloaded {
+                Button(role: .destructive) {
+                    deleteEngine(engine)
+                } label: {
+                    Label("Delete download (\(engine.sizeLabel))", systemImage: "trash")
+                }
+            }
+        }
+    }
+
     func paperBadge(_ text: String, tint: Color) -> some View {
         Text(text.uppercased())
             .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -1709,7 +1857,7 @@ struct ContentView: View {
     }
 
     func isLoaded(_ model: WhisperModel) -> Bool {
-        return isModelLoaded && selectedModel == model
+        return isModelLoaded && speechEngine == .whisper && selectedModel == model
     }
 
     /// Matches English or native name, or the code itself.
@@ -2004,7 +2152,10 @@ struct ContentView: View {
     /// kept holding the *previous* model, so the chip lied about what was
     /// actually transcribing. Now selecting always (re)prepares.
     func selectModel(_ model: WhisperModel) {
-        let alreadyReady = (model == selectedModel && isModelLoaded && !isPreparingModel)
+        let wasWhisper = speechEngine == .whisper
+        let alreadyReady = (wasWhisper && model == selectedModel && isModelLoaded && !isPreparingModel)
+        speechEngineRaw = SpeechEngine.whisper.rawValue
+        if !wasWhisper { Task { await SpeechRunner.shared.unload() } }
         selectedModel = model
         guard !alreadyReady else { return }
         prepareModel(model)
@@ -2025,6 +2176,48 @@ struct ContentView: View {
         whisperKit = nil
         preparingVariant = model
         modelPrepTask = Task { await performModelPreparation(model) }
+    }
+
+    /// Switches to one of NVIDIA's engines: lets go of Whisper, downloads
+    /// what's missing, then loads it onto the GPU.
+    func selectEngine(_ engine: SpeechEngine) {
+        guard engine != .whisper else { return }
+        if speechEngine == engine, isPreparingModel { return }
+        speechEngineRaw = engine.rawValue
+        modelPrepTask?.cancel()
+        whisperKit = nil
+        isModelLoaded = false
+        isPreparingModel = true
+        downloadProgress = engine.isDownloaded ? nil : 0
+        statusMessage = engine.isDownloaded ? "Loading \(engine.displayName)…" : ""
+        modelPrepTask = Task {
+            do {
+                try await WeightFetcher.fetch(engine.files, into: engine.directory,
+                                              expected: WeightFile.topLevelNames(engine.files),
+                                              progress: { downloadProgress = $0.fraction },
+                                              note: { statusMessage = $0 ?? "" })
+                try Task.checkCancellation()
+                downloadProgress = nil
+                statusMessage = "Loading \(engine.displayName)…"
+                try await SpeechRunner.shared.load(engine)
+                try Task.checkCancellation()
+                isModelLoaded = true
+            } catch is CancellationError {
+            } catch {
+                showError("\(engine.displayName) couldn't be prepared: \(error.localizedDescription)")
+            }
+            isPreparingModel = false
+            downloadProgress = nil
+            statusMessage = ""
+        }
+    }
+
+    func deleteEngine(_ engine: SpeechEngine) {
+        if speechEngine == engine {
+            Task { await SpeechRunner.shared.unload() }
+            isModelLoaded = false
+        }
+        try? FileManager.default.removeItem(at: engine.directory)
     }
 
     /// Clears *empty* partial-download placeholders.
@@ -2626,6 +2819,10 @@ struct ContentView: View {
             modelLoadInFlightVariant = ""
         }
 
+        if speechEngine != .whisper {
+            if speechEngine.isDownloaded, !isModelLoaded, !isProcessing, !isPreparingModel { selectEngine(speechEngine) }
+            return
+        }
         guard downloadStatus[selectedModel] == true, !isModelLoaded, !isProcessing, !isPreparingModel else { return }
 
         // Loading it is still one tap away; it just is not automatic any more.
@@ -2864,6 +3061,10 @@ struct ContentView: View {
     }
 
     func startRecording() {
+        if speechEngine == .nemotron {
+            startLiveRecording()
+            return
+        }
         let session = AVAudioSession.sharedInstance()
         AVAudioApplication.requestRecordPermission { granted in
             DispatchQueue.main.async {
@@ -2916,6 +3117,10 @@ struct ContentView: View {
     }
 
     func stopRecordingAndTranscribe() {
+        if let live = liveTranscriber {
+            stopLiveRecording(live)
+            return
+        }
         // Finalize recorder
         audioRecorder?.stop()
         let recorder = audioRecorder
@@ -2951,6 +3156,103 @@ struct ContentView: View {
 
             await importAndTranscribeFile(from: url)
         }
+    }
+
+    /// Records with Nemotron, the transcript appearing as it's spoken.
+    func startLiveRecording() {
+        guard isModelLoaded else {
+            showError("\(engineName) is still loading. Try again in a moment.")
+            return
+        }
+        AVAudioApplication.requestRecordPermission { granted in
+            Task { @MainActor in
+                guard granted else {
+                    showError("Microphone access is off. Enable it in Settings › Whisper.")
+                    return
+                }
+                let session = AVAudioSession.sharedInstance()
+                do {
+                    #if targetEnvironment(macCatalyst)
+                    try? session.setCategory(.playAndRecord, mode: .default, options: [])
+                    #else
+                    try? session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+                    #endif
+                    try session.setActive(true)
+                    resetResult()
+                    streamingTranscript = ""
+                    let live = LiveTranscriber()
+                    try await live.start(language: SpeechEngine.nemotron.modelLanguage(for: selectedLanguage)) { text in
+                        streamingTranscript = inChosenScript(text)
+                    }
+                    liveTranscriber = live
+                    isRecording = true
+                    recordingStartTime = Date()
+                } catch {
+                    showError("Couldn't start live transcription: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    func stopLiveRecording(_ live: LiveTranscriber) {
+        let started = recordingStartTime ?? Date()
+        liveTranscriber = nil
+        isRecording = false
+        recordingStartTime = nil
+        isProcessing = true
+        statusMessage = "Finishing the transcript…"
+        Task {
+            let (url, result) = await live.stop()
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            let envelope = AudioConverter.peakEnvelope(of: url)
+            let fullText = inChosenScript(result.text.trimmingCharacters(in: .whitespacesAndNewlines))
+            if fullText.isEmpty {
+                reportEmptyTranscript(peak: envelope?.peak)
+                try? FileManager.default.removeItem(at: url)
+            } else {
+                lastTranscriptionResults = [result]
+                detectedLanguageCode = nil
+                saveTranscriptToLibrary(audioURL: url, results: [result], fullText: fullText, waveform: envelope?.buckets)
+                transcript = fullText
+                transcriptWaveform = envelope?.buckets
+                transcriptMeta = TranscriptMeta(
+                    detectedLanguage: nil,
+                    selectedLanguageName: supportedLanguages.first(where: { $0.code == selectedLanguage })?.name ?? "Auto Detect",
+                    audioDuration: Double(result.segments.last?.end ?? 0),
+                    processingTime: Date().timeIntervalSince(started),
+                    modelName: engineName,
+                    segmentCount: result.segments.count
+                )
+                errorMessage = nil
+            }
+            streamingTranscript = ""
+            isProcessing = false
+            statusMessage = ""
+        }
+    }
+
+    /// Transcribes a converted 16 kHz WAV with one of NVIDIA's engines.
+    func transcribeWithEngine(_ engine: SpeechEngine, at url: URL) async throws -> TranscriptionResult {
+        let file = try AVAudioFile(forReading: url)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
+                                            frameCapacity: AVAudioFrameCount(file.length)) else {
+            throw NSError(domain: "Whisper", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "The audio couldn't be read."])
+        }
+        try file.read(into: buffer)
+        let samples = Array(UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength)))
+        await MainActor.run { statusMessage = "Transcribing with \(engine.displayName)…" }
+        return try await SpeechRunner.shared.transcribe(
+            engine, samples: samples, language: engine.modelLanguage(for: selectedLanguage),
+            progress: { fraction, text in
+                Task { @MainActor in
+                    transcriptionProgress = min(0.99, fraction)
+                    transcriptionJob?.update(transcriptionProgress)
+                    if !text.isEmpty { streamingTranscript = inChosenScript(text) }
+                    statusMessage = String(format: "Processing: %.0f%% · %@", fraction * 100, engine.displayName)
+                }
+            },
+            isCancelled: { GPUGate.waitUntilOpen(); return Task.isCancelled })
     }
 
     /// Polls the recording file until it has a usable size (or times out).
@@ -3034,7 +3336,7 @@ struct ContentView: View {
             title: title,
             duration: duration,
             languageCode: langForRecord,
-            modelName: selectedModel.displayName,
+            modelName: engineName,
             fullText: fullText,
             audioFilePath: savedRelativePath,
             waveform: waveform
@@ -3090,14 +3392,16 @@ struct ContentView: View {
         // The capture buttons stay live while the model loads, so by the time
         // we get here the load may still be running. Join it rather than
         // failing — the user's audio is already recorded and waiting.
-        if whisperKit == nil, let prep = modelPrepTask {
+        let engine = speechEngine
+        if (engine == .whisper ? whisperKit == nil : !isModelLoaded), let prep = modelPrepTask {
             await MainActor.run {
-                statusMessage = "Waiting for \(selectedModel.displayName) to finish loading…"
+                statusMessage = "Waiting for \(engineName) to finish loading…"
             }
             _ = await prep.value
         }
 
-        guard let whisper = whisperKit else {
+        let whisper = whisperKit
+        guard engine == .whisper ? whisper != nil : engine.isDownloaded else {
             throw NSError(
                 domain: "Whisper",
                 code: -1,
@@ -3196,7 +3500,11 @@ struct ContentView: View {
         // time: wait between tokens until it can.
         let usesGPU = await MainActor.run { computeMode == .gpu }
 
-        let results = try await whisper.transcribe(
+        let results: [TranscriptionResult]
+        if engine != .whisper {
+            results = [try await transcribeWithEngine(engine, at: workURL)]
+        } else if let whisper {
+          results = try await whisper.transcribe(
             audioPath: workURL.path,
             decodeOptions: options,
             callback: { progress in
@@ -3254,6 +3562,9 @@ struct ContentView: View {
                 return nil
             }
         )
+        } else {
+            results = []
+        }
         
         await MainActor.run {
             transcriptionProgress = 1.0
@@ -3299,7 +3610,7 @@ struct ContentView: View {
                         selectedLanguageName: selectedLangName,
                         audioDuration: totalDuration,
                         processingTime: getElapsedTime(),
-                        modelName: selectedModel.displayName,
+                        modelName: engineName,
                         // Actual speech segments, not the number of
                         // TranscriptionResults — WhisperKit returns one result
                         // per file, so this read "SEGMENTS 1" for every
