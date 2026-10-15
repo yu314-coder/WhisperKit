@@ -120,15 +120,17 @@ struct ContentView: View {
     /// Whisper, or one of NVIDIA's engines (SpeechEngine); for Whisper,
     /// `selectedModel` says which.
     @AppStorage("speechEngine") private var speechEngineRaw: String = SpeechEngine.whisper.rawValue
-    private var speechEngine: SpeechEngine { SpeechEngine(rawValue: speechEngineRaw) ?? .whisper }
+    private var speechEngine: SpeechEngine {
+        // Nemotron moved to the Live tab; a choice of it from before stays Whisper here.
+        let engine = SpeechEngine(rawValue: speechEngineRaw) ?? .whisper
+        return SpeechEngine.nvidia.contains(engine) ? engine : .whisper
+    }
     /// What transcribes, by name: the Whisper model, or the engine.
     private var engineName: String { speechEngine == .whisper ? selectedModel.displayName : speechEngine.displayName }
     private var engineSizeLabel: String { speechEngine == .whisper ? selectedModel.sizeLabel : speechEngine.sizeLabel }
     private var engineDownloaded: Bool {
         speechEngine == .whisper ? (downloadStatus[selectedModel] ?? false) : speechEngine.isDownloaded
     }
-    /// Recording with Nemotron, which writes as it hears.
-    @State private var liveTranscriber: LiveTranscriber?
     @State private var showingFilePicker = false
     @State private var showLinkSheet = false
     /// Files shared to the app from elsewhere; see `takeIncomingFile`.
@@ -362,11 +364,11 @@ struct ContentView: View {
                let model = WhisperModel(rawValue: raw) {
                 prepareModel(model)
             }
-            // `-DebugSpeechEngine <canary-1b-v2|nemotron-3.5-asr>`, then
+            // `-DebugSpeechEngine canary-1b-v2`, then
             // `-DebugTranscribeFile <path>` once it's loaded: an NVIDIA engine
             // end to end, download included.
             if let raw = UserDefaults.standard.string(forKey: "DebugSpeechEngine"),
-               let engine = SpeechEngine(rawValue: raw), engine != .whisper {
+               let engine = SpeechEngine(rawValue: raw), SpeechEngine.nvidia.contains(engine) {
                 selectEngine(engine)
                 if let path = UserDefaults.standard.string(forKey: "DebugTranscribeFile") {
                     Task {
@@ -668,7 +670,7 @@ struct ContentView: View {
         GeometryReader { geo in
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    if isProcessing || (isRecording && !streamingTranscript.isEmpty) {
+                    if isProcessing {
                         if !streamingTranscript.isEmpty {
                             liveTranscriptView
                         } else {
@@ -3061,10 +3063,6 @@ struct ContentView: View {
     }
 
     func startRecording() {
-        if speechEngine == .nemotron {
-            startLiveRecording()
-            return
-        }
         let session = AVAudioSession.sharedInstance()
         AVAudioApplication.requestRecordPermission { granted in
             DispatchQueue.main.async {
@@ -3117,10 +3115,6 @@ struct ContentView: View {
     }
 
     func stopRecordingAndTranscribe() {
-        if let live = liveTranscriber {
-            stopLiveRecording(live)
-            return
-        }
         // Finalize recorder
         audioRecorder?.stop()
         let recorder = audioRecorder
@@ -3155,79 +3149,6 @@ struct ContentView: View {
             }
 
             await importAndTranscribeFile(from: url)
-        }
-    }
-
-    /// Records with Nemotron, the transcript appearing as it's spoken.
-    func startLiveRecording() {
-        guard isModelLoaded else {
-            showError("\(engineName) is still loading. Try again in a moment.")
-            return
-        }
-        AVAudioApplication.requestRecordPermission { granted in
-            Task { @MainActor in
-                guard granted else {
-                    showError("Microphone access is off. Enable it in Settings › Whisper.")
-                    return
-                }
-                let session = AVAudioSession.sharedInstance()
-                do {
-                    #if targetEnvironment(macCatalyst)
-                    try? session.setCategory(.playAndRecord, mode: .default, options: [])
-                    #else
-                    try? session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
-                    #endif
-                    try session.setActive(true)
-                    resetResult()
-                    streamingTranscript = ""
-                    let live = LiveTranscriber()
-                    try await live.start(language: SpeechEngine.nemotron.modelLanguage(for: selectedLanguage)) { text in
-                        streamingTranscript = inChosenScript(text)
-                    }
-                    liveTranscriber = live
-                    isRecording = true
-                    recordingStartTime = Date()
-                } catch {
-                    showError("Couldn't start live transcription: \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-
-    func stopLiveRecording(_ live: LiveTranscriber) {
-        let started = recordingStartTime ?? Date()
-        liveTranscriber = nil
-        isRecording = false
-        recordingStartTime = nil
-        isProcessing = true
-        statusMessage = "Finishing the transcript…"
-        Task {
-            let (url, result) = await live.stop()
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-            let envelope = AudioConverter.peakEnvelope(of: url)
-            let fullText = inChosenScript(result.text.trimmingCharacters(in: .whitespacesAndNewlines))
-            if fullText.isEmpty {
-                reportEmptyTranscript(peak: envelope?.peak)
-                try? FileManager.default.removeItem(at: url)
-            } else {
-                lastTranscriptionResults = [result]
-                detectedLanguageCode = nil
-                saveTranscriptToLibrary(audioURL: url, results: [result], fullText: fullText, waveform: envelope?.buckets)
-                transcript = fullText
-                transcriptWaveform = envelope?.buckets
-                transcriptMeta = TranscriptMeta(
-                    detectedLanguage: nil,
-                    selectedLanguageName: supportedLanguages.first(where: { $0.code == selectedLanguage })?.name ?? "Auto Detect",
-                    audioDuration: Double(result.segments.last?.end ?? 0),
-                    processingTime: Date().timeIntervalSince(started),
-                    modelName: engineName,
-                    segmentCount: result.segments.count
-                )
-                errorMessage = nil
-            }
-            streamingTranscript = ""
-            isProcessing = false
-            statusMessage = ""
         }
     }
 

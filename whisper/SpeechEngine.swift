@@ -20,7 +20,8 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
     case nemotron = "nemotron-3.5-asr"
 
     var id: String { rawValue }
-    static let nvidia: [SpeechEngine] = [.canary, .nemotron]
+    /// In the Transcribe tab's model picker. Nemotron has the Live tab.
+    static let nvidia: [SpeechEngine] = [.canary]
 
     var displayName: String {
         switch self {
@@ -124,6 +125,13 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
         "no": "nb-NO", "da": "da-DK", "bg": "bg-BG", "fi": "fi-FI", "hr": "hr-HR", "sk": "sk-SK",
         "zh": "zh-CN", "hu": "hu-HU", "ro": "ro-RO", "et": "et-EE",
     ]
+
+    /// The Live tab's choices: detection, Nemotron's languages by Whisper's
+    /// codes, and Chinese in Traditional characters.
+    static var liveLanguages: [String] {
+        ["auto"] + (Array(nemotronLocales.keys) + [Languages.traditionalChinese])
+            .sorted { Languages.displayName($0) < Languages.displayName($1) }
+    }
 
     /// What to ask the model for, given the language picker's choice (a
     /// Whisper code, "auto", or Traditional Chinese's own code).

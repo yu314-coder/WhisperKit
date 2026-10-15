@@ -72,10 +72,10 @@ struct whisperApp: App {
 /// Transcription, music and pictures are separate enough to be separate
 /// tabs: they share storage and the model downloader, but nothing on screen.
 struct RootView: View {
-    private enum Tab: String { case transcribe, music, image }
+    private enum Tab: String { case transcribe, live, music, image }
     @State private var tab = Self.firstTab
 
-    /// The Transcribe tab, or in Debug builds `-AppStartTab music|image`.
+    /// The Transcribe tab, or in Debug builds `-AppStartTab live|music|image`.
     private static var firstTab: Tab {
         #if DEBUG
         if let raw = UserDefaults.standard.string(forKey: "AppStartTab"), let tab = Tab(rawValue: raw) { return tab }
@@ -103,6 +103,9 @@ struct RootView: View {
             ContentView()
                 .tabItem { Label("Transcribe", systemImage: "waveform") }
                 .tag(Tab.transcribe)
+            LiveView()
+                .tabItem { Label("Live", systemImage: "captions.bubble") }
+                .tag(Tab.live)
             MusicView()
                 .tabItem { Label("Music", systemImage: "music.note") }
                 // iPad's floating tab bar draws badges only in red, over the

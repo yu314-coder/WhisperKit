@@ -2,7 +2,7 @@ import SwiftUI
 
 /// How to use a tab, behind the "?" in its top bar.
 struct HelpView: View {
-    enum Topic { case transcribe, music, image }
+    enum Topic { case transcribe, live, music, image }
     let topic: Topic
 
     @Environment(\.dismiss) private var dismiss
@@ -48,6 +48,7 @@ struct HelpView: View {
     private var title: String {
         switch topic {
         case .transcribe: return "How to Transcribe"
+        case .live:       return "Live Transcription"
         case .music:      return "How to Make Music"
         case .image:      return "How to Make Pictures"
         }
@@ -65,12 +66,14 @@ struct HelpView: View {
             return [
                 Section(icon: "square.grid.2x2", title: "Choose a model",
                         body: "Tap the model name at the top. Small is fastest, Turbo is the best balance, and the Large models are the most accurate. A model downloads once, then works offline."),
-                Section(icon: "bolt.horizontal", title: "NVIDIA models",
-                        body: "Under the Whisper models. Canary 1B v2 is for English and 24 other European languages, and makes the fewest mistakes in English; it doesn't know Chinese, Japanese or Korean. Nemotron 3.5 ASR is for live transcription: with it chosen, the text appears while you record. It is less accurate than Whisper Turbo, especially in Chinese, so use Whisper for recordings where every word matters. Both run on the GPU. Licences: Canary, CC BY 4.0; Nemotron, OpenMDW 1.1; both NVIDIA's, converted to MLX by Mediform and mlx-community."),
+                Section(icon: "bolt.horizontal", title: "Canary 1B v2",
+                        body: "Under the Whisper models: NVIDIA's model for English and 24 other European languages, which makes the fewest mistakes in English. It doesn't know Chinese, Japanese or Korean. It runs on the GPU. Licence: CC BY 4.0 (NVIDIA; converted to MLX by Mediform)."),
+                Section(icon: "captions.bubble", title: "Live",
+                        body: "To see the words while you speak, use the Live tab."),
                 Section(icon: "cpu", title: "GPU or Neural Engine",
                         body: "In the same menu, under Run on. The GPU loads in seconds. The Neural Engine uses less battery, but its first load after an update takes a few minutes. Big models can be too large for an iPhone's GPU; if the app closes while loading, switch to the Neural Engine."),
                 Section(icon: "mic.fill", title: "Record",
-                        body: "Tap the red button to start, and again to stop. The recording is transcribed right away — or, with Nemotron chosen, as you speak."),
+                        body: "Tap the red button to start, and again to stop. The recording is transcribed right away."),
                 Section(icon: "folder", title: "Import a file or video",
                         body: "The folder button opens Files; the photo button picks a video from Photos. Audio and video both work."),
                 Section(icon: "square.and.arrow.up", title: "Share to Whisper",
@@ -85,6 +88,21 @@ struct HelpView: View {
                         body: "Every transcript is kept in the library, where you can search them. Open one to read it, rename it, or export it as text, subtitles (SRT, VTT), Markdown or JSON."),
                 Section(icon: "lock.fill", title: "Private",
                         body: "Transcription happens entirely on this device. Your audio never leaves it."),
+            ]
+        case .live:
+            return [
+                Section(icon: "captions.bubble", title: "Speak and read along",
+                        body: "Tap Start and talk: the words appear as you say them, about half a second behind. Tap Stop to finish. The transcript and the recording are kept in the library, the same one the Transcribe tab uses."),
+                Section(icon: "square.and.arrow.down", title: "The model",
+                        body: "Live uses NVIDIA's Nemotron 3.5 ASR, made for transcribing as speech happens. It downloads once (0.76 GB) and runs on the GPU. It is less accurate than Whisper Turbo, especially in Chinese, so for recordings where every word matters, record in the Transcribe tab instead."),
+                Section(icon: "globe", title: "Language",
+                        body: "The globe button sets the language, or leaves it to detect — it can follow a switch from one language to another. Choose Chinese (Traditional) for traditional characters."),
+                Section(icon: "rectangle.on.rectangle", title: "Leaving the app",
+                        body: "The recording carries on if you switch apps; the words catch up when you come back."),
+                Section(icon: "doc.text", title: "Licence",
+                        body: "Nemotron 3.5 ASR: NVIDIA, OpenMDW 1.1; converted to MLX by mlx-community. Its licence text downloads with it."),
+                Section(icon: "lock.fill", title: "Private",
+                        body: "Everything happens on this device. Your voice never leaves it."),
             ]
         case .music:
             return [
