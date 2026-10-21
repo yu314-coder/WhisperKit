@@ -7,7 +7,10 @@ struct TranscriptDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
-    @StateObject private var player = TranscriptPlayer()
+    /// Held, not observed: the playhead's 10 Hz ticks redraw only the
+    /// waveform and the bar (DetailWaveform, DetailPlayerBar), and the
+    /// segment highlight moves via `onReceive` at row boundaries.
+    @State private var player = TranscriptPlayer()
     @State private var editingSpeakerForSegment: SavedSegment?
     @State private var speakerDraft: String = ""
     @State private var showExportPicker = false
@@ -134,37 +137,7 @@ struct TranscriptDetailView: View {
     /// the player, which is the whole point of having measured amplitude
     /// rather than a decorative squiggle: you can see where the speech is.
     private var waveformWell: some View {
-        VStack(spacing: 7) {
-            Group {
-                if let env = transcript.envelope(limit: 160) {
-                    WaveformView(
-                        buckets: env,
-                        progress: player.duration > 0 ? player.currentTime / player.duration : nil,
-                        onScrub: { f in
-                            guard player.duration > 0 else { return }
-                            player.seek(to: f * player.duration)
-                        }
-                    )
-                } else {
-                    WaveformPlaceholder()
-                }
-            }
-            .frame(height: 64)
-
-            HStack {
-                Text(TranscriptExporter.formatTimestamp(player.currentTime))
-                    .font(Studio.mono(9))
-                    .foregroundColor(Studio.accent)
-                Spacer()
-                Text(TranscriptExporter.formatTimestamp(transcript.duration))
-                    .font(Studio.mono(9))
-                    .foregroundColor(Studio.mute)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(Studio.sunk)
-        .overlay(alignment: .bottom) { Rectangle().fill(Studio.rule).frame(height: 1) }
+        DetailWaveform(player: player, buckets: transcript.envelope(limit: 160), duration: transcript.duration)
     }
 
     private var segmentList: some View {
@@ -184,46 +157,7 @@ struct TranscriptDetailView: View {
     // MARK: - Player bar
 
     private var playerBar: some View {
-        VStack(spacing: 8) {
-            if player.duration > 0 {
-                ProgressView(value: min(player.currentTime, player.duration), total: max(player.duration, 0.01))
-                    .progressViewStyle(.linear)
-                HStack {
-                    Text(TranscriptExporter.formatTimestamp(player.currentTime))
-                        .font(.caption.monospacedDigit())
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Button {
-                        player.seek(to: max(0, player.currentTime - 10))
-                    } label: {
-                        Image(systemName: "gobackward.10").font(.title3)
-                    }
-                    Button {
-                        player.togglePlayPause()
-                    } label: {
-                        Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.system(size: 44))
-                            .foregroundStyle(.tint)
-                    }
-                    Button {
-                        player.seek(to: min(player.duration, player.currentTime + 10))
-                    } label: {
-                        Image(systemName: "goforward.10").font(.title3)
-                    }
-                    Spacer()
-                    Text(TranscriptExporter.formatTimestamp(player.duration))
-                        .font(.caption.monospacedDigit())
-                        .foregroundColor(.secondary)
-                }
-            } else {
-                Text("Audio file not available for this transcript")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.vertical, 12)
-            }
-        }
-        .padding()
-        .background(.ultraThinMaterial)
+        DetailPlayerBar(player: player)
     }
 
     @ToolbarContentBuilder
@@ -377,5 +311,97 @@ private struct SegmentListView: View, Equatable {
         )
         .contentShape(Rectangle())
         .onTapGesture { onSeek(seg.startTime) }
+    }
+}
+
+
+/// The detail screen's waveform and playhead time; observes the player.
+private struct DetailWaveform: View {
+    @ObservedObject var player: TranscriptPlayer
+    let buckets: [Float]?
+    let duration: Double
+
+    var body: some View {
+        VStack(spacing: 7) {
+            Group {
+                if let buckets {
+                    WaveformView(
+                        buckets: buckets,
+                        progress: player.duration > 0 ? player.currentTime / player.duration : nil,
+                        onScrub: { f in
+                            guard player.duration > 0 else { return }
+                            player.seek(to: f * player.duration)
+                        }
+                    )
+                } else {
+                    WaveformPlaceholder()
+                }
+            }
+            .frame(height: 64)
+
+            HStack {
+                Text(TranscriptExporter.formatTimestamp(player.currentTime))
+                    .font(Studio.mono(9))
+                    .foregroundColor(Studio.accent)
+                    .monospacedDigit()
+                Spacer()
+                Text(TranscriptExporter.formatTimestamp(duration))
+                    .font(Studio.mono(9))
+                    .foregroundColor(Studio.mute)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Studio.sunk)
+        .overlay(alignment: .bottom) { Rectangle().fill(Studio.rule).frame(height: 1) }
+    }
+}
+
+/// Play, pause and skip, in the app's palette; observes the player.
+private struct DetailPlayerBar: View {
+    @ObservedObject var player: TranscriptPlayer
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if player.duration > 0 {
+                ProgressView(value: min(player.currentTime, player.duration), total: max(player.duration, 0.01))
+                    .progressViewStyle(.linear)
+                    .tint(Studio.accent)
+                HStack {
+                    Text(TranscriptExporter.formatTimestamp(player.currentTime))
+                        .font(Studio.mono(11))
+                        .foregroundColor(Studio.mute)
+                        .monospacedDigit()
+                    Spacer()
+                    Button { player.seek(to: max(0, player.currentTime - 10)) } label: {
+                        Image(systemName: "gobackward.10").font(.title3)
+                    }
+                    .accessibilityLabel("Back 10 seconds")
+                    Button { player.togglePlayPause() } label: {
+                        Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 44))
+                    }
+                    .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
+                    Button { player.seek(to: min(player.duration, player.currentTime + 10)) } label: {
+                        Image(systemName: "goforward.10").font(.title3)
+                    }
+                    .accessibilityLabel("Forward 10 seconds")
+                    Spacer()
+                    Text(TranscriptExporter.formatTimestamp(player.duration))
+                        .font(Studio.mono(11))
+                        .foregroundColor(Studio.mute)
+                        .monospacedDigit()
+                }
+                .foregroundColor(Studio.accent)
+            } else {
+                Text("The recording isn't available for this transcript.")
+                    .font(Studio.text(12))
+                    .foregroundColor(Studio.mute)
+                    .padding(.vertical, 12)
+            }
+        }
+        .padding()
+        .background(Studio.panel)
+        .overlay(alignment: .top) { Rectangle().fill(Studio.rule).frame(height: 1) }
     }
 }

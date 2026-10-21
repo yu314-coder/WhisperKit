@@ -93,6 +93,7 @@ struct LiveView: View {
                     .font(.system(size: 16))
                     .foregroundColor(Studio.ink.opacity(0.75))
                     .frame(width: 32, height: 32)
+                    .overlay(Circle().strokeBorder(Studio.rule, lineWidth: 0.5))
             }
             .buttonStyle(PressableButtonStyle())
             .padding(.leading, 8)
@@ -313,15 +314,16 @@ struct LiveView: View {
                 message = "Nothing was heard. Check that the microphone isn't muted, and speak a little closer."
             } else {
                 text = full
-                save(url: url, result: result, text: full, convert: convert)
+                let envelope = await Task.detached(priority: .userInitiated) { AudioConverter.peakEnvelope(of: url)?.buckets }.value
+                save(url: url, result: result, text: full, envelope: envelope, convert: convert)
             }
             finishing = false
         }
     }
 
     /// Into the library, as the Transcribe tab keeps a recording.
-    private func save(url: URL, result: TranscriptionResult, text: String, convert: (String) -> String) {
-        let envelope = AudioConverter.peakEnvelope(of: url)
+    private func save(url: URL, result: TranscriptionResult, text: String, envelope: [Float]?,
+                      convert: (String) -> String) {
         let stamp = Self.stampFormatter.string(from: Date())
         let audio = try? AudioFiles.saveAudio(from: url, suggestedName: "Live_\(stamp)", movingSource: true)
         let firstLine = text.components(separatedBy: .newlines).first ?? ""
@@ -332,7 +334,7 @@ struct LiveView: View {
             modelName: "\(engine.displayName) · live",
             fullText: text,
             audioFilePath: audio,
-            waveform: envelope?.buckets
+            waveform: envelope
         )
         record.segments = result.segments.map {
             SavedSegment(startTime: Double($0.start), endTime: Double($0.end), text: convert($0.text))

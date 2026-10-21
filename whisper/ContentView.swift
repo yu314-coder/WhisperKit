@@ -3316,8 +3316,9 @@ struct ContentView: View {
         // slightly different shapes depending on which path produced it.
         // Falls back to the converted WAV, which is always readable, if the
         // source turns out to be a container AVAudioFile will not open.
-        let envelope = AudioConverter.peakEnvelope(of: url)
-            ?? AudioConverter.peakEnvelope(of: workURL)
+        let envelope = await Task.detached(priority: .userInitiated) {
+            AudioConverter.peakEnvelope(of: url) ?? AudioConverter.peakEnvelope(of: workURL)
+        }.value
         let peakLevel = envelope?.peak
 
         var languageCode = selectedLanguage == "auto" ? nil : Languages.whisperCode(selectedLanguage)
@@ -3366,7 +3367,8 @@ struct ContentView: View {
         // growing transcript — is what made the UI stutter while transcribing.
         // Coalesce to 10 Hz; the final state is written after transcribe()
         // returns, so dropping trailing intermediate frames costs nothing.
-        let throttle = ProgressThrottle(interval: 0.1)
+        // Four a second: each push redraws this screen.
+        let throttle = ProgressThrottle(interval: 0.25)
         let stream = StreamingTranscriptBuffer()
         // Core ML on the GPU can't run off screen without background GPU
         // time: wait between tokens until it can.

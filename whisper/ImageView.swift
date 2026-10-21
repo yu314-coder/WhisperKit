@@ -190,6 +190,7 @@ struct ImageView: View {
                     .font(.system(size: 16))
                     .foregroundColor(Studio.ink.opacity(0.75))
                     .frame(width: 32, height: 32)
+                    .overlay(Circle().strokeBorder(Studio.rule, lineWidth: 0.5))
             }
             .buttonStyle(PressableButtonStyle())
             .padding(.leading, 8)

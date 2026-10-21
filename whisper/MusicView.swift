@@ -141,12 +141,21 @@ struct MusicView: View {
         }
         .onDisappear { memory.stop() }
         .onChange(of: engine.isBusy) { _, busy in
-            if !busy { memory.stop() }
+            if !busy {
+                memory.stop()
+                refreshModelOnDevice()
+            }
         }
+        .onChange(of: selectedModel) { _, _ in refreshModelOnDevice() }
+        .onAppear { refreshModelOnDevice() }
         // Once typing pauses, ask which words are lyrics.
         .task(id: prompt) { await findLyrics(in: prompt, afterPause: true) }
-        .onChange(of: engine.lastResult) { _, url in
-            resultEnvelope = url.flatMap { AudioConverter.peakEnvelope(of: $0, bucketCount: 90)?.buckets }
+        // Decoding the whole song for its outline: off the main thread.
+        .task(id: engine.lastResult) {
+            let url = engine.lastResult
+            resultEnvelope = await Task.detached(priority: .userInitiated) {
+                url.flatMap { AudioConverter.peakEnvelope(of: $0, bucketCount: 90)?.buckets }
+            }.value
         }
         .sheet(isPresented: $showModelPicker) {
             MusicModelPicker(selected: $selectedModel)
@@ -196,7 +205,7 @@ struct MusicView: View {
             Button { showModelPicker = true } label: {
                 HStack(spacing: 5) {
                     Circle()
-                        .fill(Studio.ok)
+                        .fill(modelOnDevice ? Studio.ok : Studio.mute.opacity(0.5))
                         .frame(width: 6, height: 6)
                     Text(selectedModel.displayName)
                         .font(Studio.mono(11))
@@ -218,6 +227,7 @@ struct MusicView: View {
                     .font(.system(size: 16))
                     .foregroundColor(Studio.ink.opacity(0.75))
                     .frame(width: 32, height: 32)
+                    .overlay(Circle().strokeBorder(Studio.rule, lineWidth: 0.5))
             }
             .buttonStyle(PressableButtonStyle())
             .padding(.leading, 8)
@@ -383,6 +393,14 @@ struct MusicView: View {
                            found: detected?.prompt == prompt ? detected?.lines : nil)
     }
     @State private var requestCache = MusicRequestCache()
+    /// Whether the chosen model's files are in place, for the chip's dot:
+    /// read from disk on changes, not on every redraw.
+    @State private var modelOnDevice = false
+
+    private func refreshModelOnDevice() {
+        let model = selectedModel
+        modelOnDevice = model.weightFiles.allSatisfy { $0.isPresent(in: model.weightsDirectory) }
+    }
 
     /// Asks the on-device model which words in `text` are lyrics, unless it
     /// already has; the rules in `MusicRequest` answer until it does, and
