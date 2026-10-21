@@ -69,6 +69,8 @@ final class ImageEngine {
     }
     /// The picture just made, until the next run starts.
     private(set) var lastImage: SavedImage?
+    /// When the picture itself started — after any download, so the timer
+    /// counts the making, not the fetching.
     private(set) var startedAt: Date?
     private(set) var downloadNote: String?
     /// The rewriter's description, once written, while its picture is made.
@@ -77,6 +79,12 @@ final class ImageEngine {
     private var work: Task<Void, Never>?
     private var backgroundJob: BackgroundWork.Job?
     private var endedInBackground = false
+    /// The run whose results may still change the phase: a cancelled run's
+    /// task keeps winding down for a moment, and must not touch the next.
+    private var runID = UUID()
+    /// Enhance prompt's last answer: making another take of the same prompt
+    /// at the same shape reuses it instead of rewriting for half a minute.
+    private var lastRewrite: (prompt: String, ratio: String, result: String)?
 
     var modelContext: ModelContext?
 
@@ -98,29 +106,53 @@ final class ImageEngine {
         if case .generating(_, let progress) = phase {
             phase = .generating(stage: "Stopping", progress: progress)
         } else {
-            work = nil
+            runID = UUID()
             phase = .idle
         }
+    }
+
+    /// Clears a failure or a withheld picture's card.
+    func dismissMessage() {
+        if !isBusy { phase = .idle }
+    }
+
+    /// Forgets the picture on show once it has been deleted.
+    func forget(_ image: SavedImage) {
+        if lastImage?.id == image.id { lastImage = nil }
     }
 
     /// - Parameter enhance: have the prompt rewriter (PromptRewriter) turn
     ///   the prompt into a detailed description first.
     func generate(model: ImageModel, prompt: String, size: ImageSize, seed: UInt64? = nil, enhance: Bool = false) {
         guard !isBusy else { return }
-        startedAt = Date()
+        startedAt = nil
         endedInBackground = false
         lastImage = nil
         rewrittenPrompt = nil
+        let id = UUID()
+        runID = id
+        phase = .generating(stage: "Starting", progress: 0)
+        ModelMemory.makeRoomForGeneration()
         let job = BackgroundWork.shared.begin(title: "Making a picture", subtitle: Self.shortened(prompt),
                                               usesGPU: model.usesGPU || enhance)
         job.onExpire = { [weak self] in
-            self?.endedInBackground = true
-            self?.cancel()
+            guard let self, self.runID == id else { return }
+            // A download carries on in the background session after the app
+            // is suspended, and the run picks up when it's back; only the
+            // making itself has to stop.
+            if case .downloading = self.phase { return }
+            self.endedInBackground = true
+            self.cancel()
         }
         backgroundJob = job
+        // One run at a time: a cancelled run may still be unpacking an
+        // archive the next one would unpack too.
+        let previous = work
         work = Task { [weak self] in
+            await previous?.value
             guard let self else { return }
-            defer { self.backgroundJob = nil }
+            defer { if self.runID == id { self.backgroundJob = nil } }
+            var lastReport = Date.distantPast
             do {
                 // The model, any files it reads from another model's folder,
                 // and the picture check every model shares, as one download:
@@ -142,20 +174,28 @@ final class ImageEngine {
                                          expected: WeightFile.topLevelNames(ImageModel.rewriterFiles)
                                             .union([PromptRewriter.File.systemState])))
                 }
+                try Task.checkCancellation()
                 try await WeightFetcher.fetch(batches, progress: { [weak self] update in
-                    self?.phase = .downloading(file: update.file, completed: update.completed, total: update.total,
-                                               fraction: update.fraction, received: update.received,
-                                               expected: update.expected)
+                    // Several times a second per file otherwise, each
+                    // redrawing the tab: four a second is plenty for a bar.
+                    guard let self, self.runID == id else { return }
+                    let now = Date()
+                    guard now.timeIntervalSince(lastReport) >= 0.25 || update.completed == update.total else { return }
+                    lastReport = now
+                    self.phase = .downloading(file: update.file, completed: update.completed, total: update.total,
+                                              fraction: update.fraction, received: update.received,
+                                              expected: update.expected)
                 }, note: { [weak self] line in
                     self?.downloadNote = line
                 })
                 try Task.checkCancellation()
                 try await self.run(model: model, prompt: prompt, size: size,
-                                   seed: seed ?? UInt64.random(in: 0 ... UInt64(UInt32.max)), enhance: enhance)
+                                   seed: seed ?? UInt64.random(in: 0 ... UInt64(UInt32.max)), enhance: enhance, id: id)
                 job.finish(success: true)
                 self.notifyIfAway(title: "Your picture is ready", body: Self.shortened(prompt))
             } catch is CancellationError {
                 job.finish(success: false)
+                guard self.runID == id else { return }
                 if self.endedInBackground {
                     self.phase = .failed("Stopped in the background — iOS needed the device's resources. Try again with the app open.")
                     self.notifyIfAway(title: "Picture stopped", body: "iOS stopped it in the background. Open Whisper to try again.")
@@ -164,10 +204,12 @@ final class ImageEngine {
                 }
             } catch is Withheld {
                 job.finish(success: true)
+                guard self.runID == id else { return }
                 self.phase = .withheld
                 self.notifyIfAway(title: "Picture not shown", body: "It looked sexually explicit. Open Whisper to try another.")
             } catch {
                 job.finish(success: false)
+                guard self.runID == id else { return }
                 self.phase = .failed(error.localizedDescription)
                 self.notifyIfAway(title: "The picture couldn't be made", body: error.localizedDescription)
             }
@@ -176,7 +218,8 @@ final class ImageEngine {
 
     // MARK: - Generation
 
-    private func run(model: ImageModel, prompt: String, size: ImageSize, seed: UInt64, enhance: Bool) async throws {
+    private func run(model: ImageModel, prompt: String, size: ImageSize, seed: UInt64, enhance: Bool,
+                     id: UUID) async throws {
         // MLX crashes on the Simulator's Metal device (see MusicEngine);
         // DreamShaper is Core ML only and runs there, slowly.
         #if targetEnvironment(simulator)
@@ -184,21 +227,32 @@ final class ImageEngine {
         #endif
         phase = .generating(stage: "Starting", progress: 0.01)
         let started = Date()
+        startedAt = started
         let directory = model.weightsDirectory
         let flag = CancellationFlag()
         let report: @Sendable (String, Double) -> Void = { [weak self] label, progress in
             Task { @MainActor [weak self] in
-                guard let self, !flag.isCancelled else { return }
+                guard let self, !flag.isCancelled, self.runID == id else { return }
                 self.phase = .generating(stage: label, progress: progress)
             }
         }
+        // With Enhance the rewrite takes the first 7%, and the picture's own
+        // stages share the rest, so the bar never runs backwards.
+        let rewriteShare = enhance ? 0.07 : 0
+        let imageReport: @Sendable (String, Double) -> Void = { label, progress in
+            report(label, rewriteShare + (1 - rewriteShare) * progress)
+        }
+        let cachedRewrite = lastRewrite.flatMap { $0.prompt == prompt && $0.ratio == size.ratio ? $0.result : nil }
         let shown: @Sendable (String) -> Void = { [weak self] text in
             Task { @MainActor [weak self] in self?.rewrittenPrompt = text }
         }
         let (image, used): (CGImage, String) = try await withTaskCancellationHandler {
             try await Task.detached(priority: .userInitiated) {
                 var used = prompt
-                if enhance {
+                if enhance, let cachedRewrite {
+                    used = cachedRewrite
+                    shown(used)
+                } else if enhance {
                     // On the GPU: off screen without background GPU time it
                     // waits between tokens.
                     report("Writing a detailed prompt", 0.01)
@@ -213,7 +267,7 @@ final class ImageEngine {
                     shown(used)
                 }
                 let image = try Self.render(model: model, prompt: used, size: size, seed: seed, directory: directory,
-                                            isCancelled: { flag.isCancelled }, report: report)
+                                            isCancelled: { flag.isCancelled }, report: imageReport)
                 report("Checking the picture", 0.97)
                 if try SafetyChecker(directory: ImageModel.safetyDirectory).isExplicit(image) { throw Withheld() }
                 return (image, used)
@@ -221,11 +275,12 @@ final class ImageEngine {
         } onCancel: {
             flag.cancel()
         }
+        if enhance { lastRewrite = (prompt, size.ratio, used) }
         // Saved under the prompt that made it — the rewriter's, when used —
         // so making it again gives the same picture.
-        try save(image, model: model, prompt: used, size: size, seed: seed,
-                 seconds: Date().timeIntervalSince(started))
-        phase = .idle
+        try await save(image, model: model, prompt: used, size: size, seed: seed,
+                       seconds: Date().timeIntervalSince(started))
+        if runID == id { phase = .idle }
     }
 
     /// Runs the model off the main actor and returns the picture.
@@ -276,9 +331,13 @@ final class ImageEngine {
     }
 
     private func save(_ image: CGImage, model: ImageModel, prompt: String, size: ImageSize,
-                      seed: UInt64, seconds: Double) throws {
+                      seed: UInt64, seconds: Double) async throws {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let path = try ImageFiles.save(image, prompt: trimmed, model: model.displayName)
+        let name = model.displayName
+        // PNG encoding takes a moment at 1024 px: off the main thread.
+        let path = try await Task.detached(priority: .userInitiated) {
+            try ImageFiles.save(image, prompt: trimmed, model: name)
+        }.value
         let saved = SavedImage(prompt: trimmed.isEmpty ? "Untitled" : trimmed, modelName: model.displayName,
                                filePath: path, width: image.width, height: image.height,
                                seed: Int64(seed), seconds: seconds)

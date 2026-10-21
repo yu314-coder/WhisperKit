@@ -303,6 +303,8 @@ struct LiveView: View {
         let script = language
         Task {
             let (url, result) = await live.stop()
+            // 0.76 GB the other tabs may want; a second takes it back.
+            await SpeechRunner.shared.unload()
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             let convert: (String) -> String = { script == Languages.traditionalChinese ? Languages.traditional($0) : $0 }
             let full = convert(result.text.trimmingCharacters(in: .whitespacesAndNewlines))

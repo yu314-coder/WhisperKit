@@ -414,3 +414,18 @@ enum PauseChunker {
         return (slice.reduce(0) { $0 + $1 * $1 } / Float(slice.count)).squareRoot()
     }
 }
+
+/// One big job at a time gets the memory.
+///
+/// Music and pictures need every gigabyte they can get — they check what's
+/// free before starting (GenerationSupport) — so as they start, the
+/// transcription models let go: the NVIDIA engines here, and Whisper in the
+/// Transcribe tab, which loads it again when next shown.
+enum ModelMemory {
+    static let releaseTranscription = Notification.Name("ModelMemory.releaseTranscription")
+
+    @MainActor static func makeRoomForGeneration() {
+        Task { await SpeechRunner.shared.unload() }
+        NotificationCenter.default.post(name: releaseTranscription, object: nil)
+    }
+}

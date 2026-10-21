@@ -18,8 +18,17 @@ struct ContentView: View {
     /// Recent work, surfaced on the idle page. On iPad the single column left
     /// most of the screen empty; showing the library's most recent entries
     /// gives the page something to be.
-    @Query(sort: \SavedTranscript.createdAt, order: .reverse)
-    private var recentTranscripts: [SavedTranscript]
+    /// Only the 14 the rail shows: the whole library, full text and
+    /// waveforms included, used to load here for a count.
+    @Query(ContentView.recentFetch) private var recentTranscripts: [SavedTranscript]
+    @State private var transcriptCount = 0
+    @AppStorage("didBackfillWaveforms") private var didBackfillWaveforms = false
+
+    private static var recentFetch: FetchDescriptor<SavedTranscript> {
+        var fetch = FetchDescriptor<SavedTranscript>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        fetch.fetchLimit = 14
+        return fetch
+    }
     @State private var quickOpenTranscript: SavedTranscript?
 
     /// Sampling model. Isolated from ContentView's own state so its 1 Hz tick
@@ -106,7 +115,12 @@ struct ContentView: View {
     /// The record just written for this run. Held so the result screen can show
     /// real segments and play the audio back, rather than only flat text.
     @State private var currentTranscript: SavedTranscript?
-    @StateObject private var resultPlayer = TranscriptPlayer()
+    /// Held, not observed: its playhead moves ten times a second, and only
+    /// the transport and the segment list (ResultTransport,
+    /// ResultSegmentList) need to redraw for it — not this whole screen.
+    @State private var resultPlayer = TranscriptPlayer()
+    /// Whisper was let go for music or a picture; load it again when shown.
+    @State private var releasedForGeneration = false
     @State private var errorMessage: String? = nil
     @State private var streamingTranscript: String = ""
     @State private var isProcessing = false
@@ -129,7 +143,14 @@ struct ContentView: View {
     private var engineName: String { speechEngine == .whisper ? selectedModel.displayName : speechEngine.displayName }
     private var engineSizeLabel: String { speechEngine == .whisper ? selectedModel.sizeLabel : speechEngine.sizeLabel }
     private var engineDownloaded: Bool {
-        speechEngine == .whisper ? (downloadStatus[selectedModel] ?? false) : speechEngine.isDownloaded
+        speechEngine == .whisper ? (downloadStatus[selectedModel] ?? false) : (engineOnDevice[speechEngine] ?? false)
+    }
+    /// Whether each NVIDIA engine's files are in place: read from disk on
+    /// changes, not on every redraw.
+    @State private var engineOnDevice: [SpeechEngine: Bool] = [:]
+
+    private func refreshEngines() {
+        for engine in SpeechEngine.nvidia { engineOnDevice[engine] = engine.isDownloaded }
     }
     @State private var showingFilePicker = false
     @State private var showLinkSheet = false
@@ -348,9 +369,21 @@ struct ContentView: View {
             }
             takeIncomingFile()
         }
+        .onReceive(NotificationCenter.default.publisher(for: ModelMemory.releaseTranscription)) { _ in
+            guard speechEngine == .whisper, whisperKit != nil,
+                  !isProcessing, !isRecording, !isPreparingModel else { return }
+            whisperKit = nil
+            isModelLoaded = false
+            releasedForGeneration = true
+        }
         .onAppear {
             // Fires again whenever a sheet is dismissed, so everything here
             // must be safe to repeat.
+            transcriptCount = (try? modelContext.fetchCount(FetchDescriptor<SavedTranscript>())) ?? recentTranscripts.count
+            if releasedForGeneration {
+                releasedForGeneration = false
+                checkModelStatus()
+            }
             guard !didRunLaunchSetup else { return }
             didRunLaunchSetup = true
 
@@ -404,7 +437,9 @@ struct ContentView: View {
                 removeRetiredModelDownloads()
                 sanitiseStoredSegmentsIfNeeded()
                 cleanupOrphanedImports()
+                #if DEBUG
                 createDebugFiles()
+                #endif
                 await backfillWaveformsIfNeeded()
             }
             monitor.initializeGPUMonitoring()
@@ -413,7 +448,6 @@ struct ContentView: View {
                     updateLiveActivity()
                 }
             }
-            requestNotificationPermissions()
             cleanupStaleActivities()
         }
         .onDisappear {
@@ -524,7 +558,7 @@ struct ContentView: View {
                 Spacer()
                 if !recentTranscripts.isEmpty {
                     Button { showLibrary = true } label: {
-                        Text("All \(recentTranscripts.count)")
+                        Text("All \(transcriptCount)")
                             .font(Studio.mono(9, weight: .semibold))
                             .foregroundColor(Studio.accent)
                     }
@@ -805,7 +839,7 @@ struct ContentView: View {
                     Button {
                         showLibrary = true
                     } label: {
-                        Text("All \(recentTranscripts.count) →")
+                        Text("All \(transcriptCount) →")
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
                             .foregroundColor(Self.paperAccent)
                     }
@@ -1126,7 +1160,7 @@ struct ContentView: View {
                 Button(action: copyTranscript) {
                     Image(systemName: showCopySuccess ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(showCopySuccess ? Color(red: 0.30, green: 0.65, blue: 0.40) : Self.paperInk.opacity(0.55))
+                        .foregroundColor(showCopySuccess ? Studio.ok : Self.paperInk.opacity(0.55))
                         .frame(width: 28, height: 28)
                         .overlay(Circle().strokeBorder(Self.paperRule, lineWidth: 0.5))
                 }
@@ -1157,102 +1191,16 @@ struct ContentView: View {
 
     /// Waveform plus transport for the run just finished. Scrubbing seeks, and
     /// the highlighted row below follows the playhead.
-    @ViewBuilder
     func resultWaveform(_ env: [Float]) -> some View {
-        let playable = resultPlayer.duration > 0
-
-        VStack(spacing: 10) {
-            WaveformView(
-                buckets: env,
-                progress: playable ? resultPlayer.currentTime / resultPlayer.duration : nil,
-                idleColor: Studio.mute.opacity(0.55),
-                onScrub: playable ? { f in resultPlayer.seek(to: f * resultPlayer.duration) } : nil
-            )
-            .frame(height: isRegularWidth ? 68 : 54)
-
-            if playable {
-                HStack(spacing: 14) {
-                    Button { resultPlayer.seek(to: max(0, resultPlayer.currentTime - 10)) } label: {
-                        Image(systemName: "gobackward.10")
-                            .font(.system(size: 15))
-                            .foregroundColor(Self.paperInk.opacity(0.62))
-                    }
-                    Button { resultPlayer.togglePlayPause() } label: {
-                        Image(systemName: resultPlayer.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 13))
-                            .foregroundColor(Studio.onAccent)
-                            .frame(width: 32, height: 32)
-                            .background(Circle().fill(Studio.accent))
-                    }
-                    Button { resultPlayer.seek(to: min(resultPlayer.duration, resultPlayer.currentTime + 10)) } label: {
-                        Image(systemName: "goforward.10")
-                            .font(.system(size: 15))
-                            .foregroundColor(Self.paperInk.opacity(0.62))
-                    }
-                    Spacer()
-                    Text("\(TranscriptExporter.formatTimestamp(resultPlayer.currentTime)) / \(TranscriptExporter.formatTimestamp(resultPlayer.duration))")
-                        .font(Studio.mono(11))
-                        .foregroundColor(Studio.mute)
-                }
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: Studio.corner).fill(Studio.sunk))
+        ResultTransport(player: resultPlayer, buckets: env, height: isRegularWidth ? 68 : 54)
     }
 
     /// Timestamped rows rather than one flowing block: the transcript becomes
     /// navigable, and each line is a seek target.
-    @ViewBuilder
     func resultSegments(_ record: SavedTranscript) -> some View {
-        let segs = record.segments.sorted { $0.startTime < $1.startTime }
-        let now = resultPlayer.currentTime
-
-        VStack(spacing: 1) {
-            ForEach(segs) { seg in
-                let active = resultPlayer.duration > 0 && now >= seg.startTime && now < seg.endTime
-                Button {
-                    resultPlayer.seek(to: seg.startTime)
-                } label: {
-                    HStack(alignment: .top, spacing: 12) {
-                        Text(TranscriptExporter.formatTimestamp(seg.startTime))
-                            .font(Studio.mono(11))
-                            .foregroundColor(active ? Studio.accent : Studio.mute)
-                            .frame(width: 44, alignment: .leading)
-                            .padding(.top, 2)
-
-                        if let speaker = seg.speaker, !speaker.isEmpty {
-                            Text(speaker)
-                                .font(Studio.mono(11))
-                                .foregroundColor(Studio.accent)
-                                .frame(width: 76, alignment: .leading)
-                                .padding(.top, 2)
-                        }
-
-                        Text(seg.text)
-                            .font(.system(size: bodyTextSize - 3))
-                            .foregroundColor(Self.paperInk)
-                            .lineSpacing(5)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .multilineTextAlignment(.leading)
-                            .textSelection(.enabled)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(active ? Studio.accent.opacity(0.10) : Color.clear)
-                    )
-                    .overlay(alignment: .leading) {
-                        Rectangle()
-                            .fill(active ? Studio.accent : Color.clear)
-                            .frame(width: 2)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-        }
+        ResultSegmentList(player: resultPlayer,
+                          segments: record.segments.sorted { $0.startTime < $1.startTime },
+                          textSize: bodyTextSize - 3)
     }
 
     /// Run stats as a quiet rule-bounded strip, so the transcript body below
@@ -1392,13 +1340,7 @@ struct ContentView: View {
                             .shadow(color: Studio.hot.opacity(0.30), radius: 16, y: 6)
 
                         if isRecording {
-                            // Pulse
-                            Circle()
-                                .stroke(Studio.hot.opacity(0.5), lineWidth: 2)
-                                .frame(width: 84, height: 84)
-                                .scaleEffect(isRecording ? 1.18 : 1.0)
-                                .opacity(isRecording ? 0 : 1)
-                                .animation(.easeOut(duration: 1.2).repeatForever(autoreverses: false), value: isRecording)
+                            RecordPulse()
 
                             RoundedRectangle(cornerRadius: 3, style: .continuous)
                                 .fill(Color.white)
@@ -1454,7 +1396,7 @@ struct ContentView: View {
             .font(.system(size: 17, weight: .regular))
             .foregroundColor(Self.paperInk.opacity(0.70))
             .frame(width: 44, height: 44)
-            .background(Circle().fill(Color.white.opacity(0.5)))
+            .background(Circle().fill(Studio.panel))
             .overlay(Circle().strokeBorder(Self.paperRule, lineWidth: 0.5))
     }
 
@@ -1470,7 +1412,7 @@ struct ContentView: View {
             .tracking(1)
             .foregroundColor(Self.paperInk.opacity(0.70))
             .frame(width: 44, height: 44)
-            .background(Circle().fill(Color.white.opacity(0.5)))
+            .background(Circle().fill(Studio.panel))
             .overlay(Circle().strokeBorder(Self.paperRule, lineWidth: 0.5))
     }
 
@@ -1497,7 +1439,7 @@ struct ContentView: View {
             // Status row
             HStack(spacing: 8) {
                 Circle()
-                    .fill(isModelLoaded ? Color(red: 0.30, green: 0.65, blue: 0.40) : Self.paperMute.opacity(0.4))
+                    .fill(isModelLoaded ? Studio.ok : Self.paperMute.opacity(0.4))
                     .frame(width: 7, height: 7)
                 Text(isPreparingModel
                      ? (downloadProgress != nil ? "Downloading"
@@ -1692,7 +1634,7 @@ struct ContentView: View {
                     } else if isDownloaded {
                         Image(systemName: "checkmark")
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(Color(red: 0.30, green: 0.65, blue: 0.40))
+                            .foregroundColor(Studio.ok)
                     }
                 }
 
@@ -1705,11 +1647,11 @@ struct ContentView: View {
 
                 HStack(spacing: 6) {
                     paperBadge(model.sizeLabel,
-                               tint: isDownloaded ? Color(red: 0.30, green: 0.65, blue: 0.40) : Self.paperMute)
+                               tint: isDownloaded ? Studio.ok : Self.paperMute)
                     if isActive {
                         paperBadge("Loaded", tint: Self.paperAccent)
                     } else if isDownloaded {
-                        paperBadge("On device", tint: Color(red: 0.30, green: 0.65, blue: 0.40))
+                        paperBadge("On device", tint: Studio.ok)
                     }
                 }
 
@@ -1772,9 +1714,9 @@ struct ContentView: View {
 
     func engineCard(_ engine: SpeechEngine) -> some View {
         let isSelected = speechEngine == engine
-        let isDownloaded = engine.isDownloaded
+        let isDownloaded = engineOnDevice[engine] ?? false
         let isActive = isSelected && isModelLoaded
-        let green = Color(red: 0.30, green: 0.65, blue: 0.40)
+        let green = Studio.ok
 
         return Button {
             selectEngine(engine)
@@ -2199,6 +2141,7 @@ struct ContentView: View {
                                               progress: { downloadProgress = $0.fraction },
                                               note: { statusMessage = $0 ?? "" })
                 try Task.checkCancellation()
+                refreshEngines()
                 downloadProgress = nil
                 statusMessage = "Loading \(engine.displayName)…"
                 try await SpeechRunner.shared.load(engine)
@@ -2220,6 +2163,7 @@ struct ContentView: View {
             isModelLoaded = false
         }
         try? FileManager.default.removeItem(at: engine.directory)
+        refreshEngines()
     }
 
     /// Clears *empty* partial-download placeholders.
@@ -2582,6 +2526,11 @@ struct ContentView: View {
     /// single decode — ~18 ms for a short clip — done off the main actor and
     /// yielding between items so a large library never blocks the UI.
     func backfillWaveformsIfNeeded() async {
+        // Once: every transcript saved since has its waveform, so this pass
+        // only ever had old ones to fill, and walked the whole library on
+        // every launch to find none.
+        guard !didBackfillWaveforms else { return }
+        defer { didBackfillWaveforms = true }
         let candidates = (try? modelContext.fetch(FetchDescriptor<SavedTranscript>()))?
             .filter { $0.waveform == nil && $0.audioFilePath != nil } ?? []
         guard !candidates.isEmpty else { return }
@@ -2800,6 +2749,7 @@ struct ContentView: View {
     }
 
     func checkModelStatus() {
+        refreshEngines()
         for model in WhisperModel.allCases {
             downloadStatus[model] = findModelDirectory(for: model) != nil
         }
@@ -3280,6 +3230,7 @@ struct ContentView: View {
 
         modelContext.insert(record)
         currentTranscript = record
+        transcriptCount += 1
         if let relative = savedRelativePath {
             let audio = AudioFiles.urlForRelativePath(relative)
             if FileManager.default.fileExists(atPath: audio.path) {
@@ -3634,5 +3585,168 @@ struct TranscriptionAttributes: ActivityAttributes {
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
         ContentView()
+    }
+}
+
+
+// MARK: - Result playback
+
+/// The finished run's waveform and transport. Observes the player itself,
+/// so the playhead redraws this and not the Transcribe screen.
+private struct ResultTransport: View {
+    @ObservedObject var player: TranscriptPlayer
+    let buckets: [Float]
+    let height: CGFloat
+
+    var body: some View {
+        let playable = player.duration > 0
+        VStack(spacing: 10) {
+            WaveformView(
+                buckets: buckets,
+                progress: playable ? player.currentTime / player.duration : nil,
+                idleColor: Studio.mute.opacity(0.55),
+                onScrub: playable ? { f in player.seek(to: f * player.duration) } : nil
+            )
+            .frame(height: height)
+
+            if playable {
+                HStack(spacing: 14) {
+                    Button { player.seek(to: max(0, player.currentTime - 10)) } label: {
+                        Image(systemName: "gobackward.10")
+                            .font(.system(size: 15))
+                            .foregroundColor(Studio.ink.opacity(0.62))
+                    }
+                    .accessibilityLabel("Back 10 seconds")
+                    Button { player.togglePlayPause() } label: {
+                        Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 13))
+                            .foregroundColor(Studio.onAccent)
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(Studio.accent))
+                    }
+                    .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
+                    Button { player.seek(to: min(player.duration, player.currentTime + 10)) } label: {
+                        Image(systemName: "goforward.10")
+                            .font(.system(size: 15))
+                            .foregroundColor(Studio.ink.opacity(0.62))
+                    }
+                    .accessibilityLabel("Forward 10 seconds")
+                    Spacer()
+                    Text("\(TranscriptExporter.formatTimestamp(player.currentTime)) / \(TranscriptExporter.formatTimestamp(player.duration))")
+                        .font(Studio.mono(11))
+                        .foregroundColor(Studio.mute)
+                        .monospacedDigit()
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: Studio.corner).fill(Studio.sunk))
+    }
+}
+
+/// The finished run's segments, the one under the playhead highlighted;
+/// each row seeks there. Lazy, so a long transcript lays out only what
+/// shows, and the playhead finds its row by binary search.
+private struct ResultSegmentList: View {
+    @ObservedObject var player: TranscriptPlayer
+    let segments: [SavedSegment]
+    let textSize: CGFloat
+
+    private var activeIndex: Int? {
+        guard player.duration > 0 else { return nil }
+        let now = player.currentTime
+        var low = 0, high = segments.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            if segments[mid].startTime <= now { low = mid + 1 } else { high = mid - 1 }
+        }
+        guard high >= 0, now < segments[high].endTime else { return nil }
+        return high
+    }
+
+    var body: some View {
+        let active = activeIndex
+        LazyVStack(spacing: 1) {
+            ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
+                ResultSegmentRow(segment: segment, active: index == active, textSize: textSize) {
+                    player.seek(to: segment.startTime)
+                }
+                .equatable()
+            }
+        }
+    }
+}
+
+private struct ResultSegmentRow: View, Equatable {
+    let segment: SavedSegment
+    let active: Bool
+    let textSize: CGFloat
+    let seek: () -> Void
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.segment.id == b.segment.id && a.active == b.active && a.textSize == b.textSize
+    }
+
+    var body: some View {
+        Button(action: seek) {
+            HStack(alignment: .top, spacing: 12) {
+                Text(TranscriptExporter.formatTimestamp(segment.startTime))
+                    .font(Studio.mono(11))
+                    .foregroundColor(active ? Studio.accent : Studio.mute)
+                    .frame(width: 44, alignment: .leading)
+                    .padding(.top, 2)
+
+                if let speaker = segment.speaker, !speaker.isEmpty {
+                    Text(speaker)
+                        .font(Studio.mono(11))
+                        .foregroundColor(Studio.accent)
+                        .frame(width: 76, alignment: .leading)
+                        .padding(.top, 2)
+                }
+
+                Text(segment.text)
+                    .font(.system(size: textSize))
+                    .foregroundColor(Studio.ink)
+                    .lineSpacing(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+                    .textSelection(.enabled)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(active ? Studio.accent.opacity(0.10) : Color.clear)
+            )
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(active ? Studio.accent : Color.clear)
+                    .frame(width: 2)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+
+/// The ring that keeps expanding from the record button while it records.
+/// Its own view, so it starts animating as it appears — inside the button
+/// the value it animated never changed while it was on screen.
+private struct RecordPulse: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var expanded = false
+
+    var body: some View {
+        Circle()
+            .stroke(Studio.hot.opacity(0.5), lineWidth: 2)
+            .frame(width: 84, height: 84)
+            .scaleEffect(expanded ? 1.18 : 1.0)
+            .opacity(expanded ? 0 : 1)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeOut(duration: 1.2).repeatForever(autoreverses: false)) { expanded = true }
+            }
     }
 }

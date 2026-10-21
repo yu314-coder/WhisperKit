@@ -89,6 +89,9 @@ struct MusicView: View {
                     detailsSection
                 }
                 .padding(18)
+                // A column, not the whole width of a 13" iPad.
+                .frame(maxWidth: 760)
+                .frame(maxWidth: .infinity)
             }
             // Two text fields sit above Generate, and the keyboard covers
             // it. Dragging the content dismisses the keyboard, and the
@@ -373,10 +376,13 @@ struct MusicView: View {
 
     /// The two boxes sorted into a description and lyrics, wherever the
     /// lyrics were typed.
+    /// Parsed once per change of what it reads: the body asks for it a
+    /// dozen times, on every keystroke.
     private var request: MusicRequest {
-        MusicRequest(prompt: prompt, lyrics: lyrics,
-                     found: detected?.prompt == prompt ? detected?.lines : nil)
+        requestCache.value(prompt: prompt, lyrics: lyrics,
+                           found: detected?.prompt == prompt ? detected?.lines : nil)
     }
+    @State private var requestCache = MusicRequestCache()
 
     /// Asks the on-device model which words in `text` are lyrics, unless it
     /// already has; the rules in `MusicRequest` answer until it does, and
@@ -589,7 +595,10 @@ struct MusicView: View {
                 .font(Studio.text(13))
             }
             if let url = engine.lastResult {
-                TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+                // Ticks only while it plays: it used to redraw ten times a
+                // second for as long as a result was on screen.
+                let playingNow = playingClipID == nil && player?.url == url && (player?.isPlaying ?? false)
+                TimelineView(.animation(minimumInterval: 0.1, paused: !playingNow)) { _ in
                     let playing = playingClipID == nil && player?.url == url && (player?.isPlaying ?? false)
                     let position = player?.url == url && (player?.duration ?? 0) > 0
                         ? (player!.currentTime / player!.duration) : 0
@@ -824,6 +833,8 @@ struct MusicView: View {
             .buttonStyle(PressableButtonStyle())
             .disabled(!canGenerate)
             .padding(16)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
         }
     }
 }
@@ -898,5 +909,20 @@ struct MusicModelPicker: View {
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
             .background(Capsule().fill(tint.opacity(0.12)))
+    }
+}
+
+
+/// The last MusicRequest built, kept while its inputs stay the same.
+final class MusicRequestCache {
+    private var key: (prompt: String, lyrics: String, found: [String]?)?
+    private var cached: MusicRequest?
+
+    func value(prompt: String, lyrics: String, found: [String]?) -> MusicRequest {
+        if let cached, let key, key.prompt == prompt, key.lyrics == lyrics, key.found == found { return cached }
+        let request = MusicRequest(prompt: prompt, lyrics: lyrics, found: found)
+        key = (prompt, lyrics, found)
+        cached = request
+        return request
     }
 }

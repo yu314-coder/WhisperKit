@@ -273,7 +273,7 @@ var paperPerfMonitor: some View {
     .padding(.vertical, 14)
     .background(
         RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .fill(Color.white.opacity(0.62))
+            .fill(Studio.panel)
     )
     .overlay(
         RoundedRectangle(cornerRadius: 14, style: .continuous)

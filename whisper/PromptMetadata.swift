@@ -57,7 +57,7 @@ struct PromptMetadata: Equatable {
         let lowered = text.lowercased()
         var found: [(position: Int, seconds: Double)] = []
         func scan(_ pattern: String, _ value: ([Double?]) -> Double?) {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
+            guard let regex = PromptRegex.cached(pattern) else { return }
             let range = NSRange(lowered.startIndex ..< lowered.endIndex, in: lowered)
             for match in regex.matches(in: lowered, range: range) {
                 let groups: [Double?] = (1 ..< match.numberOfRanges).map { index in
@@ -105,7 +105,7 @@ struct PromptMetadata: Equatable {
     /// phrase. A heading line ending in a colon right before it goes too.
     static func timeline(in prompt: String) -> ([Section], String) {
         let pattern = #"(\d{1,2}):([0-5]\d)\s*(?:–|—|-|to)\s*(\d{1,2}):([0-5]\d)\s*[:,.–—-]?\s*([^;\n]*)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+        guard let regex = PromptRegex.cached(pattern, .caseInsensitive) else {
             return ([], prompt)
         }
         let whole = NSRange(prompt.startIndex ..< prompt.endIndex, in: prompt)
@@ -146,7 +146,7 @@ struct PromptMetadata: Equatable {
 
     private static func firstInt(in text: String, patterns: [String]) -> Int? {
         for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+            guard let regex = PromptRegex.cached(pattern, .caseInsensitive),
                   let match = regex.firstMatch(in: text, range: NSRange(text.startIndex ..< text.endIndex, in: text)),
                   let range = Range(match.range(at: 1), in: text),
                   let value = Int(text[range]) else { continue }
@@ -159,7 +159,7 @@ struct PromptMetadata: Equatable {
     /// alone. The note must be a capital: "a minor detail" is not a key.
     private static func key(in text: String) -> String? {
         let pattern = #"\b([A-G])\s?(#|♯|b|♭|-?sharp|-?flat)?\s+(major|minor|maj|min)\b"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
+        guard let regex = PromptRegex.cached(pattern),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex ..< text.endIndex, in: text)),
               let note = Range(match.range(at: 1), in: text).map({ String(text[$0]) }),
               let mode = Range(match.range(at: 3), in: text).map({ String(text[$0]) })
@@ -175,7 +175,7 @@ struct PromptMetadata: Equatable {
     }
 
     private static func meter(in text: String) -> Int? {
-        guard let regex = try? NSRegularExpression(pattern: #"(?<![\d/])([2346])/(4|8)(?![\d/])"#),
+        guard let regex = PromptRegex.cached(#"(?<![\d/])([2346])/(4|8)(?![\d/])"#),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex ..< text.endIndex, in: text)),
               let beats = Range(match.range(at: 1), in: text).flatMap({ Int(text[$0]) }),
               let unit = Range(match.range(at: 2), in: text).map({ String(text[$0]) })
@@ -184,5 +184,23 @@ struct PromptMetadata: Equatable {
         // meter it has a slot for.
         if unit == "8" { return beats == 6 ? 6 : nil }
         return beats
+    }
+}
+
+
+/// Compiled patterns, kept: the prompt is parsed again on every keystroke,
+/// and compiling a regular expression costs more than running it.
+enum PromptRegex {
+    private static var compiled: [String: NSRegularExpression] = [:]
+    private static let lock = NSLock()
+
+    static func cached(_ pattern: String, _ options: NSRegularExpression.Options = []) -> NSRegularExpression? {
+        let key = "\(options.rawValue)|\(pattern)"
+        return lock.withLock {
+            if let hit = compiled[key] { return hit }
+            let regex = try? NSRegularExpression(pattern: pattern, options: options)
+            compiled[key] = regex
+            return regex
+        }
     }
 }

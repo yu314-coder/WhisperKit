@@ -10,6 +10,7 @@ struct ImageLibraryView: View {
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \SavedImage.createdAt, order: .reverse) private var images: [SavedImage]
     @State private var search = ""
+    @State private var deleting: SavedImage?
 
     private var shown: [SavedImage] {
         let query = search.trimmingCharacters(in: .whitespaces)
@@ -25,31 +26,43 @@ struct ImageLibraryView: View {
                                            description: Text("Pictures you make appear here."))
                 } else {
                     ScrollView {
+                        if shown.isEmpty {
+                            ContentUnavailableView.search(text: search)
+                                .padding(.top, 60)
+                        }
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
                             ForEach(shown) { image in
                                 NavigationLink(value: image.id) {
-                                    StoredImageView(image: image, thumbnail: true)
-                                        .aspectRatio(1, contentMode: .fill)
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    SquareThumbnail(image: image)
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
-                                    ShareLink(item: image.fileURL)
+                                    ShareLink(item: image.fileURL, preview: SharePreview(ImageView.shortLabel(image.prompt)))
+                                    Button { UIPasteboard.general.string = image.prompt } label: {
+                                        Label("Copy prompt", systemImage: "doc.on.doc")
+                                    }
                                     if let onReuse {
                                         Button { onReuse(image); dismiss() } label: {
-                                            Label("Use prompt again", systemImage: "arrow.uturn.backward")
+                                            Label("Use prompt and seed again", systemImage: "arrow.uturn.backward")
                                         }
                                     }
-                                    Button(role: .destructive) { delete(image) } label: {
+                                    Button(role: .destructive) { deleting = image } label: {
                                         Label("Delete", systemImage: "trash")
                                     }
                                 }
-                                .accessibilityLabel(image.prompt)
+                                .accessibilityLabel("Picture: \(ImageView.shortLabel(image.prompt))")
                             }
                         }
                         .padding(14)
                     }
                     .searchable(text: $search, prompt: "Search prompts")
+                    .confirmationDialog("Delete this picture?", isPresented: Binding(
+                        get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+                        Button("Delete", role: .destructive) {
+                            if let image = deleting { delete(image) }
+                            deleting = nil
+                        }
+                    }
                 }
             }
             .background(Studio.bg.ignoresSafeArea())
@@ -71,6 +84,7 @@ struct ImageLibraryView: View {
     }
 
     private func delete(_ image: SavedImage) {
+        ImageThumbnails.forget(image.fileURL)
         ImageFiles.delete(image.filePath)
         modelContext.delete(image)
         try? modelContext.save()

@@ -1,5 +1,6 @@
 import UIKit
 import BackgroundTasks
+import UserNotifications
 
 /// Keeps work the user started running after they leave the app:
 /// transcribing, downloading a model or a link, generating music.
@@ -77,6 +78,7 @@ final class BackgroundWork {
     /// Starts a piece of work. `usesGPU` asks for background GPU time, which
     /// music generation and GPU transcription need.
     func begin(title: String, subtitle: String, usesGPU: Bool = false) -> Job {
+        askForNotificationsOnce()
         let job = Job(id: "\(Self.prefix).\(UUID().uuidString)", title: title, subtitle: subtitle, wantsGPU: usesGPU)
         jobs[job.id] = job
         if #available(iOS 26.0, *), submit(job) { return job }
@@ -87,6 +89,17 @@ final class BackgroundWork {
             self.endLegacy(job)
         }
         return job
+    }
+
+    /// Asks to send notifications the first time something long starts —
+    /// a transcription, a song, a picture — which is when "it's ready"
+    /// means something, rather than on the app's first launch.
+    private func askForNotificationsOnce() {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .notDetermined else { return }
+            center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        }
     }
 
     fileprivate func update(_ job: Job, fraction: Double, subtitle: String?) {

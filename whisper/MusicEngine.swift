@@ -85,6 +85,7 @@ final class MusicEngine {
         guard !isBusy else { return }
         startedAt = Date()
         endedInBackground = false
+        ModelMemory.makeRoomForGeneration()
         // The whole run — download, then generation — keeps going when the
         // app is left. It needs the GPU throughout (MLX), so where the device
         // can't lend it to the background, it pauses until the app is back.
