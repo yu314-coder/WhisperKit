@@ -60,14 +60,21 @@ struct ContentView: View {
     /// Guards the one-time repair of segments written by 1.1 (1)–(4).
     @AppStorage("didSanitiseStoredSegments") private var didSanitiseStoredSegments = false
 
-    /// Which processor Core ML runs the model on. Defaults to GPU because the
-    /// Neural Engine's one-time "specialisation" compile is what made the first
-    /// load take minutes even on an M3; Metal skips that step entirely.
-    @AppStorage("computeMode") private var computeModeRaw: String = ComputeMode.gpu.rawValue
+    /// Which processor Core ML runs the model on. Defaults to Automatic: the
+    /// GPU skips the Neural Engine's one-time "specialisation" compile, which
+    /// made the first load take minutes even on an M3, but rebuilds its graph
+    /// on every launch; Automatic starts there and moves to the Neural Engine
+    /// once that compile is done. (Before Automatic the default was the GPU,
+    /// and anyone who never chose kept no stored value, so they move too.)
+    @AppStorage("computeMode") private var computeModeRaw: String = ComputeMode.automatic.rawValue
     private var computeMode: ComputeMode {
-        get { ComputeMode(rawValue: computeModeRaw) ?? .gpu }
+        get { ComputeMode(rawValue: computeModeRaw) ?? .automatic }
         nonmutating set { computeModeRaw = newValue.rawValue }
     }
+    /// What the loaded model runs on, and what the load in progress will:
+    /// under Automatic they can differ from what `effectiveMode` says now.
+    @State private var loadedComputeMode: ComputeMode = .gpu
+    @State private var preparingMode: ComputeMode = .gpu
 
     /// Set across a model load and cleared when it settles. Finding it still
     /// set at launch means the previous load never finished — the app was
@@ -586,7 +593,7 @@ struct ContentView: View {
                     Circle()
                         .fill(isModelLoaded ? Studio.ok : Studio.mute.opacity(0.5))
                         .frame(width: 6, height: 6)
-                    Text(speechEngine == .whisper ? "\(selectedModel.displayName) · \(effectiveMode(for: selectedModel).shortName)" : "\(engineName) · GPU")
+                    Text(speechEngine == .whisper ? "\(selectedModel.displayName) · \(shownMode.shortName)" : "\(engineName) · GPU")
                         .font(Studio.mono(11))
                         .foregroundColor(Studio.ink.opacity(0.82))
                 }
@@ -814,7 +821,7 @@ struct ContentView: View {
             return "Press the round button below to start a new recording, or pull in an audio file. Everything you transcribe stays on this device — every page is kept in your library."
         }
         if isReloadingKnownModel {
-            return "\(engineName) is loading onto the \(speechEngine == .whisper ? effectiveMode(for: selectedModel).shortName : "GPU") — this happens once each time you open the app. Go ahead and record; it will transcribe as soon as the model is ready."
+            return "\(engineName) is loading onto the \(speechEngine == .whisper ? shownMode.shortName : "GPU") — this happens once each time you open the app. Go ahead and record; it will transcribe as soon as the model is ready."
         }
         return "First, choose a transcription model. It downloads once and runs entirely on this device. Larger models are slower but more accurate."
     }
@@ -1583,6 +1590,16 @@ struct ContentView: View {
                                 .multilineTextAlignment(.leading)
                                 .fixedSize(horizontal: false, vertical: true)
 
+                            if mode == .automatic, computeMode == .automatic, speechEngine == .whisper,
+                               let note = automaticNote {
+                                Text(note)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Self.paperInk.opacity(0.55))
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.top, 2)
+                            }
+
                             // A note, not a verdict: the GPU stays the user's
                             // call. Worded as a warning in red, it read as
                             // "not allowed".
@@ -1611,6 +1628,20 @@ struct ContentView: View {
             }
         }
         .padding(.top, 6)
+    }
+
+    /// Where Automatic stands with the selected model.
+    private var automaticNote: String? {
+        let aneReady = hasBeenPrewarmed(selectedModel, on: .neuralEngine)
+        if isModelLoaded {
+            if loadedComputeMode == .neuralEngine { return "Now on the Neural Engine." }
+            return aneReady ? "The Neural Engine is ready; the next load uses it."
+                            : "On the GPU for now while the Neural Engine is prepared in the background."
+        }
+        if !aneReady, ComputeMode.gpuMayFail(for: selectedModel, requested: .gpu) {
+            return "\(selectedModel.displayName) is big for an iPhone GPU, so it is prepared for the Neural Engine first: a few minutes, once."
+        }
+        return nil
     }
 
     func paperModelCard(_ model: WhisperModel) -> some View {
@@ -2191,35 +2222,48 @@ struct ContentView: View {
     /// Core ML specialises per compute-unit configuration, so a model prewarmed
     /// for the Neural Engine is *not* warm for the GPU. The mode belongs in the
     /// key, or switching would skip a prewarm that had never actually happened.
-    /// What `model` will run on: the chosen mode. (It once differed where
-    /// an iPhone GPU could not host the model; that is now a warning.)
+    /// What `model` will load on. A chosen GPU or Neural Engine is kept (an
+    /// iPhone GPU too small for the model is a warning, not a switch).
+    /// Automatic is the GPU until the Neural Engine's compile of this model
+    /// is known to be cached — then the Neural Engine — except for a model
+    /// too big for an iPhone's GPU, which waits out that compile instead.
     func effectiveMode(for model: WhisperModel) -> ComputeMode {
-        computeMode
+        guard computeMode == .automatic else { return computeMode }
+        if hasBeenPrewarmed(model, on: .neuralEngine)
+            || ComputeMode.gpuMayFail(for: model, requested: .gpu) {
+            return .neuralEngine
+        }
+        return .gpu
     }
 
-    private func prewarmKey(_ model: WhisperModel) -> String {
-        "\(model.rawValue)@\(ProcessInfo.processInfo.operatingSystemVersionString)#\(effectiveMode(for: model).rawValue)"
+    /// The processor shown beside the model: the one it is on once loaded.
+    private var shownMode: ComputeMode {
+        isModelLoaded ? loadedComputeMode : effectiveMode(for: selectedModel)
     }
 
-    private func hasBeenPrewarmed(_ model: WhisperModel) -> Bool {
-        prewarmedVariantsRaw.split(separator: "\n").contains(Substring(prewarmKey(model)))
+    private func prewarmKey(_ model: WhisperModel, on mode: ComputeMode) -> String {
+        "\(model.rawValue)@\(ProcessInfo.processInfo.operatingSystemVersionString)#\(mode.rawValue)"
+    }
+
+    private func hasBeenPrewarmed(_ model: WhisperModel, on mode: ComputeMode) -> Bool {
+        prewarmedVariantsRaw.split(separator: "\n").contains(Substring(prewarmKey(model, on: mode)))
     }
 
     /// Drops a variant's prewarm marker. Core ML evicts its specialised-model
     /// cache on OS updates *and* after a model goes unused for a while, and
     /// there is no API to ask whether the cache is still warm. When a load
     /// stalls we assume it went cold and re-arm prewarming for next time.
-    private func clearPrewarmed(_ model: WhisperModel) {
-        let key = prewarmKey(model)
+    private func clearPrewarmed(_ model: WhisperModel, on mode: ComputeMode) {
+        let key = prewarmKey(model, on: mode)
         prewarmedVariantsRaw = prewarmedVariantsRaw
             .split(separator: "\n")
             .filter { $0 != Substring(key) }
             .joined(separator: "\n")
     }
 
-    private func markPrewarmed(_ model: WhisperModel) {
-        guard !hasBeenPrewarmed(model) else { return }
-        let key = prewarmKey(model)
+    private func markPrewarmed(_ model: WhisperModel, on mode: ComputeMode) {
+        guard !hasBeenPrewarmed(model, on: mode) else { return }
+        let key = prewarmKey(model, on: mode)
         prewarmedVariantsRaw = prewarmedVariantsRaw.isEmpty ? key : prewarmedVariantsRaw + "\n" + key
     }
 
@@ -2256,7 +2300,7 @@ struct ContentView: View {
             // own "already prewarmed" note. Forget it so the retry prewarms —
             // that loads one sub-model at a time and keeps peak memory down.
             if error is ModelLoadTimeout {
-                clearPrewarmed(model)
+                clearPrewarmed(model, on: preparingMode)
             }
             do {
                 statusMessage = "Retrying \(model.displayName)…"
@@ -2352,17 +2396,28 @@ struct ContentView: View {
             // sub-model at a time instead of all at once, which is the
             // difference between fitting in memory and being killed again.
             let crashedLastLoad = (crashedModelVariant == model.rawValue)
+            let mode = effectiveMode(for: model)
+            preparingMode = mode
             if crashedLastLoad {
-                clearPrewarmed(model)
+                clearPrewarmed(model, on: mode)
             }
 
-            let needsPrewarm = crashedLastLoad || !hasBeenPrewarmed(model)
+            let needsPrewarm = crashedLastLoad || !hasBeenPrewarmed(model, on: mode)
             isOptimizingModel = needsPrewarm
             modelLoadInFlight = true
             modelLoadInFlightVariant = model.rawValue
             statusMessage = needsPrewarm
-                ? "Optimising \(model.displayName) for the \(effectiveMode(for: model).shortName)…"
+                ? "Optimising \(model.displayName) for the \(mode.shortName)…"
                 : "Loading \(model.displayName)…"
+
+            // A compile Core ML had cached can still be gone — after a
+            // storage clean-up, say — and then a few seconds become minutes.
+            // Say so rather than sit on "Loading".
+            let slowNote: Task<Void, Error>? = needsPrewarm || mode != .neuralEngine ? nil : Task {
+                try await Task.sleep(for: .seconds(12))
+                statusMessage = "Preparing \(model.displayName) for the Neural Engine again — iOS cleared its copy. This takes a few minutes, once."
+            }
+            defer { slowNote?.cancel() }
 
             // A load that never returns used to leave the UI on "Loading"
             // forever with no way forward. Race it against a deadline so a
@@ -2380,7 +2435,7 @@ struct ContentView: View {
             // load through the checking path has confirmed.
             let loadStart = Date()
             let folder = findModelDirectory(for: model).flatMap { isVerified(model) && Self.hasWeights($0) ? $0 : nil }
-            let options = computeMode.computeOptions(for: model)
+            let options = mode.computeOptions(for: model)
             let (kit, fromFolder) = try await withModelLoadTimeout(seconds: needsPrewarm ? 420 : 180) {
                 if let folder {
                     do {
@@ -2412,7 +2467,8 @@ struct ContentView: View {
                 ), false)
             }
             try Task.checkCancellation()
-            lastLoadReport = Self.loadReport(model: model, mode: effectiveMode(for: model), prewarmed: needsPrewarm,
+            slowNote?.cancel()
+            lastLoadReport = Self.loadReport(model: model, mode: mode, prewarmed: needsPrewarm,
                                              fromFolder: fromFolder, total: Date().timeIntervalSince(loadStart),
                                              timings: kit.currentTimings)
             setVerified(model, true)
@@ -2420,11 +2476,13 @@ struct ContentView: View {
             modelLoadInFlightVariant = ""
             loadAwayFromScreen = nil
             if crashedModelVariant == model.rawValue { crashedModelVariant = "" }
-            markPrewarmed(model)
+            markPrewarmed(model, on: mode)
             isOptimizingModel = false
 
             whisperKit = kit
+            loadedComputeMode = mode
             isModelLoaded = true
+            if computeMode == .automatic, mode == .gpu { warmNeuralEngine(for: model) }
             downloadStatus[model] = true
             statusMessage = ""
             resetResult()
@@ -2436,6 +2494,30 @@ struct ContentView: View {
             modelLoadInFlightVariant = ""
             loadAwayFromScreen = nil
             throw error
+        }
+    }
+
+    /// Automatic's background half: while the GPU serves this session, the
+    /// Neural Engine's copy is compiled, and the next load takes that — a few
+    /// seconds instead of a GPU graph rebuild every launch. Only from a folder
+    /// known to be complete: Core ML crashes on missing weights.
+    private func warmNeuralEngine(for model: WhisperModel) {
+        guard let folder = findModelDirectory(for: model), isVerified(model), Self.hasWeights(folder) else { return }
+        let key = prewarmKey(model, on: .neuralEngine)
+        guard NeuralEngineWarmup.claim(key) else { return }
+        Task {
+            // Let a first transcription get going before the compiler
+            // competes with it for the CPU.
+            try? await Task.sleep(for: .seconds(5))
+            var succeeded = false
+            do {
+                try await NeuralEngineWarmup.compile(folder: folder)
+                markPrewarmed(model, on: .neuralEngine)
+                succeeded = true
+            } catch {
+                print("Neural Engine warm-up for \(model.displayName) failed: \(error)")
+            }
+            NeuralEngineWarmup.release(key, succeeded: succeeded)
         }
     }
 
@@ -2929,7 +3011,7 @@ struct ContentView: View {
             // time; where the device has none, decoding pauses until return.
             if transcriptionJob == nil {
                 transcriptionJob = BackgroundWork.shared.begin(
-                    title: "Transcribing", subtitle: sourceURL.lastPathComponent, usesGPU: computeMode == .gpu)
+                    title: "Transcribing", subtitle: sourceURL.lastPathComponent, usesGPU: loadedComputeMode == .gpu)
             }
             streamingTranscript = ""
             resetResult()
@@ -3372,7 +3454,7 @@ struct ContentView: View {
         let stream = StreamingTranscriptBuffer()
         // Core ML on the GPU can't run off screen without background GPU
         // time: wait between tokens until it can.
-        let usesGPU = await MainActor.run { computeMode == .gpu }
+        let usesGPU = await MainActor.run { loadedComputeMode == .gpu }
 
         let results: [TranscriptionResult]
         if engine != .whisper {

@@ -71,7 +71,7 @@ struct HelpView: View {
                 Section(icon: "captions.bubble", title: "Live",
                         body: "To see the words while you speak, use the Live tab."),
                 Section(icon: "cpu", title: "GPU or Neural Engine",
-                        body: "In the same menu, under Run on. The GPU loads in seconds. The Neural Engine uses less battery, but its first load after an update takes a few minutes. Big models can be too large for an iPhone's GPU; if the app closes while loading, switch to the Neural Engine."),
+                        body: "In the same menu, under Run on. Automatic, the default, starts on the GPU and prepares the Neural Engine in the background; after that the model loads in a few seconds and uses less battery. You can also pick either one. The GPU rebuilds the model each time the app opens. The Neural Engine's first load after an update takes a few minutes. Big models can be too large for an iPhone's GPU; if the app closes while loading, switch to the Neural Engine."),
                 Section(icon: "mic.fill", title: "Record",
                         body: "Tap the red button to start, and again to stop. The recording is transcribed right away."),
                 Section(icon: "folder", title: "Import a file or video",
