@@ -193,7 +193,8 @@ struct ContentView: View {
     @State private var activeTranscriptionID: String?
 
     // Audio recording
-    @State private var audioRecorder: AVAudioRecorder?
+    @State private var micRecorder: MicRecorder?
+    @AppStorage(MicSound.storageKey) private var micSound = MicSound.natural.rawValue
     @State private var isRecording = false
     @State private var recordingURL: URL?
     @State private var recordingStartTime: Date?
@@ -469,6 +470,12 @@ struct ContentView: View {
                     }
                 }
             }
+        }
+        // The mic chip works mid-recording too.
+        .onChange(of: micSound) { _, raw in
+            guard let recorder = micRecorder else { return }
+            recorder.switchTo(MicSound(rawValue: raw) ?? .natural)
+            if recorder.reductionUnavailable { errorMessage = LiveView.noReduction }
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
             handleScenePhaseChange(oldPhase: oldPhase, newPhase: newPhase)
@@ -1303,6 +1310,7 @@ struct ContentView: View {
     // Bottom control bar — paper aesthetic, hero round record button
     var editorialControlBar: some View {
         VStack(spacing: 0) {
+            HStack(spacing: 8) {
             // Recording timer pill — only when capturing
             if isRecording {
                 HStack(spacing: 6) {
@@ -1316,9 +1324,11 @@ struct ContentView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(Capsule().fill(Studio.hot.opacity(0.14)))
-                .padding(.bottom, 10)
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
+                MicSoundPicker(isRecording: isRecording)
+            }
+            .padding(.bottom, 10)
 
             HStack(spacing: 18) {
                 editorialIconButton(icon: "folder", disabled: !canCapture || isProcessing) {
@@ -3123,25 +3133,16 @@ struct ContentView: View {
                     // Record in Linear PCM / WAV. AAC on Designed-for-iPad-on-Mac
                     // fails AVAudioFile open (error 1685348671 = 'dta?'). LPCM
                     // is universally readable and is what Whisper consumes
-                    // internally anyway, so no quality loss.
+                    // internally anyway, so no quality loss. Through the
+                    // engine rather than AVAudioRecorder, which has no voice
+                    // processing: the mic chip can turn noise down.
                     let url = FileManager.default.temporaryDirectory
                         .appendingPathComponent("recording_\(UUID().uuidString).wav")
+                    let recorder = try MicRecorder(url: url, sound: MicSound(rawValue: micSound) ?? .natural)
+                    try recorder.start()
+                    if recorder.reductionUnavailable { errorMessage = LiveView.noReduction }
 
-                    let settings: [String: Any] = [
-                        AVFormatIDKey: Int(kAudioFormatLinearPCM),
-                        AVSampleRateKey: 16000.0,
-                        AVNumberOfChannelsKey: 1,
-                        AVLinearPCMBitDepthKey: 16,
-                        AVLinearPCMIsBigEndianKey: false,
-                        AVLinearPCMIsFloatKey: false,
-                        AVLinearPCMIsNonInterleaved: false
-                    ]
-
-                    let recorder = try AVAudioRecorder(url: url, settings: settings)
-                    recorder.prepareToRecord()
-                    recorder.record()
-
-                    audioRecorder = recorder
+                    micRecorder = recorder
                     recordingURL = url
                     isRecording = true
                     recordingStartTime = Date()
@@ -3156,9 +3157,8 @@ struct ContentView: View {
 
     func stopRecordingAndTranscribe() {
         // Finalize recorder
-        audioRecorder?.stop()
-        let recorder = audioRecorder
-        audioRecorder = nil
+        micRecorder?.stop()
+        micRecorder = nil
         recordingStartTime = nil
         isRecording = false
 
@@ -3178,7 +3178,7 @@ struct ContentView: View {
             // Wait until the AAC encoder has fully flushed the file to disk.
             // AVAudioRecorder.stop() is documented as synchronous, but in practice
             // the file can be momentarily unreadable / 0 bytes right after.
-            let ready = await waitForRecordingFile(at: url, recorder: recorder)
+            let ready = await waitForRecordingFile(at: url)
             guard ready else {
                 await MainActor.run {
                     showError("That recording was too short to save. Record at least one second of audio.")
@@ -3218,7 +3218,7 @@ struct ContentView: View {
 
     /// Polls the recording file until it has a usable size (or times out).
     /// Returns false if the file never reached a viable state.
-    func waitForRecordingFile(at url: URL, recorder: AVAudioRecorder?, timeout: TimeInterval = 3.0) async -> Bool {
+    func waitForRecordingFile(at url: URL, timeout: TimeInterval = 3.0) async -> Bool {
         let start = Date()
         // LPCM 16 kHz mono 16-bit ≈ 32 KB / second. 4 KB ≈ 125 ms of real audio
         // plus the WAV header — anything less is a misclick.
@@ -3240,9 +3240,6 @@ struct ContentView: View {
                 }
                 lastSize = size
             }
-
-            // Hint the recorder to release file handles if still alive
-            _ = recorder?.isRecording
 
             try? await Task.sleep(nanoseconds: 80_000_000) // 80 ms
         }
