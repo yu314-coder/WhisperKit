@@ -1847,6 +1847,14 @@ struct ContentView: View {
     var languagePickerSheet: some View {
         NavigationStack {
             List {
+                if languageQuery.isEmpty {
+                    Section {
+                        Text("The language to write in. Speech in another is transcribed and then translated into it, on this device, where iOS translates into that language. Auto-detect writes what is said as it is said.")
+                            .font(.system(size: 13))
+                            .foregroundColor(Self.paperMute)
+                            .listRowBackground(Color.clear)
+                    }
+                }
                 ForEach(filteredLanguages, id: \.code) { lang in
                     Button {
                         selectedLanguage = lang.code
@@ -3243,7 +3251,8 @@ struct ContentView: View {
 
     // MARK: - SwiftData Library Persistence
 
-    func saveTranscriptToLibrary(audioURL: URL, results: [TranscriptionResult], fullText: String, waveform: [Float]? = nil) {
+    func saveTranscriptToLibrary(audioURL: URL, results: [TranscriptionResult], fullText: String, waveform: [Float]? = nil,
+                                 translatedFrom: String? = nil) {
         // Move audio file into the durable SavedAudio folder so the user can
         // still play it back even after temp gets cleaned.
         var savedRelativePath: String? = nil
@@ -3289,7 +3298,8 @@ struct ContentView: View {
             title: title,
             duration: duration,
             languageCode: langForRecord,
-            modelName: engineName,
+            // A translation says what it was translated from.
+            modelName: translatedFrom.map { "\(engineName) · from \(Languages.englishName($0))" } ?? engineName,
             fullText: fullText,
             audioFilePath: savedRelativePath,
             waveform: waveform
@@ -3404,6 +3414,21 @@ struct ContentView: View {
         let peakLevel = envelope?.peak
 
         var languageCode = selectedLanguage == "auto" ? nil : Languages.whisperCode(selectedLanguage)
+        // The picked language is the one to write in. Speech in another is
+        // transcribed in its own and translated afterwards: made to write
+        // the picked one, Whisper translates roughly at best (Turbo was never
+        // trained to). Only on a confident detection, where iOS translates.
+        var translateFrom: String?
+        if engine == .whisper, let wanted = languageCode, let whisper {
+            await MainActor.run { statusMessage = "Listening for the language…" }
+            if let spoken = try? await whisper.detectLanguage(audioPath: workURL.path),
+               exp(spoken.langProbs[spoken.language] ?? -.infinity) >= 0.5,
+               !TranscriptTranslator.reads(spoken.language, as: wanted),
+               await TranscriptTranslator.canTranslate(from: spoken.language, to: selectedLanguage) {
+                languageCode = spoken.language
+                translateFrom = spoken.language
+            }
+        }
         // Cantonese arrived with large-v3; Small's tokenizer has no <|yue|>,
         // and WhisperKit answers an unknown language token by decoding as
         // English. Written Chinese is the nearest thing Small can produce.
@@ -3456,11 +3481,11 @@ struct ContentView: View {
         // time: wait between tokens until it can.
         let usesGPU = await MainActor.run { loadedComputeMode == .gpu }
 
-        let results: [TranscriptionResult]
+        var heard: [TranscriptionResult]
         if engine != .whisper {
-            results = [try await transcribeWithEngine(engine, at: workURL)]
+            heard = [try await transcribeWithEngine(engine, at: workURL)]
         } else if let whisper {
-          results = try await whisper.transcribe(
+          heard = try await whisper.transcribe(
             audioPath: workURL.path,
             decodeOptions: options,
             callback: { progress in
@@ -3519,9 +3544,30 @@ struct ContentView: View {
             }
         )
         } else {
-            results = []
+            heard = []
         }
-        
+
+        // Into the picked language. Whisper's source was found above; the
+        // NVIDIA engines' is read off their text (Canary told German turns
+        // English speech into German itself, so there may be nothing to do).
+        var translatedFrom: String?
+        var translationProblem: String?
+        let wanted = selectedLanguage
+        if wanted != "auto", !heard.isEmpty,
+           let source = translateFrom ?? (engine == .whisper ? nil
+               : TranscriptTranslator.detect(heard.map(\.text).joined(separator: " "))),
+           !TranscriptTranslator.reads(source, as: wanted),
+           await TranscriptTranslator.canTranslate(from: source, to: wanted) {
+            await MainActor.run { statusMessage = "Translating into \(Languages.englishName(wanted))…" }
+            do {
+                heard = try await TranscriptTranslator.shared.translate(heard, from: source, to: wanted)
+                translatedFrom = source
+            } catch {
+                translationProblem = "It couldn't be translated into \(Languages.englishName(wanted)), so the transcript is in \(Languages.englishName(source)). \(error.localizedDescription)"
+            }
+        }
+
+        let results = heard, translatedFromSource = translatedFrom, problem = translationProblem
         await MainActor.run {
             transcriptionProgress = 1.0
             
@@ -3539,7 +3585,7 @@ struct ContentView: View {
                     .trimmingCharacters(in: .whitespacesAndNewlines))
 
                 if !fullText.isEmpty {
-                    let detectedLanguage = results.first?.language ?? "Unknown"
+                    let detectedLanguage = translatedFromSource ?? results.first?.language ?? "Unknown"
                     if selectedLanguage == "auto" {
                         self.detectedLanguageCode = results.first?.language
                     } else {
@@ -3548,7 +3594,8 @@ struct ContentView: View {
 
                     // Persist to SwiftData library
                     self.lastTranscriptionResults = results
-                    self.saveTranscriptToLibrary(audioURL: url, results: results, fullText: fullText, waveform: envelope?.buckets)
+                    self.saveTranscriptToLibrary(audioURL: url, results: results, fullText: fullText, waveform: envelope?.buckets,
+                                                 translatedFrom: translatedFromSource)
                     
                     var totalDuration: Double = 0.0
                     for result in results {
@@ -3566,14 +3613,15 @@ struct ContentView: View {
                         selectedLanguageName: selectedLangName,
                         audioDuration: totalDuration,
                         processingTime: getElapsedTime(),
-                        modelName: engineName,
+                        modelName: translatedFromSource.map { "\(engineName) · from \(Languages.englishName($0))" } ?? engineName,
                         // Actual speech segments, not the number of
                         // TranscriptionResults — WhisperKit returns one result
                         // per file, so this read "SEGMENTS 1" for every
                         // transcript regardless of length.
                         segmentCount: results.reduce(0) { $0 + $1.segments.count }
                     )
-                    errorMessage = nil
+                    // A translation that failed is said beside the transcript.
+                    errorMessage = problem
                 } else {
                     reportEmptyTranscript(peak: peakLevel)
                 }

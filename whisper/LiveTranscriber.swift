@@ -23,7 +23,7 @@ final class LiveTranscriber {
     }
 
     /// - Parameter onText: the whole transcript so far, on the main actor.
-    func start(language: String, onText: @escaping @MainActor (String) -> Void) async throws {
+    func start(language: String, onText: @escaping @MainActor (LiveText) -> Void) async throws {
         try await SpeechRunner.shared.startLive(language: language)
 
         let input = engine.inputNode

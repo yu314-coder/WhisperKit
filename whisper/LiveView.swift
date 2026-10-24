@@ -16,6 +16,15 @@ struct LiveView: View {
 
     @State private var transcriber: LiveTranscriber?
     @State private var text = ""
+    /// Heard but not yet in the picked language — the sentence still being
+    /// said, and any waiting for translation — shown fainter after `text`.
+    @State private var tail = ""
+    @State private var heard = LiveText()
+    /// The language this recording is written in, where that means
+    /// translating (TranscriptTranslator); nil writes what is said as said.
+    @State private var translateInto: String?
+    @State private var translations: [String: String] = [:]
+    @State private var translating: Task<Void, Never>?
     @State private var startedAt: Date?
     @State private var finishing = false
     @State private var downloading = false
@@ -164,13 +173,13 @@ struct LiveView: View {
                     }
                 }
             }
-            if text.isEmpty {
+            if text.isEmpty && tail.isEmpty {
                 Text(isRecording ? "Start speaking…" : "Tap Start and speak. The words appear as you say them, and the recording is kept with its transcript in the library.")
                     .font(Studio.text(15))
                     .foregroundColor(Studio.mute)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text(text)
+                Text("\(Text(verbatim: text))\(Text(verbatim: text.isEmpty || tail.isEmpty ? tail : " " + tail).foregroundColor(Studio.mute))")
                     .font(Studio.text(18))
                     .foregroundColor(Studio.ink)
                     .lineSpacing(6)
@@ -280,12 +289,23 @@ struct LiveView: View {
                     #endif
                     try session.setActive(true)
                     text = ""
+                    tail = ""
                     saved = nil
                     copied = false
+                    translations = [:]
                     let live = LiveTranscriber()
-                    let script = language
-                    try await live.start(language: engine.modelLanguage(for: language)) { heard in
-                        text = script == Languages.traditionalChinese ? Languages.traditional(heard) : heard
+                    // A language iOS translates into is the one to write in:
+                    // Nemotron listens for whatever is spoken — told one
+                    // language and hearing another it writes nothing — and
+                    // each finished sentence in another is translated.
+                    // Measured on FLEURS, listening this way costs nothing.
+                    let picked = language
+                    let translatable = picked != "auto" ? await TranscriptTranslator.canTranslate(into: picked) : false
+                    translateInto = translatable ? picked : nil
+                    try await live.start(language: translateInto == nil ? engine.modelLanguage(for: picked) : "auto") { heard in
+                        self.heard = heard
+                        show(heard)
+                        translateFinished()
                     }
                     transcriber = live
                     startedAt = Date()
@@ -296,14 +316,62 @@ struct LiveView: View {
         }
     }
 
+    /// What has been heard, in the picked language as far as it goes: the
+    /// sentences translated so far, then the rest as said.
+    private func show(_ heard: LiveText) {
+        let convert: (String) -> String = { language == Languages.traditionalChinese ? Languages.traditional($0) : $0 }
+        guard let into = translateInto else {
+            text = convert(heard.joined)
+            tail = ""
+            return
+        }
+        var shown: [String] = [], waiting: [String] = []
+        for line in heard.done {
+            if waiting.isEmpty, let translated = translations[line] { shown.append(translated) } else { waiting.append(line) }
+        }
+        if !heard.pending.isEmpty { waiting.append(heard.pending) }
+        text = convert(shown.joined(separator: SpeechEngine.joinsWithoutSpaces(Languages.whisperCode(into)) ? "" : " "))
+        let spoken = waiting.first.flatMap(TranscriptTranslator.detect) ?? heard.language
+        tail = waiting.joined(separator: SpeechEngine.joinsWithoutSpaces(spoken) ? "" : " ")
+    }
+
+    /// Translates the finished sentences not yet done, one batch at a time.
+    private func translateFinished() {
+        guard let into = translateInto, translating == nil else { return }
+        let lines = heard.done.filter { translations[$0] == nil }
+        guard !lines.isEmpty else { return }
+        translating = Task {
+            let translated = await TranscriptTranslator.shared.intoLanguage(lines, target: into)
+            for (line, text) in zip(lines, translated) { translations[line] = text }
+            translating = nil
+            show(heard)
+            translateFinished()
+        }
+    }
+
     private func stop() {
         guard let live = transcriber else { return }
         transcriber = nil
         startedAt = nil
         finishing = true
         let script = language
+        let into = translateInto
         Task {
-            let (url, result) = await live.stop()
+            var (url, result) = await live.stop()
+            translating?.cancel()
+            translating = nil
+            // The whole recording in the picked language, cut into lines as
+            // it is saved.
+            var translated = false
+            if let into {
+                let texts = result.segments.map(\.text)
+                let out = await TranscriptTranslator.shared.intoLanguage(texts, target: into)
+                if out != texts {
+                    result = TranscriptTranslator.result(result, texts: out, language: into)
+                    translated = true
+                }
+            }
+            tail = ""
             // 0.76 GB the other tabs may want; a second takes it back.
             await SpeechRunner.shared.unload()
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -315,7 +383,7 @@ struct LiveView: View {
             } else {
                 text = full
                 let envelope = await Task.detached(priority: .userInitiated) { AudioConverter.peakEnvelope(of: url)?.buckets }.value
-                save(url: url, result: result, text: full, envelope: envelope, convert: convert)
+                save(url: url, result: result, text: full, envelope: envelope, convert: convert, translated: translated)
             }
             finishing = false
         }
@@ -323,7 +391,7 @@ struct LiveView: View {
 
     /// Into the library, as the Transcribe tab keeps a recording.
     private func save(url: URL, result: TranscriptionResult, text: String, envelope: [Float]?,
-                      convert: (String) -> String) {
+                      convert: (String) -> String, translated: Bool) {
         let stamp = Self.stampFormatter.string(from: Date())
         let audio = try? AudioFiles.saveAudio(from: url, suggestedName: "Live_\(stamp)", movingSource: true)
         let firstLine = text.components(separatedBy: .newlines).first ?? ""
@@ -331,7 +399,7 @@ struct LiveView: View {
             title: firstLine.count > 50 ? String(firstLine.prefix(50)) + "…" : firstLine,
             duration: Double(result.segments.last?.end ?? 0),
             languageCode: language == "auto" ? nil : language,
-            modelName: "\(engine.displayName) · live",
+            modelName: "\(engine.displayName) · live\(translated ? " · translated" : "")",
             fullText: text,
             audioFilePath: audio,
             waveform: envelope
@@ -373,6 +441,16 @@ struct LiveView: View {
                         if code == language { Image(systemName: "checkmark").foregroundColor(Studio.accent) }
                     }
                 }
+            }
+            .safeAreaInset(edge: .top) {
+                Text("The language to write in. Speak another and each sentence is translated into it, on this device. Auto-detect writes what you say as you say it.")
+                    .font(Studio.text(13))
+                    .foregroundColor(Studio.mute)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.bar)
             }
             .navigationTitle("Language")
             .navigationBarTitleDisplayMode(.inline)

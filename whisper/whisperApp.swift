@@ -118,6 +118,7 @@ struct RootView: View {
                 .tag(Tab.image)
         }
         .tint(Studio.accent)
+        .modifier(TranslationHost())
         // An audio or video file shared to the app, or opened with it from
         // Files: transcribe it (see Info.plist's document types).
         .onOpenURL { url in

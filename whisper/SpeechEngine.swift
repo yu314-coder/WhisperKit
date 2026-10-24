@@ -127,9 +127,10 @@ enum SpeechEngine: String, CaseIterable, Identifiable {
     ]
 
     /// The Live tab's choices: detection, Nemotron's languages by Whisper's
-    /// codes, and Chinese in Traditional characters.
+    /// codes, Chinese in Traditional characters, and a few more iOS
+    /// translates into (TranscriptTranslator).
     static var liveLanguages: [String] {
-        ["auto"] + (Array(nemotronLocales.keys) + [Languages.traditionalChinese])
+        ["auto"] + (Array(nemotronLocales.keys) + [Languages.traditionalChinese, "th", "id", "ms", "he"])
             .sorted { Languages.displayName($0) < Languages.displayName($1) }
     }
 
@@ -253,8 +254,8 @@ actor SpeechRunner {
     }
 
     /// Feeds 16 kHz samples; returns the whole transcript so far.
-    func feed(_ samples: [Float]) -> String {
-        guard var state = live, let nemotron, !samples.isEmpty else { return "" }
+    func feed(_ samples: [Float]) -> LiveText {
+        guard var state = live, let nemotron, !samples.isEmpty else { return LiveText() }
         state.session.step(samples)
         state.sessionSamples += samples.count
         let seconds = Double(state.sessionSamples) / 16_000
@@ -267,9 +268,18 @@ actor SpeechRunner {
         }
         live = state
         Memory.clearCache()
-        return Self.text(state.finished, language: state.language)
-            + (state.finished.isEmpty ? "" : " ") + state.session.text
+        // The session's last sentence is still being said unless it has
+        // reached its full stop.
+        var current = Self.lines(state.session.segments, offset: 0).map(\.text)
+        var pending = current.popLast() ?? ""
+        if let last = pending.last, Self.sentenceEnds.contains(last) {
+            current.append(pending)
+            pending = ""
+        }
+        return LiveText(done: state.finished.map(\.text) + current, pending: pending, language: state.language)
     }
+
+    private static let sentenceEnds = ".!?。！？"
 
     /// Flushes the session and returns everything heard.
     func finishLive() -> TranscriptionResult {
@@ -300,7 +310,7 @@ actor SpeechRunner {
         var current = ""
         for character in text {
             current.append(character)
-            if ".!?。！？".contains(character) {
+            if sentenceEnds.contains(character) {
                 parts.append(current.trimmingCharacters(in: .whitespaces))
                 current = ""
             }
@@ -427,5 +437,20 @@ enum ModelMemory {
     @MainActor static func makeRoomForGeneration() {
         Task { await SpeechRunner.shared.unload() }
         NotificationCenter.default.post(name: releaseTranscription, object: nil)
+    }
+}
+
+/// What Live has heard so far: the sentences that are finished, and the
+/// one still being said.
+struct LiveText: Sendable {
+    var done: [String] = []
+    var pending = ""
+    var language = "auto"
+
+    var joined: String {
+        let parts = (done + [pending]).filter { !$0.isEmpty }
+        // Listening for any language, the text says which it is.
+        let written = language == "auto" ? parts.last.flatMap(TranscriptTranslator.detect) ?? language : language
+        return parts.joined(separator: SpeechEngine.joinsWithoutSpaces(written) ? "" : " ")
     }
 }
