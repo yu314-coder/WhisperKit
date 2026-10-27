@@ -25,6 +25,14 @@ struct LiveView: View {
     /// translating (TranscriptTranslator); nil writes what is said as said.
     @State private var translateInto: String?
     @State private var translations: [String: String] = [:]
+    /// The translated sentences beside what was said, and everything as
+    /// said, for the translation switch.
+    @State private var pairs: [(translated: String, spoken: String)] = []
+    @State private var spoken = ""
+    @AppStorage(TranslationDisplay.storageKey) private var displayRaw = TranslationDisplay.both.rawValue
+    private var display: TranslationDisplay {
+        translateInto == nil ? .translation : TranslationDisplay(rawValue: displayRaw) ?? .both
+    }
     @State private var translating: Task<Void, Never>?
     @State private var startedAt: Date?
     @State private var finishing = false
@@ -170,7 +178,7 @@ struct LiveView: View {
                 Spacer()
                 if !text.isEmpty, !isRecording {
                     Button {
-                        UIPasteboard.general.string = text
+                        UIPasteboard.general.string = copyText
                         copied = true
                     } label: {
                         Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
@@ -179,18 +187,16 @@ struct LiveView: View {
                     }
                 }
             }
+            if translateInto != nil {
+                TranslationDisplayPicker(translatedInto: translateInto, spokenIn: nil)
+            }
             if text.isEmpty && tail.isEmpty {
                 Text(isRecording ? "Start speaking…" : "Tap Start and speak. The words appear as you say them, and the recording is kept with its transcript in the library.")
                     .font(Studio.text(15))
                     .foregroundColor(Studio.mute)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("\(Text(verbatim: text))\(Text(verbatim: text.isEmpty || tail.isEmpty ? tail : " " + tail).foregroundColor(Studio.mute))")
-                    .font(Studio.text(18))
-                    .foregroundColor(Studio.ink)
-                    .lineSpacing(6)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                words
             }
             if finishing {
                 HStack(spacing: 8) {
@@ -202,6 +208,49 @@ struct LiveView: View {
                     .font(Studio.mono(10))
                     .foregroundColor(Studio.mute)
             }
+        }
+    }
+
+    /// What has been heard, as the translation switch asks.
+    @ViewBuilder private var words: some View {
+        switch display {
+        case .translation:
+            Text("\(Text(verbatim: text))\(Text(verbatim: text.isEmpty || tail.isEmpty ? tail : " " + tail).foregroundColor(Studio.mute))")
+                .font(Studio.text(18))
+                .foregroundColor(Studio.ink)
+                .lineSpacing(6)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        case .original:
+            Text(spoken)
+                .font(Studio.text(18))
+                .foregroundColor(Studio.ink)
+                .lineSpacing(6)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        case .both:
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Array(pairs.enumerated()), id: \.offset) { _, pair in
+                    SegmentWords(text: pair.translated, original: pair.spoken, display: .both, size: 18)
+                        .lineSpacing(4)
+                }
+                if !tail.isEmpty {
+                    Text(tail)
+                        .font(Studio.text(16))
+                        .foregroundColor(Studio.mute)
+                }
+            }
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var copyText: String {
+        switch display {
+        case .translation: return text
+        case .original:    return spoken
+        case .both:        return pairs.map { $0.translated == $0.spoken ? $0.translated : "\($0.translated)\n\($0.spoken)" }
+                                       .joined(separator: "\n")
         }
     }
 
@@ -307,6 +356,8 @@ struct LiveView: View {
                     saved = nil
                     copied = false
                     translations = [:]
+                    pairs = []
+                    spoken = ""
                     let live = LiveTranscriber()
                     // A language iOS translates into is the one to write in:
                     // Nemotron listens for whatever is spoken — told one
@@ -341,10 +392,18 @@ struct LiveView: View {
             tail = ""
             return
         }
-        var shown: [String] = [], waiting: [String] = []
+        spoken = heard.joined
+        var shown: [String] = [], waiting: [String] = [], paired: [(translated: String, spoken: String)] = []
         for line in heard.done {
-            if waiting.isEmpty, let translated = translations[line] { shown.append(translated) } else { waiting.append(line) }
+            if waiting.isEmpty, let translated = translations[line] {
+                shown.append(translated)
+                // Kept as it was when it was already in the picked language.
+                paired.append((convert(translated), translated == line ? convert(line) : line))
+            } else {
+                waiting.append(line)
+            }
         }
+        pairs = paired
         if !heard.pending.isEmpty { waiting.append(heard.pending) }
         text = convert(shown.joined(separator: SpeechEngine.joinsWithoutSpaces(Languages.whisperCode(into)) ? "" : " "))
         let spoken = waiting.first.flatMap(TranscriptTranslator.detect) ?? heard.language
@@ -378,13 +437,13 @@ struct LiveView: View {
             translating = nil
             // The whole recording in the picked language, cut into lines as
             // it is saved.
-            var translated = false
+            var asSpoken: TranscriptionResult?
             if let into {
                 let texts = result.segments.map(\.text)
                 let out = await TranscriptTranslator.shared.intoLanguage(texts, target: into)
                 if out != texts {
+                    asSpoken = result
                     result = TranscriptTranslator.result(result, texts: out, language: into)
-                    translated = true
                 }
             }
             tail = ""
@@ -398,16 +457,24 @@ struct LiveView: View {
                 message = "Nothing was heard. Check that the microphone isn't muted, and speak a little closer."
             } else {
                 text = full
+                if let asSpoken {
+                    spoken = asSpoken.text
+                    pairs = zip(result.segments, asSpoken.segments).map { line, said in
+                        (convert(line.text), line.text == said.text ? convert(said.text) : said.text)
+                    }
+                }
                 let envelope = await Task.detached(priority: .userInitiated) { AudioConverter.peakEnvelope(of: url)?.buckets }.value
-                save(url: url, result: result, text: full, envelope: envelope, convert: convert, translated: translated)
+                save(url: url, result: result, text: full, envelope: envelope, convert: convert, spoken: asSpoken)
             }
             finishing = false
         }
     }
 
     /// Into the library, as the Transcribe tab keeps a recording.
+    /// - Parameter spoken: where `result` is a translation, the result as
+    ///   spoken, line for line; kept beside it.
     private func save(url: URL, result: TranscriptionResult, text: String, envelope: [Float]?,
-                      convert: (String) -> String, translated: Bool) {
+                      convert: (String) -> String, spoken: TranscriptionResult?) {
         let stamp = Self.stampFormatter.string(from: Date())
         let audio = try? AudioFiles.saveAudio(from: url, suggestedName: "Live_\(stamp)", movingSource: true)
         let firstLine = text.components(separatedBy: .newlines).first ?? ""
@@ -415,13 +482,21 @@ struct LiveView: View {
             title: firstLine.count > 50 ? String(firstLine.prefix(50)) + "…" : firstLine,
             duration: Double(result.segments.last?.end ?? 0),
             languageCode: language == "auto" ? nil : language,
-            modelName: "\(engine.displayName) · live\(translated ? " · translated" : "")",
+            modelName: "\(engine.displayName) · live\(spoken != nil ? " · translated" : "")",
             fullText: text,
             audioFilePath: audio,
             waveform: envelope
         )
-        record.segments = result.segments.map {
-            SavedSegment(startTime: Double($0.start), endTime: Double($0.end), text: convert($0.text))
+        if let spoken {
+            // Live can follow a switch between languages; one detected for
+            // the whole is only a guess, so "auto" unless the text agrees.
+            record.originalLanguageCode = TranscriptTranslator.detect(spoken.text) ?? "auto"
+            record.originalFullText = spoken.text
+        }
+        record.segments = result.segments.enumerated().map { index, line in
+            let said = spoken.flatMap { index < $0.segments.count ? $0.segments[index].text : nil }
+            return SavedSegment(startTime: Double(line.start), endTime: Double(line.end), text: convert(line.text),
+                                originalText: said == line.text ? nil : said)
         }
         modelContext.insert(record)
         try? modelContext.save()

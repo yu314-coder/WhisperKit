@@ -194,6 +194,8 @@ struct ContentView: View {
 
     // Audio recording
     @State private var micRecorder: MicRecorder?
+    @AppStorage(TranslationDisplay.storageKey) private var translationDisplayRaw = TranslationDisplay.both.rawValue
+    private var translationDisplay: TranslationDisplay { TranslationDisplay(rawValue: translationDisplayRaw) ?? .both }
     @AppStorage(MicSound.storageKey) private var micSound = MicSound.natural.rawValue
     @State private var isRecording = false
     @State private var recordingURL: URL?
@@ -1189,6 +1191,10 @@ struct ContentView: View {
                 transcriptMetaStrip(meta)
             }
 
+            if let record = currentTranscript, record.isTranslation {
+                TranslationDisplayPicker(translatedInto: record.languageCode, spokenIn: record.originalLanguageCode)
+            }
+
             if let record = currentTranscript, !record.segments.isEmpty {
                 resultSegments(record)
             } else {
@@ -1214,7 +1220,8 @@ struct ContentView: View {
     func resultSegments(_ record: SavedTranscript) -> some View {
         ResultSegmentList(player: resultPlayer,
                           segments: record.segments.sorted { $0.startTime < $1.startTime },
-                          textSize: bodyTextSize - 3)
+                          textSize: bodyTextSize - 3,
+                          display: translationDisplay)
     }
 
     /// Run stats as a quiet rule-bounded strip, so the transcript body below
@@ -2082,7 +2089,12 @@ struct ContentView: View {
     // MARK: - Helper Functions
     
     func copyTranscript() {
-        UIPasteboard.general.string = transcript
+        // A translation copies what the switch shows.
+        if let record = currentTranscript, record.isTranslation {
+            UIPasteboard.general.string = record.text(for: translationDisplay)
+        } else {
+            UIPasteboard.general.string = transcript
+        }
         showCopySuccess = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             showCopySuccess = false
@@ -3248,8 +3260,10 @@ struct ContentView: View {
 
     // MARK: - SwiftData Library Persistence
 
+    /// - Parameter originals: where `results` are a translation, the results
+    ///   as spoken, segment for segment; kept beside the translation.
     func saveTranscriptToLibrary(audioURL: URL, results: [TranscriptionResult], fullText: String, waveform: [Float]? = nil,
-                                 translatedFrom: String? = nil) {
+                                 translatedFrom: String? = nil, originals: [TranscriptionResult]? = nil) {
         // Move audio file into the durable SavedAudio folder so the user can
         // still play it back even after temp gets cleaned.
         var savedRelativePath: String? = nil
@@ -3302,16 +3316,24 @@ struct ContentView: View {
             waveform: waveform
         )
 
+        if let originals, let translatedFrom {
+            record.originalLanguageCode = translatedFrom
+            record.originalFullText = originals.map(\.text).joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
         // Flatten WhisperKit segments across all results into our SavedSegment rows.
         var segs: [SavedSegment] = []
-        for r in results {
-            for s in r.segments {
+        for (r, result) in results.enumerated() {
+            let spoken = originals.flatMap { r < $0.count ? $0[r].segments : nil }
+            for (i, s) in result.segments.enumerated() {
                 let cleaned = inChosenScript(WhisperText.stripSpecialTokens(s.text))
                 guard !cleaned.isEmpty else { continue }
                 segs.append(SavedSegment(
                     startTime: Double(s.start),
                     endTime: Double(s.end),
-                    text: cleaned
+                    text: cleaned,
+                    originalText: spoken.flatMap { i < $0.count ? WhisperText.stripSpecialTokens($0[i].text) : nil }
                 ))
             }
         }
@@ -3548,6 +3570,7 @@ struct ContentView: View {
         // NVIDIA engines' is read off their text (Canary told German turns
         // English speech into German itself, so there may be nothing to do).
         var translatedFrom: String?
+        var spoken: [TranscriptionResult]?
         var translationProblem: String?
         let wanted = selectedLanguage
         if wanted != "auto", !heard.isEmpty,
@@ -3557,14 +3580,16 @@ struct ContentView: View {
            await TranscriptTranslator.canTranslate(from: source, to: wanted) {
             await MainActor.run { statusMessage = "Translating into \(Languages.englishName(wanted))…" }
             do {
+                let asSpoken = heard
                 heard = try await TranscriptTranslator.shared.translate(heard, from: source, to: wanted)
                 translatedFrom = source
+                spoken = asSpoken
             } catch {
                 translationProblem = "It couldn't be translated into \(Languages.englishName(wanted)), so the transcript is in \(Languages.englishName(source)). \(error.localizedDescription)"
             }
         }
 
-        let results = heard, translatedFromSource = translatedFrom, problem = translationProblem
+        let results = heard, translatedFromSource = translatedFrom, problem = translationProblem, originals = spoken
         await MainActor.run {
             transcriptionProgress = 1.0
             
@@ -3592,7 +3617,7 @@ struct ContentView: View {
                     // Persist to SwiftData library
                     self.lastTranscriptionResults = results
                     self.saveTranscriptToLibrary(audioURL: url, results: results, fullText: fullText, waveform: envelope?.buckets,
-                                                 translatedFrom: translatedFromSource)
+                                                 translatedFrom: translatedFromSource, originals: originals)
                     
                     var totalDuration: Double = 0.0
                     for result in results {
@@ -3781,6 +3806,7 @@ private struct ResultSegmentList: View {
     @ObservedObject var player: TranscriptPlayer
     let segments: [SavedSegment]
     let textSize: CGFloat
+    let display: TranslationDisplay
 
     private var activeIndex: Int? {
         guard player.duration > 0 else { return nil }
@@ -3798,7 +3824,7 @@ private struct ResultSegmentList: View {
         let active = activeIndex
         LazyVStack(spacing: 1) {
             ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
-                ResultSegmentRow(segment: segment, active: index == active, textSize: textSize) {
+                ResultSegmentRow(segment: segment, active: index == active, textSize: textSize, display: display) {
                     player.seek(to: segment.startTime)
                 }
                 .equatable()
@@ -3811,10 +3837,11 @@ private struct ResultSegmentRow: View, Equatable {
     let segment: SavedSegment
     let active: Bool
     let textSize: CGFloat
+    let display: TranslationDisplay
     let seek: () -> Void
 
     static func == (a: Self, b: Self) -> Bool {
-        a.segment.id == b.segment.id && a.active == b.active && a.textSize == b.textSize
+        a.segment.id == b.segment.id && a.active == b.active && a.textSize == b.textSize && a.display == b.display
     }
 
     var body: some View {
@@ -3834,9 +3861,7 @@ private struct ResultSegmentRow: View, Equatable {
                         .padding(.top, 2)
                 }
 
-                Text(segment.text)
-                    .font(.system(size: textSize))
-                    .foregroundColor(Studio.ink)
+                SegmentWords(text: segment.text, original: segment.originalText, display: display, size: textSize)
                     .lineSpacing(5)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .multilineTextAlignment(.leading)

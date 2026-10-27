@@ -20,6 +20,13 @@ final class SavedTranscript {
     /// backfill from `audioFilePath`.
     var waveform: [Float]?
 
+    /// Set when the speech was in another language and translated into
+    /// `languageCode`: the language it was spoken in ("auto" where that
+    /// varied, as it can in Live), and the transcript as spoken. Optional,
+    /// so stores from before them migrate untouched.
+    var originalLanguageCode: String?
+    var originalFullText: String?
+
     @Relationship(deleteRule: .cascade, inverse: \SavedSegment.transcript)
     var segments: [SavedSegment] = []
 
@@ -53,6 +60,8 @@ final class SavedSegment {
     var endTime: Double            // seconds
     var text: String
     var speaker: String?           // user-editable label
+    /// The words as spoken, where `text` is their translation.
+    var originalText: String?
     var transcript: SavedTranscript?
 
     init(
@@ -60,13 +69,15 @@ final class SavedSegment {
         startTime: Double,
         endTime: Double,
         text: String,
-        speaker: String? = nil
+        speaker: String? = nil,
+        originalText: String? = nil
     ) {
         self.id = id
         self.startTime = startTime
         self.endTime = endTime
         self.text = text
         self.speaker = speaker
+        self.originalText = originalText
     }
 }
 

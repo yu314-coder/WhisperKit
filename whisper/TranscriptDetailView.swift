@@ -27,6 +27,8 @@ struct TranscriptDetailView: View {
     /// The segment under the playhead. Held as state and only written when it
     /// actually changes, so 10 Hz playback ticks don't invalidate the list.
     @State private var activeSegmentID: UUID?
+    @AppStorage(TranslationDisplay.storageKey) private var displayRaw = TranslationDisplay.both.rawValue
+    private var display: TranslationDisplay { TranslationDisplay(rawValue: displayRaw) ?? .both }
 
     /// Binary search — the list can run to thousands of segments on a long
     /// recording, and this used to be a linear scan performed once per row.
@@ -125,6 +127,12 @@ struct TranscriptDetailView: View {
             }
             .font(.caption)
             .foregroundColor(.secondary)
+
+            if transcript.isTranslation {
+                TranslationDisplayPicker(translatedInto: transcript.languageCode,
+                                         spokenIn: transcript.originalLanguageCode)
+                    .padding(.top, 4)
+            }
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -145,6 +153,7 @@ struct TranscriptDetailView: View {
             segments: sortedSegments,
             activeID: activeSegmentID,
             revision: revision,
+            display: display,
             onSeek: { player.seek(to: $0) },
             onEditSpeaker: { seg in
                 speakerDraft = seg.speaker ?? ""
@@ -170,7 +179,7 @@ struct TranscriptDetailView: View {
                     Label("Export…", systemImage: "square.and.arrow.up")
                 }
                 Button {
-                    UIPasteboard.general.string = transcript.fullText
+                    UIPasteboard.general.string = transcript.isTranslation ? transcript.text(for: display) : transcript.fullText
                 } label: {
                     Label("Copy full text", systemImage: "doc.on.doc")
                 }
@@ -237,12 +246,14 @@ private struct SegmentListView: View, Equatable {
     let segments: [SavedSegment]
     let activeID: UUID?
     let revision: Int
+    let display: TranslationDisplay
     let onSeek: (Double) -> Void
     let onEditSpeaker: (SavedSegment) -> Void
 
     static func == (a: SegmentListView, b: SegmentListView) -> Bool {
         a.activeID == b.activeID
             && a.revision == b.revision
+            && a.display == b.display
             && a.segments.count == b.segments.count
     }
 
@@ -295,9 +306,7 @@ private struct SegmentListView: View, Equatable {
                 Spacer()
             }
 
-            Text(seg.text)
-                .font(.body)
-                .foregroundColor(.primary)
+            SegmentWords(text: seg.text, original: seg.originalText, display: display, color: .primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(12)

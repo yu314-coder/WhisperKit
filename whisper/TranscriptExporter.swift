@@ -49,14 +49,20 @@ enum TranscriptExporter {
 
     // MARK: - Formatters
 
+    /// A segment's words as the translation switch shows them — both on
+    /// two lines, as bilingual subtitles carry them.
+    private static func words(_ seg: SavedSegment) -> String {
+        TranslationDisplay.current.lines(text: seg.text, original: seg.originalText).joined(separator: "\n")
+    }
+
     private static func exportTXT(_ t: SavedTranscript, _ includeSpeakers: Bool = true) -> String {
         let sorted = t.segments.sorted { $0.startTime < $1.startTime }
-        if sorted.isEmpty { return t.fullText }
+        if sorted.isEmpty { return t.isTranslation ? t.text(for: .current) : t.fullText }
         return sorted.map { seg in
             if includeSpeakers, let speaker = seg.speaker, !speaker.isEmpty {
-                return "\(speaker): \(seg.text)"
+                return "\(speaker): \(words(seg))"
             }
-            return seg.text
+            return words(seg)
         }.joined(separator: "\n")
     }
 
@@ -76,9 +82,9 @@ enum TranscriptExporter {
         for seg in sorted {
             let stamp = "`[\(formatTimestamp(seg.startTime))]`"
             if includeSpeakers, let speaker = seg.speaker, !speaker.isEmpty {
-                out += "\(stamp) **\(speaker):** \(seg.text)\n\n"
+                out += "\(stamp) **\(speaker):** \(words(seg).replacingOccurrences(of: "\n", with: "  \n"))\n\n"
             } else {
-                out += "\(stamp) \(seg.text)\n\n"
+                out += "\(stamp) \(words(seg).replacingOccurrences(of: "\n", with: "  \n"))\n\n"
             }
         }
         return out
@@ -91,9 +97,9 @@ enum TranscriptExporter {
             out += "\(idx + 1)\n"
             out += "\(srtTime(seg.startTime)) --> \(srtTime(seg.endTime))\n"
             if includeSpeakers, let speaker = seg.speaker, !speaker.isEmpty {
-                out += "\(speaker): \(seg.text)\n\n"
+                out += "\(speaker): \(words(seg))\n\n"
             } else {
-                out += "\(seg.text)\n\n"
+                out += "\(words(seg))\n\n"
             }
         }
         return out
@@ -105,9 +111,9 @@ enum TranscriptExporter {
         for seg in sorted {
             out += "\(vttTime(seg.startTime)) --> \(vttTime(seg.endTime))\n"
             if includeSpeakers, let speaker = seg.speaker, !speaker.isEmpty {
-                out += "<v \(speaker)>\(seg.text)\n\n"
+                out += "<v \(speaker)>\(words(seg))\n\n"
             } else {
-                out += "\(seg.text)\n\n"
+                out += "\(words(seg))\n\n"
             }
         }
         return out
@@ -118,6 +124,7 @@ enum TranscriptExporter {
             let start: Double
             let end: Double
             let text: String
+            let original: String?
             let speaker: String?
         }
         struct Payload: Encodable {
@@ -125,8 +132,10 @@ enum TranscriptExporter {
             let createdAt: String
             let duration: Double
             let language: String?
+            let spokenLanguage: String?
             let model: String?
             let text: String
+            let spokenText: String?
             let segments: [Seg]
         }
 
@@ -136,11 +145,14 @@ enum TranscriptExporter {
             createdAt: iso.string(from: t.createdAt),
             duration: t.duration,
             language: t.languageCode,
+            spokenLanguage: t.originalLanguageCode,
             model: t.modelName,
             text: t.fullText,
+            spokenText: t.originalFullText,
             segments: t.segments
                 .sorted { $0.startTime < $1.startTime }
-                .map { Seg(start: $0.startTime, end: $0.endTime, text: $0.text, speaker: includeSpeakers ? $0.speaker : nil) }
+                .map { Seg(start: $0.startTime, end: $0.endTime, text: $0.text, original: $0.originalText,
+                           speaker: includeSpeakers ? $0.speaker : nil) }
         )
 
         let enc = JSONEncoder()
