@@ -306,6 +306,9 @@ struct ImageView: View {
             }
 
             if selectedModel.sizes.count > 1 {
+                // Five sizes don't fit a narrow card (iPhone Duo's is 376 pt):
+                // they scroll, as the styles above do, rather than squeeze.
+                ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 7) {
                     ForEach(selectedModel.sizes) { option in
                         let chosen = option == size
@@ -314,6 +317,8 @@ struct ImageView: View {
                                 Image(systemName: option.symbol).font(.system(size: 11))
                                 Text(option.width == option.height ? "\(option.width)" : option.shapeName)
                                     .font(Studio.mono(10, weight: .semibold))
+                                    .lineLimit(1)
+                                    .fixedSize()
                             }
                             .foregroundColor(chosen ? Studio.onAccent : Studio.ink.opacity(0.75))
                             .padding(.horizontal, 9)
@@ -326,6 +331,8 @@ struct ImageView: View {
                         .accessibilityAddTraits(chosen ? .isSelected : [])
                     }
                 }
+                }
+                .scrollClipDisabled()
             } else {
                 Text("\(size.label) · \(selectedModel.engineLabel.lowercased())")
                     .font(Studio.mono(10, weight: .semibold))

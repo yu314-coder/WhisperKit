@@ -196,7 +196,6 @@ struct ContentView: View {
     @State private var micRecorder: MicRecorder?
     @AppStorage(TranslationDisplay.storageKey) private var translationDisplayRaw = TranslationDisplay.both.rawValue
     private var translationDisplay: TranslationDisplay { TranslationDisplay(rawValue: translationDisplayRaw) ?? .both }
-    @AppStorage(MicSound.storageKey) private var micSound = MicSound.natural.rawValue
     @State private var isRecording = false
     @State private var recordingURL: URL?
     @State private var recordingStartTime: Date?
@@ -405,7 +404,21 @@ struct ContentView: View {
             // Testing downloads unattended: `-DebugDownloadModel <variant>`.
             if let raw = UserDefaults.standard.string(forKey: "DebugDownloadModel"),
                let model = WhisperModel(rawValue: raw) {
+                selectedModel = model
                 prepareModel(model)
+                // With `-DebugTranscribeFile <path>`: that file through Whisper
+                // once the model is in (screenshots in the Simulator).
+                if UserDefaults.standard.string(forKey: "DebugSpeechEngine") == nil,
+                   let path = UserDefaults.standard.string(forKey: "DebugTranscribeFile") {
+                    Task {
+                        _ = await modelPrepTask?.value
+                        let copy = FileManager.default.temporaryDirectory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
+                        try? FileManager.default.removeItem(at: copy)
+                        try? FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: copy)
+                        await importAndTranscribeFile(from: copy)
+                        print("DebugTranscribeFile: \(currentTranscript?.segments.count ?? -1) segments; error: \(errorMessage ?? "none")")
+                    }
+                }
             }
             // `-DebugSpeechEngine canary-1b-v2`, then
             // `-DebugTranscribeFile <path>` once it's loaded: an NVIDIA engine
@@ -472,12 +485,6 @@ struct ContentView: View {
                     }
                 }
             }
-        }
-        // The mic chip works mid-recording too.
-        .onChange(of: micSound) { _, raw in
-            guard let recorder = micRecorder else { return }
-            recorder.switchTo(MicSound(rawValue: raw) ?? .natural)
-            if recorder.reductionUnavailable { errorMessage = LiveView.noReduction }
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
             handleScenePhaseChange(oldPhase: oldPhase, newPhase: newPhase)
@@ -1317,7 +1324,6 @@ struct ContentView: View {
     // Bottom control bar — paper aesthetic, hero round record button
     var editorialControlBar: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
             // Recording timer pill — only when capturing
             if isRecording {
                 HStack(spacing: 6) {
@@ -1331,11 +1337,9 @@ struct ContentView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(Capsule().fill(Studio.hot.opacity(0.14)))
+                .padding(.bottom, 10)
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
-                MicSoundPicker(isRecording: isRecording)
-            }
-            .padding(.bottom, 10)
 
             HStack(spacing: 18) {
                 editorialIconButton(icon: "folder", disabled: !canCapture || isProcessing) {
@@ -3145,14 +3149,11 @@ struct ContentView: View {
                     // Record in Linear PCM / WAV. AAC on Designed-for-iPad-on-Mac
                     // fails AVAudioFile open (error 1685348671 = 'dta?'). LPCM
                     // is universally readable and is what Whisper consumes
-                    // internally anyway, so no quality loss. Through the
-                    // engine rather than AVAudioRecorder, which has no voice
-                    // processing: the mic chip can turn noise down.
+                    // internally anyway, so no quality loss.
                     let url = FileManager.default.temporaryDirectory
                         .appendingPathComponent("recording_\(UUID().uuidString).wav")
-                    let recorder = try MicRecorder(url: url, sound: MicSound(rawValue: micSound) ?? .natural)
+                    let recorder = try MicRecorder(url: url)
                     try recorder.start()
-                    if recorder.reductionUnavailable { errorMessage = LiveView.noReduction }
 
                     micRecorder = recorder
                     recordingURL = url

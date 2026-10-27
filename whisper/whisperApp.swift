@@ -83,6 +83,10 @@ struct RootView: View {
         return .transcribe
     }
     @Environment(\.horizontalSizeClass) private var sizeClass
+    /// A phone-shaped window. iPhone Duo's wide screen puts the tabs in a
+    /// column down the side, where badges stick out past it.
+    @State private var tallWindow = true
+    private var showsBadges: Bool { sizeClass == .compact && tallWindow }
 
     init() {
         // The "Beta" badge in the app's colour: in the default red it read
@@ -109,14 +113,22 @@ struct RootView: View {
             MusicView()
                 .tabItem { Label("Music", systemImage: "music.note") }
                 // iPad's floating tab bar draws badges only in red, over the
-                // label; there the Music page's own BETA tag says it.
-                .badge(sizeClass == .compact ? Text("Beta") : nil)
+                // label, and iPhone Duo's side column lets them stick out;
+                // there the Music page's own BETA tag says it.
+                .badge(showsBadges ? Text("Beta") : nil)
                 .tag(Tab.music)
             ImageView()
                 .tabItem { Label("Image", systemImage: "photo.artframe") }
-                .badge(sizeClass == .compact ? Text("Beta") : nil)
+                .badge(showsBadges ? Text("Beta") : nil)
                 .tag(Tab.image)
         }
+        // The whole window, insets included: on iPhone Duo the side column
+        // is inset, and the rest alone is phone-shaped.
+        .onGeometryChange(for: Bool.self) { proxy in
+            let insets = proxy.safeAreaInsets
+            return proxy.size.width + insets.leading + insets.trailing
+                < (proxy.size.height + insets.top + insets.bottom) * 0.62
+        } action: { tallWindow = $0 }
         .tint(Studio.accent)
         .modifier(TranslationHost())
         // An audio or video file shared to the app, or opened with it from

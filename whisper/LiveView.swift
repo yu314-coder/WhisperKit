@@ -11,7 +11,6 @@ import WhisperKit
 /// transcript, recording included, in the library the two tabs share.
 struct LiveView: View {
     @AppStorage("liveLanguage") private var language = "auto"
-    @AppStorage(MicSound.storageKey) private var micSound = MicSound.natural.rawValue
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
 
@@ -75,11 +74,6 @@ struct LiveView: View {
         .sheet(isPresented: $showLanguages) { languageSheet }
         .sheet(isPresented: $showLibrary) { TranscriptLibraryView().presentationSizing(.page) }
         .onAppear { downloaded = engine.isDownloaded }
-        .onChange(of: micSound) { _, raw in
-            guard let live = transcriber else { return }
-            live.switchTo(MicSound(rawValue: raw) ?? .natural)
-            message = live.reductionUnavailable ? Self.noReduction : nil
-        }
     }
 
     // MARK: - Top bar
@@ -267,12 +261,6 @@ struct LiveView: View {
     private var recordBar: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Studio.rule).frame(height: 1)
-            HStack {
-                MicSoundPicker(isRecording: isRecording)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
             Button(action: isRecording ? stop : start) {
                 HStack(spacing: 8) {
                     Image(systemName: isRecording ? "stop.fill" : "mic.fill")
@@ -296,9 +284,7 @@ struct LiveView: View {
             }
             .buttonStyle(PressableButtonStyle())
             .disabled(!canStart && !isRecording)
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .padding(.bottom, 16)
+            .padding(16)
         }
         .background(Studio.bg)
     }
@@ -367,15 +353,13 @@ struct LiveView: View {
                     let picked = language
                     let translatable = picked != "auto" ? await TranscriptTranslator.canTranslate(into: picked) : false
                     translateInto = translatable ? picked : nil
-                    try await live.start(language: translateInto == nil ? engine.modelLanguage(for: picked) : "auto",
-                                         sound: MicSound(rawValue: micSound) ?? .natural) { heard in
+                    try await live.start(language: translateInto == nil ? engine.modelLanguage(for: picked) : "auto") { heard in
                         self.heard = heard
                         show(heard)
                         translateFinished()
                     }
                     transcriber = live
                     startedAt = Date()
-                    if live.reductionUnavailable { message = Self.noReduction }
                 } catch {
                     message = "Couldn't start: \(error.localizedDescription)"
                 }
@@ -508,8 +492,6 @@ struct LiveView: View {
         formatter.dateFormat = "yyyy-MM-dd_HHmm"
         return formatter
     }()
-
-    static let noReduction = "Noise reduction isn't available with this microphone, so it's recording natural sound."
 
     private struct SimulatorUnsupported: LocalizedError {
         var errorDescription: String? { "Live transcription needs a real device: the Simulator's GPU can't run it." }

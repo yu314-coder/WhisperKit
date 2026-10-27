@@ -21,15 +21,11 @@ final class LiveTranscriber {
         url = FileManager.default.temporaryDirectory.appendingPathComponent("live_\(UUID().uuidString).wav")
     }
 
-    /// Set when noise reduction was asked for but the mic records natural
-    /// sound (MicRecorder).
-    var reductionUnavailable: Bool { mic?.reductionUnavailable ?? false }
-
     /// - Parameter onText: the whole transcript so far, on the main actor.
-    func start(language: String, sound: MicSound, onText: @escaping @MainActor (LiveText) -> Void) async throws {
+    func start(language: String, onText: @escaping @MainActor (LiveText) -> Void) async throws {
         try await SpeechRunner.shared.startLive(language: language)
         let pending = self.pending
-        let mic = try MicRecorder(url: url, sound: sound) { pending.append($0) }
+        let mic = try MicRecorder(url: url) { pending.append($0) }
         try mic.start()
         self.mic = mic
 
@@ -44,8 +40,6 @@ final class LiveTranscriber {
             }
         }
     }
-
-    func switchTo(_ sound: MicSound) { mic?.switchTo(sound) }
 
     /// Stops the microphone and returns the recording and its transcript.
     func stop() async -> (url: URL, result: TranscriptionResult) {
