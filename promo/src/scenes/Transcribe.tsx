@@ -6,7 +6,7 @@ import {Feature, Phone, progress, SceneProps, SCREEN, useLandscape} from '../ui'
 // Where each segment of the transcript screenshot starts and the last one
 // ends, in its pixels (measured: rows begin at the timestamps, the record
 // bar's top edge is at 2290).
-const SEGMENTS = [1158, 1362, 1476, 1600, 1867, 2060, 2289];
+export const SEGMENTS = [1158, 1362, 1476, 1600, 1867, 2060, 2289];
 
 /** The real transcript screen, its segments written out one after another. */
 const Writing: React.FC<{dur: number}> = ({dur}) => {

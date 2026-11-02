@@ -5,8 +5,8 @@ import {Feature, progress, SceneProps, useLandscape} from '../ui';
 
 // Said in Chinese; the picked language changes through the scene. The
 // layout is the app's "Both": the translation, and under it what was said.
-const LANGUAGES = ['English', 'German', 'Japanese', 'Spanish'] as const;
-type Language = (typeof LANGUAGES)[number];
+export const LANGUAGES = ['English', 'German', 'Japanese', 'Spanish'] as const;
+export type Language = (typeof LANGUAGES)[number];
 
 const SEGMENTS: {time: string; said: string; read: Record<Language, string>}[] = [
   {
@@ -41,21 +41,43 @@ const SEGMENTS: {time: string; said: string; read: Record<Language, string>}[] =
   },
 ];
 
-/** A transcript card styled like the app's, in light mode. */
+/** The scene's card: what was said types out first, the translation
+    follows, then the picked language keeps changing. */
 const Card: React.FC<{dur: number}> = ({dur}) => {
   const frame = useCurrentFrame();
   const landscape = useLandscape();
-  const width = landscape ? 780 : 900;
-  const k = width / 780;
-  // What was said types out first; the translation follows, then the
-  // picked language keeps changing.
   const firstRead = 30;
   const per = (dur - firstRead - 10) / LANGUAGES.length;
   const index = Math.min(LANGUAGES.length - 1, Math.max(0, Math.floor((frame - firstRead) / per)));
-  const language = LANGUAGES[index];
-  const previous = index > 0 ? LANGUAGES[index - 1] : null;
-  const change = progress(frame, firstRead + index * per, 8);
+  return (
+    <TranslatedCard
+      width={landscape ? 780 : 900}
+      tilt={landscape ? -1.5 : 0}
+      language={LANGUAGES[index]}
+      previous={index > 0 ? LANGUAGES[index - 1] : null}
+      change={progress(frame, firstRead + index * per, 8)}
+      typed={(row) => Math.floor(Math.max(0, frame - 8 - row * 5) * 1.1)}
+      read={(row) => progress(frame, firstRead + row * 4, 12)}
+    />
+  );
+};
 
+/**
+ * A translated transcript card styled like the app's, in light mode:
+ * `language` fading in over `previous` as `change` goes 0 → 1. `typed` is
+ * how many characters of each row's spoken words show, `read` how far its
+ * translation has faded in.
+ */
+export const TranslatedCard: React.FC<{
+  width: number;
+  language: Language;
+  previous: Language | null;
+  change: number;
+  typed?: (row: number) => number;
+  read?: (row: number) => number;
+  tilt?: number;
+}> = ({width, language, previous, change, typed = () => Infinity, read = () => 1, tilt = 0}) => {
+  const k = width / 780;
   const segmented = ['Both', language, 'Chinese'];
   return (
     <div
@@ -67,7 +89,7 @@ const Card: React.FC<{dur: number}> = ({dur}) => {
         boxShadow: '0 50px 140px rgba(0,0,0,0.55), 0 0 140px rgba(92,141,255,0.2)',
         fontFamily: font.text,
         color: color.appInk,
-        transform: landscape ? 'rotate(-1.5deg)' : undefined,
+        transform: tilt ? `rotate(${tilt}deg)` : undefined,
       }}
     >
       <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
@@ -117,8 +139,8 @@ const Card: React.FC<{dur: number}> = ({dur}) => {
       </div>
       <div style={{marginTop: 18 * k}}>
         {SEGMENTS.map((segment, row) => {
-          const typed = Math.floor(Math.max(0, frame - 8 - row * 5) * 1.1);
-          const read = progress(frame, firstRead + row * 4, 12);
+          const shown = Math.min(segment.said.length, typed(row));
+          const faded = read(row);
           return (
             <div
               key={segment.time}
@@ -140,8 +162,8 @@ const Card: React.FC<{dur: number}> = ({dur}) => {
                     display: 'grid',
                     fontSize: 30 * k,
                     lineHeight: 1.3,
-                    opacity: read,
-                    transform: `translateY(${(1 - read) * 14}px)`,
+                    opacity: faded,
+                    transform: `translateY(${(1 - faded) * 14}px)`,
                   }}
                 >
                   {/* Every language in one cell, so the row keeps the
@@ -161,8 +183,8 @@ const Card: React.FC<{dur: number}> = ({dur}) => {
                   ))}
                 </div>
                 <div style={{fontSize: 25 * k, lineHeight: 1.35, color: color.appMute, marginTop: 6 * k}}>
-                  {segment.said.slice(0, typed)}
-                  <span style={{opacity: 0}}>{segment.said.slice(typed)}</span>
+                  {segment.said.slice(0, shown)}
+                  <span style={{opacity: 0}}>{segment.said.slice(shown)}</span>
                 </div>
               </div>
             </div>

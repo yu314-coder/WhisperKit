@@ -48,15 +48,18 @@ export const Rich: React.FC<{text: string}> = ({text}) => (
 );
 
 /** The night sky behind everything: two slow glows in the icon's colours. */
-export const Backdrop: React.FC = () => {
-  const a = useCurrentFrame() / 150;
+export const Backdrop: React.FC<{loop?: number}> = ({loop}) => {
+  const frame = useCurrentFrame();
+  // In a loop the glows go round exactly once, so the end meets the start.
+  const a = loop ? (2 * Math.PI * frame) / loop : frame / 150;
+  const [b, c, d] = loop ? [1, 1, 1] : [0.8, 0.9, 1.1];
   return (
     <AbsoluteFill style={{background: color.night}}>
       <AbsoluteFill
         style={{
           background: [
-            `radial-gradient(ellipse 60% 50% at ${30 + 12 * Math.sin(a)}% ${28 + 10 * Math.cos(a * 0.8)}%, rgba(92,141,255,0.28), transparent 70%)`,
-            `radial-gradient(ellipse 55% 55% at ${72 + 10 * Math.cos(a * 0.9)}% ${74 + 8 * Math.sin(a * 1.1)}%, rgba(164,107,255,0.24), transparent 70%)`,
+            `radial-gradient(ellipse 60% 50% at ${30 + 12 * Math.sin(a)}% ${28 + 10 * Math.cos(a * b)}%, rgba(92,141,255,0.28), transparent 70%)`,
+            `radial-gradient(ellipse 55% 55% at ${72 + 10 * Math.cos(a * c)}% ${74 + 8 * Math.sin(a * d)}%, rgba(164,107,255,0.24), transparent 70%)`,
           ].join(','),
         }}
       />
@@ -66,30 +69,36 @@ export const Backdrop: React.FC = () => {
 
 /**
  * The icon's waveform, drawn as glowing ribbons across the frame: flat at
- * the edges, a peak in the middle. `amplitude` 0–1, `y` the centre line as
- * a fraction of the height.
+ * the edges, a peak in the middle (or at each of `peaks`, fractions of the
+ * width). `amplitude` 0–1, `y` the centre line as a fraction of the
+ * height. With `loop`, the motion repeats every `loop` frames.
  */
-export const Ribbons: React.FC<{amplitude: number; opacity?: number; y?: number; reach?: number}> = ({
-  amplitude,
-  opacity = 1,
-  y = 0.5,
-  reach = 0.42,
-}) => {
+export const Ribbons: React.FC<{
+  amplitude: number;
+  opacity?: number;
+  y?: number;
+  reach?: number;
+  loop?: number;
+  peaks?: number[];
+  spread?: number;
+}> = ({amplitude, opacity = 1, y = 0.5, reach = 0.42, loop, peaks = [0.5], spread = 0.15}) => {
   const frame = useCurrentFrame();
   const {width, height} = useVideoConfig();
   const id = useId().replace(/:/g, '');
   const s = width / 1920;
   const cy = height * y;
   const peak = height * reach * 0.5 * amplitude;
+  const swing = loop ? (4 * Math.PI * frame) / loop : frame * 0.045;
   const paths = [0, 1, 2, 3, 4].map((i) => {
-    const phase = 0.7 * Math.sin(frame * 0.045 + i * 0.9) + i * 0.32;
+    const phase = 0.7 * Math.sin(swing + i * 0.9) + i * 0.32;
     const freq = 2.4 + i * 0.22;
     const gain = 1 - i * 0.13;
     const points: string[] = [];
     for (let k = 0; k <= 240; k++) {
       const u = k / 240;
-      const envelope = Math.exp(-(((u - 0.5) / 0.15) ** 2));
-      const v = envelope * Math.cos(2 * Math.PI * (u - 0.5) * freq + phase) * gain;
+      const nearest = peaks.reduce((best, p) => (Math.abs(u - p) < Math.abs(u - best) ? p : best), peaks[0]);
+      const envelope = peaks.reduce((sum, p) => sum + Math.exp(-(((u - p) / spread) ** 2)), 0);
+      const v = envelope * Math.cos(2 * Math.PI * (u - nearest) * freq + phase) * gain;
       points.push(`${k ? 'L' : 'M'}${(u * width).toFixed(1)} ${(cy - v * peak).toFixed(1)}`);
     }
     return points.join(' ');
@@ -97,7 +106,13 @@ export const Ribbons: React.FC<{amplitude: number; opacity?: number; y?: number;
   return (
     <svg width={width} height={height} style={{position: 'absolute', inset: 0, opacity}}>
       <defs>
-        <linearGradient id={`${id}g`} x1="0.3" x2="0.7" y1="0" y2="0">
+        <linearGradient
+          id={`${id}g`}
+          x1={Math.max(0, Math.min(...peaks) - spread * 1.4)}
+          x2={Math.min(1, Math.max(...peaks) + spread * 1.4)}
+          y1="0"
+          y2="0"
+        >
           <stop offset="0" stopColor={color.sky} stopOpacity={0} />
           <stop offset="0.3" stopColor={color.blue} />
           <stop offset="0.7" stopColor={color.violet} />
