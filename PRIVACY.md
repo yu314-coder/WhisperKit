@@ -1,14 +1,14 @@
 # Privacy Policy — Whisper
 
-**Last updated:** October 11, 2026
+**Last updated:** November 2, 2026
 
 Whisper ("the app") is designed with privacy as a foundational principle. This policy explains, in plain language, what data the app handles and what it does not.
 
 ## The short version
 
-- **Everything stays on your device.** Whisper transcribes audio, generates music and makes pictures entirely on-device, using your device's Neural Engine and GPU.
+- **Everything stays on your device.** Whisper transcribes and translates speech, generates music and makes pictures entirely on-device, using your device's Neural Engine and GPU.
 - **No accounts. No tracking. No analytics. No ads.**
-- **No audio, transcripts, music, pictures, or personal data are ever sent to us or to any third-party server.**
+- **No audio, transcripts, translations, music, pictures, or personal data are ever sent to us or to any third-party server.**
 - The developer has no servers and cannot see what you record, transcribe, or create.
 
 ## What Whisper does on your device
@@ -16,18 +16,22 @@ Whisper ("the app") is designed with privacy as a foundational principle. This p
 When you record audio, import an audio/video file, select a video from your Photos library, share a file to Whisper from another app, or download a file from a link you paste, Whisper:
 
 1. Stores the audio temporarily in the app's local sandbox on your device.
-2. Runs speech recognition locally using a Whisper model that you download once.
+2. Runs speech recognition locally using a speech model that you download once (Whisper, or NVIDIA's Canary).
 3. Displays the transcript in the app, where you can read or copy it.
 
-The transcript remains local to your device. Nothing about the audio or its contents is transmitted off the device by the app.
+In the Live tab, your speech is written out as you talk, by a speech model running on your device (NVIDIA's Nemotron).
+
+If you pick a language different from the one spoken, the transcript is translated on your device by Apple's Translation framework, and you can see the translation, the original words, or both. The first time you use a pair of languages, iOS may offer to download them; that download comes from Apple and is made by iOS itself, and the words being translated are not sent anywhere.
+
+Transcripts and translations remain local to your device. Nothing about the audio or its contents is transmitted off the device by the app.
 
 When you generate music, your description and lyrics are processed on your device by the music model. On devices with Apple Intelligence, Apple's on-device language model reads your description to find any lyrics in it; this also happens entirely on your device. Generated music is saved in the app on your device.
 
-When you make a picture, your description is processed on your device by the image model you chose. Each finished picture is also checked on your device, and one that looks sexually explicit is not shown or saved; your description itself is never checked or sent anywhere. Pictures are saved in the app on your device, and reach your Photos library only when you tap Save.
+When you make a picture, your description is processed on your device by the image model you chose. If you use Enhance prompt, a language model on your device first rewrites your description in more detail; this also happens entirely on your device. Each finished picture is also checked on your device, and one that looks sexually explicit is not shown or saved; your description itself is never checked or sent anywhere. Pictures are saved in the app on your device, and reach your Photos library only when you tap Save.
 
 ## What Whisper downloads
 
-Whisper downloads AI model files the first time you use a given model: transcription models from Hugging Face's public model hub, and music and image models from the app's public GitHub releases. These downloads contain only the model weights — no user data is sent in either direction beyond a standard HTTPS request. After download, models work entirely offline.
+Whisper downloads AI model files the first time you use a given model: Whisper transcription models from Hugging Face's public model hub, and the other speech models, music and image models, the picture check and the Enhance prompt model from the app's public GitHub releases. These downloads contain only the model weights — no user data is sent in either direction beyond a standard HTTPS request. After download, models work entirely offline.
 
 If you paste a link to an audio or video file, Whisper downloads that file directly from the address you gave, with a standard HTTPS request, and transcribes it on your device. Nothing is sent to that server except the request for the file, and nothing passes through the developer. Whisper does not download from video platforms such as YouTube, Instagram or Facebook.
 
@@ -35,7 +39,7 @@ If you paste a link to an audio or video file, Whisper downloads that file direc
 
 Whisper only asks for permissions strictly required for its features:
 
-- **Microphone** — to record audio you explicitly choose to record.
+- **Microphone** — to record audio you explicitly choose to record, including live transcription.
 - **Photos / Files** — only when you tap the corresponding button to import a file you select, or to add a picture you made to Photos when you tap Save.
 - **Notifications** (optional) — to tell you when a long transcription, a piece of music or a picture is finished.
 - **Background audio / processing** — so a recording, a transcription, a download, music or a picture can continue when you switch to another app.
@@ -47,14 +51,14 @@ Each permission is requested through the system prompt and can be revoked at any
 Whisper does **not** collect, transmit, sell, or share:
 
 - Recorded audio or imported media
-- Transcripts, music, pictures, prompts, lyrics, or any text generated by the app
+- Transcripts, translations, music, pictures, prompts, lyrics, or any text generated by the app
 - Device identifiers, advertising IDs, or location
 - Crash reports, usage analytics, or telemetry
 - Email addresses, accounts, or any contact information
 
 ## Third-party services
 
-Whisper does not embed any third-party SDKs for analytics, advertising, attribution, or tracking. The only external network requests the app makes are to Hugging Face and GitHub to download the AI model weights you choose, and to the address of a link you paste yourself.
+Whisper does not embed any third-party SDKs for analytics, advertising, attribution, or tracking. The only external network requests the app makes are to Hugging Face and GitHub to download the AI model weights you choose, and to the address of a link you paste yourself. Translation languages are downloaded by iOS from Apple, not by the app.
 
 ## Children's privacy
 
@@ -62,7 +66,7 @@ Because Whisper collects no personal data, it is safe for users of any age. It d
 
 ## Data retention and deletion
 
-All audio files, models, transcripts, and generated music live in the app's local container on your device. To delete everything, simply uninstall the app — iOS will remove all associated data automatically.
+All audio files, models, transcripts, translations, generated music and pictures live in the app's local container on your device. To delete everything, simply uninstall the app — iOS will remove all associated data automatically. Pictures you saved to Photos stay in your Photos library until you delete them there.
 
 ## Changes to this policy
 
