@@ -56,7 +56,32 @@ final class MusicMemoryMonitor {
     // Swift rejects. The timer captures self weakly and `stop()` runs when the
     // tab disappears or work ends, so nothing is left running.
 
+    private var measuring = false
+
+    /// Measured off the main thread: counting the mapped weights' resident
+    /// pages walks every page of the mapping — over a million for the
+    /// largest picture models — and did so on the main thread twice a
+    /// second while a picture or song was being made.
     private func sample() {
+        guard !measuring else { return }
+        measuring = true
+        DispatchQueue.global(qos: .utility).async {
+            let reading = Self.measure()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.measuring = false
+                if let reading { self.apply(reading) }
+            }
+        }
+    }
+
+    private struct Reading: Sendable {
+        let footprintMB: Double
+        let weightsMB: Double
+        let availableMB: Double
+    }
+
+    nonisolated private static func measure() -> Reading? {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(
             MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
@@ -65,12 +90,17 @@ final class MusicMemoryMonitor {
                 task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
             }
         }
-        guard result == KERN_SUCCESS else { return }
+        guard result == KERN_SUCCESS else { return nil }
+        return Reading(footprintMB: Double(info.phys_footprint) / 1_048_576,
+                       weightsMB: Double(MappedWeights.residentBytes) / 1_048_576,
+                       availableMB: Double(os_proc_available_memory()) / 1_048_576)
+    }
 
-        footprintMB = Double(info.phys_footprint) / 1_048_576
-        weightsMB = Double(MappedWeights.residentBytes) / 1_048_576
+    private func apply(_ reading: Reading) {
+        footprintMB = reading.footprintMB
+        weightsMB = reading.weightsMB
         peakWeightsMB = max(peakWeightsMB, weightsMB)
-        availableMB = Double(os_proc_available_memory()) / 1_048_576
+        availableMB = reading.availableMB
         peakMB = max(peakMB, footprintMB)
 
         history.append(footprintMB)

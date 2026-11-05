@@ -192,6 +192,11 @@ struct MusicClipDetail: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var player: AVAudioPlayer?
+    /// Whether it was last told to play: the playhead ticks only then. It
+    /// used to tick ten times a second for as long as the page was open.
+    @State private var playing = false
+    /// Bumped by scrubbing, to move the playhead while the timeline is paused.
+    @State private var scrubs = 0
     @State private var copied = false
     @State private var confirmDelete = false
 
@@ -254,7 +259,10 @@ struct MusicClipDetail: View {
     }
 
     private var playerCard: some View {
-        TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+        // Outside the timeline, so it is worked out once, not every tick.
+        let envelope = clip.envelope(limit: 80)
+        return TimelineView(.animation(minimumInterval: 0.1, paused: !playing)) { _ in
+            let _ = scrubs
             let playing = player?.isPlaying ?? false
             let position = (player?.duration ?? 0) > 0 ? player!.currentTime / player!.duration : 0
             HStack(spacing: 12) {
@@ -266,10 +274,11 @@ struct MusicClipDetail: View {
                 .buttonStyle(PressableButtonStyle())
                 .accessibilityLabel(playing ? "Pause" : "Play")
                 Group {
-                    if let envelope = clip.envelope(limit: 80) {
+                    if let envelope {
                         WaveformView(buckets: envelope, progress: position, onScrub: { fraction in
                             if player == nil { prepare() }
                             if let player { player.currentTime = fraction * player.duration }
+                            scrubs += 1
                         })
                     } else {
                         WaveformPlaceholder()
@@ -348,9 +357,14 @@ struct MusicClipDetail: View {
     }
 
     private func toggle() {
-        if player?.isPlaying == true { player?.pause(); return }
+        if player?.isPlaying == true {
+            player?.pause()
+            playing = false
+            return
+        }
         if player == nil { prepare() }
         player?.play()
+        playing = player?.isPlaying ?? false
     }
 }
 

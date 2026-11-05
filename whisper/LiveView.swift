@@ -209,14 +209,14 @@ struct LiveView: View {
     @ViewBuilder private var words: some View {
         switch display {
         case .translation:
-            Text("\(Text(verbatim: text))\(Text(verbatim: text.isEmpty || tail.isEmpty ? tail : " " + tail).foregroundColor(Studio.mute))")
+            ParagraphText(text: text, tail: tail)
                 .font(Studio.text(18))
                 .foregroundColor(Studio.ink)
                 .lineSpacing(6)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         case .original:
-            Text(spoken)
+            ParagraphText(text: spoken)
                 .font(Studio.text(18))
                 .foregroundColor(Studio.ink)
                 .lineSpacing(6)

@@ -181,6 +181,9 @@ enum WeightFetcher {
         private var received: [String: Int64] = [:]
         private var done: Set<String> = []
         private var notes: [String: String] = [:]
+        /// Every file reports four times a second, and they all download at
+        /// once: shown as each arrived, that was dozens of redraws a second.
+        private var lastShown = Date.distantPast
 
         init(files: [WeightFile], total: Int64, progress: @escaping (Progress) -> Void,
              note: @escaping (String?) -> Void) {
@@ -192,6 +195,9 @@ enum WeightFetcher {
             // order: one late for a finished file must not take it back.
             guard !done.contains(path) else { return }
             received[path] = bytes
+            let now = Date()
+            guard now.timeIntervalSince(lastShown) >= 0.2 else { return }
+            lastShown = now
             show(path)
         }
 

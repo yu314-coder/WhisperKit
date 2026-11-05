@@ -24,11 +24,11 @@ struct TranscriptLibraryView: View {
     var filtered: [SavedTranscript] {
         let trimmed = debouncedSearch.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return transcripts }
-        let q = trimmed.lowercased()
+        // Searched in place: lowercasing made a copy of every transcript's
+        // whole text for each search.
+        func has(_ text: String) -> Bool { text.range(of: trimmed, options: .caseInsensitive) != nil }
         return transcripts.filter {
-            $0.title.lowercased().contains(q)
-                || $0.fullText.lowercased().contains(q)
-                || ($0.languageCode?.lowercased().contains(q) ?? false)
+            has($0.title) || has($0.fullText) || ($0.languageCode.map(has) ?? false)
         }
     }
 
@@ -99,7 +99,9 @@ struct TranscriptLibraryView: View {
                     .font(Studio.text(15, weight: .medium))
                     .foregroundColor(Studio.ink)
                     .lineLimit(1)
-                Text(t.fullText)
+                // One line shows, but a Text lays out all it is given: an
+                // hour's transcript cost ~28 ms a row as rows scrolled in.
+                Text(t.fullText.prefix(200))
                     .font(Studio.text(12))
                     .foregroundColor(Studio.mute)
                     .lineLimit(1)

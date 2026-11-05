@@ -1140,7 +1140,7 @@ struct ContentView: View {
                     .foregroundColor(Self.paperAccent)
             }
 
-            Text(streamingTranscript)
+            ParagraphText(text: streamingTranscript)
                 .font(.system(size: bodyTextSize + 1, weight: .regular))
                 .foregroundColor(Self.paperInk)
                 .lineSpacing(7)
@@ -1207,7 +1207,7 @@ struct ContentView: View {
             } else {
                 // No segments (or the record failed to save) — the flat text is
                 // still the transcript, so show that rather than nothing.
-                Text(transcript)
+                ParagraphText(text: transcript)
                     .font(.system(size: bodyTextSize, weight: .regular))
                     .foregroundColor(Self.paperInk)
                     .lineSpacing(8)
@@ -1226,7 +1226,7 @@ struct ContentView: View {
     /// navigable, and each line is a seek target.
     func resultSegments(_ record: SavedTranscript) -> some View {
         ResultSegmentList(player: resultPlayer,
-                          segments: record.segments.sorted { $0.startTime < $1.startTime },
+                          record: record,
                           textSize: bodyTextSize - 3,
                           display: translationDisplay)
     }
@@ -3803,15 +3803,22 @@ private struct ResultTransport: View {
 /// The finished run's segments, the one under the playhead highlighted;
 /// each row seeks there. Lazy, so a long transcript lays out only what
 /// shows, and the playhead finds its row by binary search.
+///
+/// The player is held, not observed, as in TranscriptDetailView: its
+/// playhead moves ten times a second, and observing it redrew the whole
+/// list each time. Only a change of row is kept, and the segments are
+/// sorted once rather than on every redraw of the Transcribe screen.
 private struct ResultSegmentList: View {
-    @ObservedObject var player: TranscriptPlayer
-    let segments: [SavedSegment]
+    let player: TranscriptPlayer
+    let record: SavedTranscript
     let textSize: CGFloat
     let display: TranslationDisplay
 
-    private var activeIndex: Int? {
+    @State private var segments: [SavedSegment] = []
+    @State private var active: Int?
+
+    private func index(at now: Double) -> Int? {
         guard player.duration > 0 else { return nil }
-        let now = player.currentTime
         var low = 0, high = segments.count - 1
         while low <= high {
             let mid = (low + high) / 2
@@ -3822,15 +3829,26 @@ private struct ResultSegmentList: View {
     }
 
     var body: some View {
-        let active = activeIndex
         LazyVStack(spacing: 1) {
-            ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
+            ForEach(segments.indices, id: \.self) { index in
+                let segment = segments[index]
                 ResultSegmentRow(segment: segment, active: index == active, textSize: textSize, display: display) {
                     player.seek(to: segment.startTime)
                 }
                 .equatable()
             }
         }
+        .onAppear(perform: sort)
+        .onChange(of: record.id) { _, _ in sort() }
+        .onReceive(player.$currentTime) { now in
+            let row = index(at: now)
+            if row != active { active = row }
+        }
+    }
+
+    private func sort() {
+        segments = record.segments.sorted { $0.startTime < $1.startTime }
+        active = index(at: player.currentTime)
     }
 }
 

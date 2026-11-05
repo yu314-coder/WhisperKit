@@ -17,8 +17,13 @@ struct ExportView: View {
 
     private var isRegular: Bool { horizontalSizeClass == .regular }
 
-    private var body_: String {
-        TranscriptExporter.export(transcript, as: format, includeSpeakers: includeSpeakers)
+    /// The export, made when the format or the speaker setting changes. As
+    /// a computed property it was made again two or three times on every
+    /// redraw, walking every segment of the transcript each time.
+    @State private var body_ = ""
+
+    private func makeExport() {
+        body_ = TranscriptExporter.export(transcript, as: format, includeSpeakers: includeSpeakers)
     }
 
     private var filename: String {
@@ -71,6 +76,9 @@ struct ExportView: View {
                 ShareSheet(activityItems: [item.url])
             }
         }
+        .onAppear(perform: makeExport)
+        .onChange(of: format) { _, _ in makeExport() }
+        .onChange(of: includeSpeakers) { _, _ in makeExport() }
         .presentationSizing(.page)
     }
 

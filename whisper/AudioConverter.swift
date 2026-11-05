@@ -85,6 +85,10 @@ enum AudioConverter {
 
         // Drain the reader into the writer.
         let queue = DispatchQueue(label: "AudioConverter.queue")
+        // In whole percents: once per buffer was thousands of main-actor
+        // updates for a long file, each redrawing the Transcribe screen.
+        // Only touched on `queue`, like the reader and writer.
+        nonisolated(unsafe) var reportedPercent = -1
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             writerInput.requestMediaDataWhenReady(on: queue) {
@@ -111,7 +115,12 @@ enum AudioConverter {
                         if let onProgress, assetDuration > 0 {
                             let at = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
                             if at.isFinite {
-                                onProgress(min(1, max(0, at / assetDuration)))
+                                let fraction = min(1, max(0, at / assetDuration))
+                                let percent = Int(fraction * 100)
+                                if percent != reportedPercent {
+                                    reportedPercent = percent
+                                    onProgress(fraction)
+                                }
                             }
                         }
                         if !writerInput.append(sampleBuffer) {
