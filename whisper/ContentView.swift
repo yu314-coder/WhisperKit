@@ -30,6 +30,8 @@ struct ContentView: View {
         return fetch
     }
     @State private var quickOpenTranscript: SavedTranscript?
+    /// The finished transcript open in Speech analysis.
+    @State private var analysisRecord: SavedTranscript?
 
     /// Sampling model. Isolated from ContentView's own state so its 1 Hz tick
     /// redraws only the meter, not the whole screen.
@@ -353,6 +355,15 @@ struct ContentView: View {
                 }
                 .presentationSizing(.page)
             }
+            .sheet(item: $analysisRecord) { record in
+                // A moment tapped there closes it and plays from that moment.
+                SpeechAnalysisView(transcript: record, onSeek: resultPlayer.duration > 0 ? { seconds in
+                    analysisRecord = nil
+                    resultPlayer.seek(to: seconds)
+                    resultPlayer.play()
+                } : nil)
+                .presentationSizing(.page)
+            }
         .fileImporter(
             isPresented: $showingFilePicker,
             allowedContentTypes: [.audio, .movie, .mpeg4Movie, .quickTimeMovie, .mpeg4Audio],
@@ -417,6 +428,8 @@ struct ContentView: View {
                         try? FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: copy)
                         await importAndTranscribeFile(from: copy)
                         print("DebugTranscribeFile: \(currentTranscript?.segments.count ?? -1) segments; error: \(errorMessage ?? "none")")
+                        // `-DebugOpenAnalysis YES`: then Speech analysis, for screenshots.
+                        if UserDefaults.standard.bool(forKey: "DebugOpenAnalysis") { analysisRecord = currentTranscript }
                     }
                 }
             }
@@ -439,6 +452,14 @@ struct ContentView: View {
                             print(String(format: "  %.2f-%.2f %@", segment.startTime, segment.endTime, segment.text))
                         }
                     }
+                }
+            }
+            // `-DebugOpenAnalysis YES` alone: the newest transcript's Speech analysis.
+            if UserDefaults.standard.bool(forKey: "DebugOpenAnalysis"),
+               UserDefaults.standard.string(forKey: "DebugTranscribeFile") == nil {
+                Task {
+                    try? await Task.sleep(for: .seconds(1))
+                    analysisRecord = recentTranscripts.first
                 }
             }
             // `-DebugImportLink <https URL>`: what the link sheet does.
@@ -1196,6 +1217,18 @@ struct ContentView: View {
 
             if let meta = transcriptMeta {
                 transcriptMetaStrip(meta)
+            }
+
+            if let record = currentTranscript {
+                Button { analysisRecord = record } label: {
+                    Label("Speech analysis", systemImage: "waveform.badge.magnifyingglass")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Self.paperAccent)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .overlay(Capsule().strokeBorder(Self.paperRule, lineWidth: 0.5))
+                }
+                .buttonStyle(PressableButtonStyle())
             }
 
             if let record = currentTranscript, record.isTranslation {

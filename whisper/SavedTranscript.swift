@@ -53,6 +53,17 @@ final class SavedTranscript {
     }
 }
 
+extension SavedTranscript {
+    /// Removes what is kept beside the record, the recording and its speech
+    /// analysis, before the record itself is deleted. Every delete goes
+    /// through here: the transcript screen's own used to leave the
+    /// recording behind, where nothing in the app could reach it again.
+    func removeKeptFiles() {
+        if let audioFilePath { AudioFiles.deleteAudio(relativePath: audioFilePath) }
+        AudioAnalysisCache.remove(for: id)
+    }
+}
+
 @Model
 final class SavedSegment {
     var id: UUID

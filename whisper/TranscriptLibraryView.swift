@@ -149,9 +149,7 @@ struct TranscriptLibraryView: View {
     private func delete(at offsets: IndexSet) {
         for index in offsets {
             let t = filtered[index]
-            if let path = t.audioFilePath {
-                AudioFiles.deleteAudio(relativePath: path)
-            }
+            t.removeKeptFiles()
             modelContext.delete(t)
         }
         try? modelContext.save()

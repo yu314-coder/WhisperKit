@@ -86,6 +86,8 @@ struct HelpView: View {
                         body: "Transcriptions and downloads keep going when you switch to another app, and iOS shows their progress. You get a notification when a transcription is done. (Before iOS 26, work pauses soon after you leave and continues when you come back.)"),
                 Section(icon: "books.vertical", title: "Library",
                         body: "Every transcript is kept in the library, where you can search them. Open one to read it, rename it, or export it as text, subtitles (SRT, VTT), Markdown or JSON."),
+                Section(icon: "waveform.badge.magnifyingglass", title: "Speech analysis",
+                        body: "Under a finished transcript, or at the top of one in the library, Speech analysis shows how it was said: the pace and how it changed, the pauses, the voice's pitch and intonation, its loudness against the background noise, a spectrogram, who spoke for how long, hesitations, and the words used most. Tap the spectrogram or a pause to listen from there. It's all measured on this device."),
                 Section(icon: "lock.fill", title: "Private",
                         body: "Transcription happens entirely on this device. Your audio never leaves it."),
             ]

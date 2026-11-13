@@ -14,6 +14,7 @@ struct TranscriptDetailView: View {
     @State private var editingSpeakerForSegment: SavedSegment?
     @State private var speakerDraft: String = ""
     @State private var showExportPicker = false
+    @State private var showAnalysis = false
     @State private var renamingTitle = false
     @State private var titleDraft: String = ""
 
@@ -92,6 +93,15 @@ struct TranscriptDetailView: View {
         }
         .sheet(isPresented: $showExportPicker) {
             ExportView(transcript: transcript)
+        }
+        .sheet(isPresented: $showAnalysis) {
+            // A moment tapped there closes it and plays from that moment.
+            SpeechAnalysisView(transcript: transcript, onSeek: player.duration > 0 ? { seconds in
+                showAnalysis = false
+                player.seek(to: seconds)
+                player.play()
+            } : nil)
+            .presentationSizing(.page)
         }
         .alert("Rename Transcript", isPresented: $renamingTitle) {
             TextField("Title", text: $titleDraft)
@@ -172,6 +182,12 @@ struct TranscriptDetailView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
+            Button { showAnalysis = true } label: {
+                Image(systemName: "waveform.badge.magnifyingglass")
+            }
+            .accessibilityLabel("Speech analysis")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button {
                     showExportPicker = true
@@ -185,6 +201,8 @@ struct TranscriptDetailView: View {
                 }
                 Divider()
                 Button(role: .destructive) {
+                    player.stop()
+                    transcript.removeKeptFiles()
                     modelContext.delete(transcript)
                     try? modelContext.save()
                     dismiss()

@@ -43,6 +43,7 @@ struct LiveView: View {
     @State private var copied = false
     @State private var showLanguages = false
     @State private var showLibrary = false
+    @State private var showAnalysis = false
     private static let bottom = "bottom"
 
     private var engine: SpeechEngine { .nemotron }
@@ -73,6 +74,9 @@ struct LiveView: View {
         .background(Studio.bg.ignoresSafeArea())
         .sheet(isPresented: $showLanguages) { languageSheet }
         .sheet(isPresented: $showLibrary) { TranscriptLibraryView().presentationSizing(.page) }
+        .sheet(isPresented: $showAnalysis) {
+            if let saved { SpeechAnalysisView(transcript: saved).presentationSizing(.page) }
+        }
         .onAppear { downloaded = engine.isDownloaded }
     }
 
@@ -198,9 +202,17 @@ struct LiveView: View {
                     Text("Finishing…").font(Studio.mono(10)).foregroundColor(Studio.mute)
                 }
             } else if saved != nil, !isRecording {
-                Text("Kept in the library, with the recording.")
-                    .font(Studio.mono(10))
-                    .foregroundColor(Studio.mute)
+                HStack {
+                    Text("Kept in the library, with the recording.")
+                        .font(Studio.mono(10))
+                        .foregroundColor(Studio.mute)
+                    Spacer()
+                    Button { showAnalysis = true } label: {
+                        Label("Speech analysis", systemImage: "waveform.badge.magnifyingglass")
+                            .font(Studio.mono(10, weight: .semibold))
+                            .foregroundColor(Studio.accent)
+                    }
+                }
             }
         }
     }
