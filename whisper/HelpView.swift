@@ -29,6 +29,7 @@ struct HelpView: View {
                             }
                         }
                     }
+                    FeedbackCard()
                 }
                 .padding(20)
                 .frame(maxWidth: 640, alignment: .leading)
@@ -38,6 +39,18 @@ struct HelpView: View {
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        Link(destination: Feedback.issueURL) {
+                            Label("Report an issue on GitHub", systemImage: "exclamationmark.bubble")
+                        }
+                        Link(destination: Feedback.emailURL) {
+                            Label("Email the developer", systemImage: "envelope")
+                        }
+                    } label: {
+                        Label("Feedback", systemImage: "bubble.left.and.text.bubble.right")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                 }
@@ -168,5 +181,88 @@ struct HelpButton: View {
         .sheet(isPresented: $showing) {
             HelpView(topic: topic).presentationSizing(.page)
         }
+    }
+}
+
+/// Where to send a problem or an idea: an issue on the app's GitHub page,
+/// or an email. Both start with the app's version, iOS and the device
+/// filled in, which is the first thing needed to look into anything.
+enum Feedback {
+    static let repository = "https://github.com/yu314-coder/WhisperKit"
+    static let email = "euler.yu@gmail.com"
+
+    /// "Whisperkit 1.3.1 (60) · iOS 27.0 · iPhone17,1".
+    static var about: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        var system = utsname()
+        uname(&system)
+        let model = withUnsafeBytes(of: &system.machine) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        return "Whisperkit \(version) (\(build)) · iOS \(UIDevice.current.systemVersion) · \(model)"
+    }
+
+    static var issueURL: URL {
+        var components = URLComponents(string: repository + "/issues/new")!
+        components.queryItems = [
+            URLQueryItem(name: "body", value: "**What happened, and what did you expect?**\n\n\n**Steps to make it happen again:**\n1. \n\n---\n\(about)"),
+        ]
+        return components.url!
+    }
+
+    static var emailURL: URL {
+        var components = URLComponents()
+        components.scheme = "mailto"
+        components.path = email
+        components.queryItems = [
+            URLQueryItem(name: "subject", value: "Whisperkit feedback"),
+            URLQueryItem(name: "body", value: "\n\n\n---\n\(about)"),
+        ]
+        return components.url!
+    }
+}
+
+/// The last thing in every help page: how to report a problem or suggest
+/// something.
+private struct FeedbackCard: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: "bubble.left.and.text.bubble.right")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundColor(Studio.accent)
+                    .frame(width: 26)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Feedback")
+                        .font(Studio.text(15, weight: .semibold))
+                        .foregroundColor(Studio.ink)
+                    Text("Found a problem, or have an idea? Report it on GitHub, where you can follow what happens to it, or send an email. Both start with the app's version and your device filled in.")
+                        .font(Studio.text(14))
+                        .foregroundColor(Studio.ink.opacity(0.75))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            HStack(spacing: 10) {
+                Link(destination: Feedback.issueURL) {
+                    Label("GitHub", systemImage: "exclamationmark.bubble")
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                Link(destination: Feedback.emailURL) {
+                    Label("Email", systemImage: "envelope")
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+            .font(Studio.text(14, weight: .semibold))
+            .tint(Studio.accent)
+            .padding(.leading, 40)
+        }
+        .padding(.top, 8)
     }
 }
