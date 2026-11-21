@@ -129,6 +129,9 @@ final class ImageEngine {
         endedInBackground = false
         lastImage = nil
         rewrittenPrompt = nil
+        // A model brought as a GGUF, run with the rest of this one.
+        let custom = YourModels.shared.image(for: model)
+        let customRewriter = enhance ? YourModels.shared.rewriter : nil
         let id = UUID()
         runID = id
         phase = .generating(stage: "Starting", progress: 0)
@@ -190,7 +193,8 @@ final class ImageEngine {
                 })
                 try Task.checkCancellation()
                 try await self.run(model: model, prompt: prompt, size: size,
-                                   seed: seed ?? UInt64.random(in: 0 ... UInt64(UInt32.max)), enhance: enhance, id: id)
+                                   seed: seed ?? UInt64.random(in: 0 ... UInt64(UInt32.max)), enhance: enhance, id: id,
+                                   custom: custom, customRewriter: customRewriter)
                 job.finish(success: true)
                 self.notifyIfAway(title: "Your picture is ready", body: Self.shortened(prompt))
             } catch is CancellationError {
@@ -219,7 +223,7 @@ final class ImageEngine {
     // MARK: - Generation
 
     private func run(model: ImageModel, prompt: String, size: ImageSize, seed: UInt64, enhance: Bool,
-                     id: UUID) async throws {
+                     id: UUID, custom: ImportedModel? = nil, customRewriter: ImportedModel? = nil) async throws {
         // MLX crashes on the Simulator's Metal device (see MusicEngine);
         // DreamShaper is Core ML only and runs there, slowly.
         #if targetEnvironment(simulator)
@@ -228,7 +232,8 @@ final class ImageEngine {
         phase = .generating(stage: "Starting", progress: 0.01)
         let started = Date()
         startedAt = started
-        let directory = model.weightsDirectory
+        let directory = custom?.directory ?? model.weightsDirectory
+        let rewriterDirectory = customRewriter?.directory ?? ImageModel.rewriterDirectory
         let flag = CancellationFlag()
         let report: @Sendable (String, Double) -> Void = { [weak self] label, progress in
             Task { @MainActor [weak self] in
@@ -256,7 +261,7 @@ final class ImageEngine {
                     // On the GPU: off screen without background GPU time it
                     // waits between tokens.
                     report("Writing a detailed prompt", 0.01)
-                    used = try PromptRewriter(directory: ImageModel.rewriterDirectory)
+                    used = try PromptRewriter(directory: rewriterDirectory)
                         .rewrite(prompt, ratio: size.ratio,
                                  isCancelled: { GPUGate.waitUntilOpen(); return flag.isCancelled },
                                  progress: { count in
@@ -279,7 +284,7 @@ final class ImageEngine {
         // Saved under the prompt that made it — the rewriter's, when used —
         // so making it again gives the same picture.
         try await save(image, model: model, prompt: used, size: size, seed: seed,
-                       seconds: Date().timeIntervalSince(started))
+                       seconds: Date().timeIntervalSince(started), name: custom?.name)
         if runID == id { phase = .idle }
     }
 
@@ -331,14 +336,14 @@ final class ImageEngine {
     }
 
     private func save(_ image: CGImage, model: ImageModel, prompt: String, size: ImageSize,
-                      seed: UInt64, seconds: Double) async throws {
+                      seed: UInt64, seconds: Double, name customName: String? = nil) async throws {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = model.displayName
+        let name = customName ?? model.displayName
         // PNG encoding takes a moment at 1024 px: off the main thread.
         let path = try await Task.detached(priority: .userInitiated) {
             try ImageFiles.save(image, prompt: trimmed, model: name)
         }.value
-        let saved = SavedImage(prompt: trimmed.isEmpty ? "Untitled" : trimmed, modelName: model.displayName,
+        let saved = SavedImage(prompt: trimmed.isEmpty ? "Untitled" : trimmed, modelName: name,
                                filePath: path, width: image.width, height: image.height,
                                seed: Int64(seed), seconds: seconds)
         if let modelContext {

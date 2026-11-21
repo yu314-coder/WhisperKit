@@ -74,6 +74,8 @@ struct whisperApp: App {
 struct RootView: View {
     private enum Tab: String { case transcribe, live, music, image }
     @State private var tab = Self.firstTab
+    /// Music and Image are left out on the China mainland App Store.
+    private let availability = GenerationAvailability.shared
 
     /// The Transcribe tab, or in Debug builds `-AppStartTab live|music|image`.
     private static var firstTab: Tab {
@@ -110,18 +112,24 @@ struct RootView: View {
             LiveView()
                 .tabItem { Label("Live", systemImage: "captions.bubble") }
                 .tag(Tab.live)
-            MusicView()
-                .tabItem { Label("Music", systemImage: "music.note") }
-                // iPad's floating tab bar draws badges only in red, over the
-                // label, and iPhone Duo's side column lets them stick out;
-                // there the Music page's own BETA tag says it.
-                .badge(showsBadges ? Text("Beta") : nil)
-                .tag(Tab.music)
-            ImageView()
-                .tabItem { Label("Image", systemImage: "photo.artframe") }
-                .badge(showsBadges ? Text("Beta") : nil)
-                .tag(Tab.image)
+            if availability.offersGeneration {
+                MusicView()
+                    .tabItem { Label("Music", systemImage: "music.note") }
+                    // iPad's floating tab bar draws badges only in red, over the
+                    // label, and iPhone Duo's side column lets them stick out;
+                    // there the Music page's own BETA tag says it.
+                    .badge(showsBadges ? Text("Beta") : nil)
+                    .tag(Tab.music)
+                ImageView()
+                    .tabItem { Label("Image", systemImage: "photo.artframe") }
+                    .badge(showsBadges ? Text("Beta") : nil)
+                    .tag(Tab.image)
+            }
         }
+        .onChange(of: availability.offersGeneration, initial: true) { _, offers in
+            if !offers, tab == .music || tab == .image { tab = .transcribe }
+        }
+        .task { await availability.watch() }
         // The whole window, insets included: on iPhone Duo the side column
         // is inset, and the rest alone is phone-shaped.
         .onGeometryChange(for: Bool.self) { proxy in

@@ -207,7 +207,7 @@ struct MusicView: View {
                     Circle()
                         .fill(modelOnDevice ? Studio.ok : Studio.mute.opacity(0.5))
                         .frame(width: 6, height: 6)
-                    Text(selectedModel.displayName)
+                    Text(YourModels.shared.music(for: selectedModel)?.name ?? selectedModel.displayName)
                         .font(Studio.mono(11))
                         .foregroundColor(Studio.ink.opacity(0.82))
                         .lineLimit(1)
@@ -220,7 +220,7 @@ struct MusicView: View {
                 .overlay(Capsule().strokeBorder(Studio.rule, lineWidth: 0.5))
             }
             .buttonStyle(PressableButtonStyle())
-            .accessibilityLabel("Model, \(selectedModel.displayName)")
+            .accessibilityLabel("Model, \(YourModels.shared.music(for: selectedModel)?.name ?? selectedModel.displayName)")
 
             Button { showLibrary = true } label: {
                 Image(systemName: "music.note.list")
@@ -868,9 +868,14 @@ struct MusicModelPicker: View {
             ScrollView {
                 VStack(spacing: 10) {
                     ForEach(MusicModel.allCases) { model in
-                        Button { selected = model; dismiss() } label: { card(model) }
+                        Button { selected = model; YourModels.shared.musicSelection = nil; dismiss() } label: { card(model) }
                             .buttonStyle(PressableButtonStyle())
                     }
+                    YourModelsSection(tab: .music, choose: { model in
+                        if let base = model.musicModel { selected = base }
+                        YourModels.shared.musicSelection = model.id
+                        dismiss()
+                    }, isChosen: { YourModels.shared.musicSelection == $0.id && selected == $0.musicModel })
                 }
                 .padding(16)
             }
@@ -911,13 +916,18 @@ struct MusicModelPicker: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(selected == model ? Studio.panel : Studio.sunk)
+                .fill(isBuiltInChosen(model) ? Studio.panel : Studio.sunk)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(selected == model ? Studio.accent : Studio.rule,
-                              lineWidth: selected == model ? 1.5 : 0.5)
+                .strokeBorder(isBuiltInChosen(model) ? Studio.accent : Studio.rule,
+                              lineWidth: isBuiltInChosen(model) ? 1.5 : 0.5)
         )
+    }
+
+    /// The built-in model itself, not one of your models run with it.
+    private func isBuiltInChosen(_ model: MusicModel) -> Bool {
+        selected == model && YourModels.shared.music(for: model) == nil
     }
 
     private func chip(_ text: String, tint: Color) -> some View {

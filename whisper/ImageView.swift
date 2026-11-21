@@ -169,7 +169,7 @@ struct ImageView: View {
             Button { showModelPicker = true } label: {
                 HStack(spacing: 5) {
                     Circle().fill(neededBytes == 0 ? Studio.ok : Studio.mute.opacity(0.5)).frame(width: 6, height: 6)
-                    Text(selectedModel.displayName)
+                    Text(YourModels.shared.image(for: selectedModel)?.name ?? selectedModel.displayName)
                         .font(Studio.mono(11))
                         .foregroundColor(Studio.ink.opacity(0.82))
                         .lineLimit(1)
@@ -183,7 +183,7 @@ struct ImageView: View {
             }
             .buttonStyle(PressableButtonStyle())
             .disabled(engine.isBusy)
-            .accessibilityLabel("Model, \(selectedModel.displayName)")
+            .accessibilityLabel("Model, \(YourModels.shared.image(for: selectedModel)?.name ?? selectedModel.displayName)")
 
             Button { showLibrary = true } label: {
                 Image(systemName: "photo.stack")
@@ -279,7 +279,7 @@ struct ImageView: View {
                         Text("Enhance prompt")
                             .font(Studio.text(13, weight: .medium))
                             .foregroundColor(Studio.ink)
-                        Text("Qwen3.5 first writes your idea out as a detailed description, keeping your names, text and counts, then the picture is made from it. About half a minute more; \(ImageModel.rewriterSizeLabel) the first time.\(ImageModel.rewriterMemoryNote.map { " " + $0 } ?? "")")
+                        Text(YourModels.shared.rewriter.map { "\($0.name), your model, first writes your idea out as a detailed description, then the picture is made from it." } ?? "Qwen3.5 first writes your idea out as a detailed description, keeping your names, text and counts, then the picture is made from it. About half a minute more; \(ImageModel.rewriterSizeLabel) the first time.\(ImageModel.rewriterMemoryNote.map { " " + $0 } ?? "")")
                             .font(Studio.text(12))
                             .foregroundColor(Studio.mute)
                             .fixedSize(horizontal: false, vertical: true)
@@ -733,9 +733,9 @@ struct ImageModelPicker: View {
             ScrollView {
                 VStack(spacing: 10) {
                     ForEach(ImageModel.allCases) { model in
-                        Button { selected = model; dismiss() } label: { card(model) }
+                        Button { selected = model; YourModels.shared.imageSelection = nil; dismiss() } label: { card(model) }
                             .buttonStyle(PressableButtonStyle())
-                            .accessibilityAddTraits(selected == model ? .isSelected : [])
+                            .accessibilityAddTraits(isBuiltInChosen(model) ? .isSelected : [])
                             .contextMenu {
                                 if let bytes = removable[model], bytes > 0 {
                                     Button(role: .destructive) { deleting = model } label: {
@@ -745,11 +745,21 @@ struct ImageModelPicker: View {
                             }
                     }
                     storageFooter
+                    YourModelsSection(tab: .image, choose: { model in
+                        if let base = model.imageModel { selected = base }
+                        YourModels.shared.imageSelection = model.id
+                        dismiss()
+                    }, isChosen: { YourModels.shared.imageSelection == $0.id && selected == $0.imageModel })
+                    .id("your-models")
                 }
                 .padding(16)
                 .frame(maxWidth: 760)
                 .frame(maxWidth: .infinity)
             }
+            #if DEBUG
+            // `-ImagePickerEnd YES`: scrolled to Your Models, for screenshots.
+            .defaultScrollAnchor(UserDefaults.standard.bool(forKey: "ImagePickerEnd") ? .bottom : .top)
+            #endif
             .background(Studio.bg.ignoresSafeArea())
             .navigationTitle("Image Model")
             .navigationBarTitleDisplayMode(.inline)
@@ -849,10 +859,15 @@ struct ImageModelPicker: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .fill(selected == model ? Studio.panel : Studio.sunk))
+            .fill(isBuiltInChosen(model) ? Studio.panel : Studio.sunk))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .strokeBorder(selected == model ? Studio.accent : Studio.rule,
-                          lineWidth: selected == model ? 1.5 : 0.5))
+            .strokeBorder(isBuiltInChosen(model) ? Studio.accent : Studio.rule,
+                          lineWidth: isBuiltInChosen(model) ? 1.5 : 0.5))
+    }
+
+    /// The built-in model itself, not one of your models run with it.
+    private func isBuiltInChosen(_ model: ImageModel) -> Bool {
+        selected == model && YourModels.shared.image(for: model) == nil
     }
 
     private func chip(_ text: String, tint: Color = Studio.mute) -> some View {

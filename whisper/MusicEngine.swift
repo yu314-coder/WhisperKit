@@ -85,6 +85,8 @@ final class MusicEngine {
         guard !isBusy else { return }
         startedAt = Date()
         endedInBackground = false
+        // A model brought as a GGUF, run with the rest of this one.
+        let directory = YourModels.shared.music(for: model)?.directory ?? model.weightsDirectory
         ModelMemory.makeRoomForGeneration()
         // The whole run — download, then generation — keeps going when the
         // app is left. It needs the GPU throughout (MLX), so where the device
@@ -106,7 +108,7 @@ final class MusicEngine {
                 try Task.checkCancellation()
                 try await self.runGeneration(model: model, prompt: prompt, lyrics: lyrics,
                                              language: language, seconds: seconds,
-                                             expandsPrompt: expandsPrompt)
+                                             expandsPrompt: expandsPrompt, directory: directory)
                 job.finish(success: true)
                 self.notifyIfAway(title: "Your music is ready", body: Self.shortened(prompt))
             } catch is CancellationError {
@@ -170,7 +172,8 @@ final class MusicEngine {
     // MARK: - Generation
 
     private func runGeneration(model: MusicModel, prompt: String, lyrics: String,
-                               language: String, seconds: Double, expandsPrompt: Bool) async throws {
+                               language: String, seconds: Double, expandsPrompt: Bool,
+                               directory: URL? = nil) async throws {
         // MLX asks the Metal device for its architecture and the Simulator's
         // MTLSimDevice returns null, which MLX turns straight into a
         // std::string — strlen(NULL), a hard crash inside the library before
@@ -182,7 +185,7 @@ final class MusicEngine {
         phase = .generating(stage: "Starting")
         MusicRunMarker.begin()
         try await runACEStep(prompt: prompt, lyrics: lyrics, language: language,
-                             seconds: seconds, model: model, expandsPrompt: expandsPrompt)
+                             seconds: seconds, model: model, expandsPrompt: expandsPrompt, directory: directory)
         #endif
     }
 }
@@ -195,8 +198,9 @@ extension MusicEngine {
     /// generation. Each run draws a new seed, so the same prompt twice gives
     /// two different takes.
     func runACEStep(prompt: String, lyrics: String, language: String,
-                    seconds: Double, model: MusicModel, expandsPrompt: Bool = false) async throws {
-        var generator = ACEGenerator(directory: model.weightsDirectory)
+                    seconds: Double, model: MusicModel, expandsPrompt: Bool = false,
+                    directory: URL? = nil) async throws {
+        var generator = ACEGenerator(directory: directory ?? model.weightsDirectory)
         generator.plannerExpandsCaption = expandsPrompt
         model.configure(&generator)
         let destination = FileManager.default.temporaryDirectory
