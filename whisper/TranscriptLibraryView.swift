@@ -12,6 +12,11 @@ struct TranscriptLibraryView: View {
     /// text, so running it on each keystroke made typing stutter on a large
     /// library.
     @State private var debouncedSearch: String = ""
+    private var pending: PendingAudio { PendingAudio.shared }
+    /// Waiting audio, less whatever is being recorded or transcribed now.
+    private var waiting: [PendingAudio.Item] {
+        pending.items.filter { $0.url != pending.active }
+    }
 
     /// One shared formatter. Allocating a RelativeDateTimeFormatter is
     /// expensive and this used to happen once per row, on every render.
@@ -35,7 +40,7 @@ struct TranscriptLibraryView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if transcripts.isEmpty {
+                if transcripts.isEmpty && waiting.isEmpty {
                     emptyState
                 } else {
                     list
@@ -50,6 +55,7 @@ struct TranscriptLibraryView: View {
                 guard !Task.isCancelled else { return }
                 debouncedSearch = searchText
             }
+            .onAppear { pending.refresh() }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Done") { dismiss() }
@@ -60,6 +66,29 @@ struct TranscriptLibraryView: View {
 
     private var list: some View {
         List {
+            if !waiting.isEmpty {
+                Section {
+                    ForEach(waiting) { item in
+                        pendingRow(item)
+                            .listRowInsets(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
+                            .listRowBackground(Studio.bg)
+                            .listRowSeparatorTint(Studio.rule)
+                    }
+                    .onDelete { offsets in
+                        offsets.map { waiting[$0] }.forEach(pending.delete)
+                    }
+                    Text("Transcription was interrupted or didn't finish. The audio is kept until you transcribe it or swipe to delete it.")
+                        .font(Studio.text(12))
+                        .foregroundColor(Studio.mute)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 14, trailing: 14))
+                        .listRowBackground(Studio.bg)
+                        .listRowSeparator(.hidden)
+                } header: {
+                    Text("NOT TRANSCRIBED YET")
+                        .font(Studio.mono(10, weight: .semibold))
+                        .foregroundColor(Studio.mute)
+                }
+            }
             ForEach(filtered) { t in
                 ZStack {
                     NavigationLink {
@@ -126,6 +155,39 @@ struct TranscriptLibraryView: View {
                 .foregroundColor(Studio.mute.opacity(0.7))
         }
         .contentShape(Rectangle())
+    }
+
+    private func pendingRow(_ item: PendingAudio.Item) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: "waveform.badge.exclamationmark")
+                .font(.system(size: 22, weight: .light))
+                .foregroundColor(Studio.mute)
+                .frame(width: 96, height: 34)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.name)
+                    .font(Studio.text(15, weight: .medium))
+                    .foregroundColor(Studio.ink)
+                    .lineLimit(2)
+                HStack(spacing: 8) {
+                    if let duration = item.duration {
+                        Text(TranscriptExporter.formatTimestamp(duration))
+                    }
+                    Text(ImageModel.formatBytes(Int64(item.bytes)))
+                    Text(relativeDate(item.added))
+                }
+                .font(Studio.mono(9))
+                .foregroundColor(Studio.mute)
+            }
+            Spacer(minLength: 4)
+            Button("Transcribe") {
+                pending.retryRequest = item.url
+                dismiss()
+            }
+            .font(Studio.text(13, weight: .semibold))
+            .buttonStyle(.bordered)
+            .tint(Studio.accent)
+            .disabled(pending.active != nil)
+        }
     }
 
     private var emptyState: some View {

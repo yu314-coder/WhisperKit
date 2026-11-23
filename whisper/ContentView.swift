@@ -349,6 +349,13 @@ struct ContentView: View {
                 TranscriptLibraryView()
                     .presentationSizing(.page)
             }
+            // "Transcribe" on audio waiting in the Library.
+            .onChange(of: PendingAudio.shared.retryRequest) { _, url in
+                guard let url else { return }
+                PendingAudio.shared.retryRequest = nil
+                guard !isProcessing, !isRecording else { return }
+                Task { await importAndTranscribeFile(from: url) }
+            }
             .sheet(item: $quickOpenTranscript) { t in
                 NavigationStack {
                     TranscriptDetailView(transcript: t)
@@ -462,6 +469,13 @@ struct ContentView: View {
                     analysisRecord = recentTranscripts.first
                 }
             }
+            // `-DebugOpenLibrary YES`: the Library, for screenshots.
+            if UserDefaults.standard.bool(forKey: "DebugOpenLibrary") {
+                Task {
+                    try? await Task.sleep(for: .seconds(1))
+                    showLibrary = true
+                }
+            }
             // `-DebugImportLink <https URL>`: what the link sheet does.
             if let raw = UserDefaults.standard.string(forKey: "DebugImportLink"), let link = URL(string: raw) {
                 Task {
@@ -480,7 +494,8 @@ struct ContentView: View {
             Task { @MainActor in
                 removeRetiredModelDownloads()
                 sanitiseStoredSegmentsIfNeeded()
-                cleanupOrphanedImports()
+                PendingAudio.recoverLeftovers(imports: getImportsDirectory())
+                PendingAudio.shared.refresh()
                 #if DEBUG
                 createDebugFiles()
                 #endif
@@ -2646,28 +2661,6 @@ struct ContentView: View {
         }
     }
 
-    /// Clears the Imports scratch folder.
-    ///
-    /// Every import was copied there and never removed, while a second copy was
-    /// made in SavedAudio — so each imported file was kept twice, forever.
-    /// Transcripts only ever reference SavedAudio, so anything left here is
-    /// dead weight from an interrupted run or an older version.
-    func cleanupOrphanedImports() {
-        let imports = getImportsDirectory()
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: imports, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
-        ), !files.isEmpty else { return }
-
-        var reclaimed = 0
-        for file in files {
-            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            if (try? FileManager.default.removeItem(at: file)) != nil { reclaimed += size }
-        }
-        if reclaimed > 0 {
-            print("Reclaimed \(reclaimed / 1_048_576) MB of orphaned imports")
-        }
-    }
-
     /// Fills in envelopes for transcripts saved before waveforms existed.
     ///
     /// Without this the library shows one recording with a shape and the rest
@@ -3100,22 +3093,16 @@ struct ContentView: View {
                 throw NSError(domain: "FileNotFound", code: 404)
             }
             
-            let importsDir = getImportsDirectory()
-            try FileManager.default.createDirectory(at: importsDir, withIntermediateDirectories: true)
-            
-            let fileName = sourceURL.lastPathComponent
-            var destinationURL = importsDir.appendingPathComponent(fileName)
-            var counter = 1
-            
-            while FileManager.default.fileExists(atPath: destinationURL.path) {
-                let nameWithoutExt = sourceURL.deletingPathExtension().lastPathComponent
-                let ext = sourceURL.pathExtension
-                let newName = "\(nameWithoutExt)_\(counter).\(ext)"
-                destinationURL = importsDir.appendingPathComponent(newName)
-                counter += 1
+            // Kept in Pending until its transcript is saved, so an
+            // interrupted or failed run leaves it for the Library to retry.
+            let destinationURL: URL
+            if PendingAudio.contains(sourceURL) {
+                destinationURL = sourceURL
+            } else {
+                destinationURL = try PendingAudio.destination(for: sourceURL.lastPathComponent)
+                try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
             }
-            
-            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+            await MainActor.run { PendingAudio.shared.active = destinationURL }
             
             await MainActor.run {
                 statusMessage = "Transcribing audio..."
@@ -3147,6 +3134,8 @@ struct ContentView: View {
                 endLiveActivity()
                 transcriptionJob?.finish(success: false)
                 transcriptionJob = nil
+                PendingAudio.shared.active = nil
+                PendingAudio.shared.refresh()
             }
         }
     }
@@ -3183,10 +3172,18 @@ struct ContentView: View {
                     // fails AVAudioFile open (error 1685348671 = 'dta?'). LPCM
                     // is universally readable and is what Whisper consumes
                     // internally anyway, so no quality loss.
-                    let url = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("recording_\(UUID().uuidString).wav")
-                    let recorder = try MicRecorder(url: url)
-                    try recorder.start()
+                    // Straight into Pending, so the audio outlives the app
+                    // being closed — even mid-recording.
+                    let url = try PendingAudio.destination(for: PendingAudio.recordingName(Date()))
+                    let recorder: MicRecorder
+                    do {
+                        recorder = try MicRecorder(url: url)
+                        try recorder.start()
+                    } catch {
+                        try? FileManager.default.removeItem(at: url)
+                        throw error
+                    }
+                    PendingAudio.shared.active = url
 
                     micRecorder = recorder
                     recordingURL = url
@@ -3226,7 +3223,10 @@ struct ContentView: View {
             // the file can be momentarily unreadable / 0 bytes right after.
             let ready = await waitForRecordingFile(at: url)
             guard ready else {
+                try? FileManager.default.removeItem(at: url)
                 await MainActor.run {
+                    PendingAudio.shared.active = nil
+                    PendingAudio.shared.refresh()
                     showError("That recording was too short to save. Record at least one second of audio.")
                     isProcessing = false
                     statusMessage = ""
@@ -3693,6 +3693,8 @@ struct ContentView: View {
             endLiveActivity()
             transcriptionJob?.finish(success: errorMessage == nil)
             transcriptionJob = nil
+            PendingAudio.shared.active = nil
+            PendingAudio.shared.refresh()
         }
     }
 }
