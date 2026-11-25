@@ -476,6 +476,16 @@ struct ContentView: View {
                     showLibrary = true
                 }
             }
+            // `-DebugRetryPending YES`: what the Library's Transcribe button
+            // does, on the newest audio waiting there, once the model is in.
+            if UserDefaults.standard.bool(forKey: "DebugRetryPending") {
+                Task {
+                    _ = await modelPrepTask?.value
+                    PendingAudio.shared.refresh()
+                    print("DebugRetryPending: \(PendingAudio.shared.items.map(\.name))")
+                    PendingAudio.shared.retryRequest = PendingAudio.shared.items.first?.url
+                }
+            }
             // `-DebugImportLink <https URL>`: what the link sheet does.
             if let raw = UserDefaults.standard.string(forKey: "DebugImportLink"), let link = URL(string: raw) {
                 Task {
