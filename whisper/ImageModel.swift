@@ -3,6 +3,7 @@ import Foundation
 /// The Image tab's models, each running entirely on the device — listed
 /// best pictures first, as the model menu shows them.
 enum ImageModel: String, CaseIterable, Identifiable {
+    case ming        = "ming-image-0.2-design"
     case qwenImage   = "qwen-image-2.1-turbo"
     case qwenImageSmall = "qwen-image-2.1-turbo-4bit"
     case zImage      = "z-image-turbo"
@@ -22,6 +23,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .zImage:      return "Z-Image Turbo"
         case .qwenImage:   return "Qwen-Image 2.1 Turbo"
         case .qwenImageSmall: return "Qwen-Image 2.1 Turbo 4-bit"
+        case .ming:        return "Ming-Image 0.2 Design"
         }
     }
 
@@ -33,6 +35,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .fluxKlein:   return "4B"
         case .zImage:      return "6B"
         case .qwenImage, .qwenImageSmall: return "7B"
+        case .ming:        return "6B"
         }
     }
 
@@ -45,13 +48,14 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .zImage:      return "Most lifelike · nothing steers your prompt away"
         case .qwenImage:   return "Finest detail and lettering · slowest · nothing steers your prompt away"
         case .qwenImageSmall: return "Nearly the same pictures at half the download"
+        case .ming:        return "Designs and lettering · posters, pages, product shots · slow"
         }
     }
 
     var engineLabel: String {
         switch self {
         case .dreamShaper:           return "NEURAL ENGINE"
-        case .sanaSprint, .sanaSprintLarge, .fluxKlein, .zImage, .qwenImage, .qwenImageSmall: return "GPU"
+        case .sanaSprint, .sanaSprintLarge, .fluxKlein, .zImage, .qwenImage, .qwenImageSmall, .ming: return "GPU"
         }
     }
 
@@ -69,6 +73,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .zImage:      return "Z-Image-Turbo (Tongyi-MAI) and its abliterated Qwen3 prompt reader: Apache 2.0."
         case .qwenImage, .qwenImageSmall:
             return "Qwen-Image 2.1 Turbo: Qwen RESEARCH LICENSE AGREEMENT — Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved. Its abliterated Qwen3-VL prompt reader: Apache 2.0."
+        case .ming:        return "Ming-Image-0.2-Design (inclusionAI, Ant Group), with its Ling-lite prompt reader: MIT."
         }
     }
 
@@ -115,6 +120,7 @@ enum ImageModel: String, CaseIterable, Identifiable {
         case .zImage:      return Self.zImageFiles
         case .qwenImage:   return Self.qwenImageFiles
         case .qwenImageSmall: return Self.qwenImageSmallFiles
+        case .ming:        return Self.mingFiles
         }
     }
 
@@ -254,6 +260,25 @@ enum ImageModel: String, CaseIterable, Identifiable {
         WeightFile(path: "qwenimage_NOTICE.txt", bytes: 1602, release: release),
     ]
 
+    /// Ming-Image 0.2 Design: the Ling-lite prompt reader (experts 4-bit,
+    /// the rest 8-bit), the connector and the transformer (8-bit), in parts
+    /// under 2 GB; the VAE decoder; Ling's tokenizer.
+    static let mingFiles: [WeightFile] = [
+        WeightFile(path: "ming_condition.part1.safetensors", bytes: 1425078912, release: release),
+        WeightFile(path: "ming_merges.txt", bytes: 1899265, release: release),
+        WeightFile(path: "ming_text.part1.safetensors", bytes: 1812786176, release: release),
+        WeightFile(path: "ming_text.part2.safetensors", bytes: 1886708544, release: release),
+        WeightFile(path: "ming_text.part3.safetensors", bytes: 1886708544, release: release),
+        WeightFile(path: "ming_text.part4.safetensors", bytes: 1886708416, release: release),
+        WeightFile(path: "ming_text.part5.safetensors", bytes: 1876614464, release: release),
+        WeightFile(path: "ming_transformer.part1.safetensors", bytes: 1884326528, release: release),
+        WeightFile(path: "ming_transformer.part2.safetensors", bytes: 1880718272, release: release),
+        WeightFile(path: "ming_transformer.part3.safetensors", bytes: 1880718144, release: release),
+        WeightFile(path: "ming_transformer.part4.safetensors", bytes: 894913920, release: release),
+        WeightFile(path: "ming_vae.safetensors", bytes: 51780776, release: release),
+        WeightFile(path: "ming_vocab.json", bytes: 3359005, release: release),
+    ]
+
     /// The filter every picture passes before it's shown (SafetyChecker),
     /// shared by all three models and downloaded with the first.
     static let safetyFiles: [WeightFile] = [
@@ -319,9 +344,11 @@ enum ImageModel: String, CaseIterable, Identifiable {
         switch self {
         case .dreamShaper, .sanaSprint, .sanaSprintLarge:
             return nil
-        case .fluxKlein, .zImage, .qwenImage, .qwenImageSmall:
-            // Qwen-Image's transformer alone is 7.5 GB (4 GB in 4 bits).
-            guard gigabytes < (self == .qwenImage ? 11 : 7) else { return nil }
+        case .fluxKlein, .zImage, .qwenImage, .qwenImageSmall, .ming:
+            // Qwen-Image's transformer alone is 7.5 GB (4 GB in 4 bits);
+            // Ming's prompt reader is 9 GB, though only a few experts are
+            // read for each word.
+            guard gigabytes < (self == .qwenImage || self == .ming ? 11 : 7) else { return nil }
             return String(format: "%@ runs here. With %.0f GB on this device its weights are read from storage as it goes, so pictures take longer.", displayName, gigabytes.rounded())
         }
     }

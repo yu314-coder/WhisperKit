@@ -30,7 +30,7 @@ extension ImageModel {
         switch self {
         case .dreamShaper: return [ImageSize(width: 512, height: 512)]
         case .sanaSprint, .sanaSprintLarge: return [ImageSize(width: 1024, height: 1024)]
-        case .fluxKlein, .zImage, .qwenImage, .qwenImageSmall:
+        case .fluxKlein, .zImage, .qwenImage, .qwenImageSmall, .ming:
                            return [ImageSize(width: 768, height: 768), ImageSize(width: 1024, height: 1024),
                                    ImageSize(width: 768, height: 1024), ImageSize(width: 1024, height: 768),
                                    ImageSize(width: 512, height: 512)]
@@ -327,6 +327,11 @@ final class ImageEngine {
                                                                      seed: seed,
                                                                      isCancelled: { GPUGate.waitUntilOpen(); return isCancelled() },
                                                                      progress: stage)
+        case .ming:
+            return try MingPipeline(directory: directory).generate(prompt: prompt, width: size.width, height: size.height,
+                                                                   seed: seed,
+                                                                   isCancelled: { GPUGate.waitUntilOpen(); return isCancelled() },
+                                                                   progress: stage)
         case .qwenImage, .qwenImageSmall:
             return try QwenImagePipeline(directory: directory, bits: model == .qwenImageSmall ? 4 : 8).generate(prompt: prompt, width: size.width,
                                                                         height: size.height, seed: seed,

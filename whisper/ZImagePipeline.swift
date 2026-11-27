@@ -36,7 +36,10 @@ struct ZImageTransformer {
         let cos: MLXArray
         let sin: MLXArray
 
-        init(rows: Int, columns: Int, captionLength: Int) {
+        /// - Parameter captionTokens: how many of the padded prompt's tokens
+        ///   are kept (Ming leaves its padding out, where Z-Image fills it);
+        ///   the image's place still counts the padding.
+        init(rows: Int, columns: Int, captionLength: Int, captionTokens: Int? = nil) {
             let axes = [32, 48, 48]
             let frequencies = axes.map { d in (0 ..< d / 2).map { pow(256.0, -Double(2 * $0) / Double(d)) } }
             var positions: [[Double]] = []
@@ -45,7 +48,7 @@ struct ZImageTransformer {
                     positions.append([Double(captionLength + 1), Double(row), Double(column)])
                 }
             }
-            for index in 0 ..< captionLength { positions.append([Double(1 + index), 0, 0]) }
+            for index in 0 ..< (captionTokens ?? captionLength) { positions.append([Double(1 + index), 0, 0]) }
             var cosines: [Float] = [], sines: [Float] = []
             cosines.reserveCapacity(positions.count * 64); sines.reserveCapacity(positions.count * 64)
             for position in positions {
@@ -64,7 +67,12 @@ struct ZImageTransformer {
 
     /// The model's output for `patches` (n, 64) at noise level `sigma`, given
     /// the prompt's states (tokens, 2560). Returns (n, 64), float32.
-    func callAsFunction(_ patches: MLXArray, caption: MLXArray, sigma: Float, rotary: Rotary,
+    ///
+    /// - Parameter extra: Ming's second caption, already at the model's
+    ///   width (tokens, 3840), joined after the first once that's projected.
+    ///   With it there's no learned padding: the rotary table says how many
+    ///   tokens are real, and the rest are left out (upstream masks them).
+    func callAsFunction(_ patches: MLXArray, caption: MLXArray, extra: MLXArray? = nil, sigma: Float, rotary: Rotary,
                         isCancelled: () -> Bool = { false }) throws -> MLXArray {
         let imageCount = patches.dim(0)
         let time = timestepEmbedding((1 - sigma) * 1000)
@@ -83,7 +91,9 @@ struct ZImageTransformer {
         let padded = count + (Self.sequenceMultiple - count % Self.sequenceMultiple) % Self.sequenceMultiple
         var c = rmsNorm(caption.asType(.float32), weight: weights["cap_embedder.0.weight"]!.asType(.float32), eps: 1e-5)
         c = linear(c, "cap_embedder.1").asType(.bfloat16)
-        if padded > count {
+        if let extra {
+            c = concatenated([c, extra.asType(.bfloat16)], axis: 0)
+        } else if padded > count {
             let pad = broadcast(parameter("cap_pad_token").asType(.bfloat16), to: [padded - count, Self.width])
             c = concatenated([c, pad], axis: 0)
         }
