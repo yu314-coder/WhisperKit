@@ -2,7 +2,7 @@
 
     python requantize_mlx.py <in stem> <out stem> <bits> [notice]
 
-Reads `<in stem>.partN.safetensors` (from the export scripts here: each
+Reads `<in stem>.partN.safetensors` (matrices already at `bits` or fewer are kept as they are) (from the export scripts here: each
 quantized matrix as `.wq`/`.scales`/`.biases`, groups of 64), and writes
 `<out stem>.partN.safetensors` with every matrix at `bits` — scales and
 biases in the type they had — 64-byte aligned for MappedWeights.swift.
@@ -28,8 +28,13 @@ result = {}
 for name in sorted(n for n in tensors if n.endswith('.wq')):
     base = name[:-3]
     scales, biases = tensors.pop(base + '.scales'), tensors.pop(base + '.biases')
-    full = mx.dequantize(tensors.pop(name), scales.astype(mx.float32), biases.astype(mx.float32),
-                         group_size=64, bits=8)
+    packed = tensors.pop(name)
+    have = packed.shape[-1] // (2 * scales.shape[-1])   # bits, from the shapes
+    if have <= bits:                                    # already this small (Ming's 4-bit experts)
+        result[base + '.wq'], result[base + '.scales'], result[base + '.biases'] = packed, scales, biases
+        continue
+    full = mx.dequantize(packed, scales.astype(mx.float32), biases.astype(mx.float32),
+                         group_size=64, bits=have)
     q, s, b = mx.quantize(full, group_size=64, bits=bits)
     result[base + '.wq'], result[base + '.scales'], result[base + '.biases'] = q, s.astype(scales.dtype), b.astype(biases.dtype)
     mx.eval(result[base + '.wq'], result[base + '.scales'], result[base + '.biases'])

@@ -122,8 +122,9 @@ struct ZImageTransformer {
         let key = "\(name).weight"
         var y: MLXArray
         if let packed = weights["\(key).wq"] {
-            y = quantizedMatmul(x, packed, scales: weights["\(key).scales"]!, biases: weights["\(key).biases"]!,
-                                transpose: true, groupSize: 64, bits: 8)
+            let scales = weights["\(key).scales"]!
+            y = quantizedMatmul(x, packed, scales: scales, biases: weights["\(key).biases"]!,
+                                transpose: true, groupSize: 64, bits: quantizedBits(packed, scales))
         } else {
             y = matmul(x, weights[key]!.asType(x.dtype).T)
         }
@@ -137,8 +138,9 @@ struct ZImageTransformer {
     /// token. The export packed it to 8 bits like the matrices, (1, 3840).
     private func parameter(_ name: String) -> MLXArray {
         if let packed = weights["\(name).wq"] {
-            return dequantized(packed, scales: weights["\(name).scales"]!, biases: weights["\(name).biases"]!,
-                               groupSize: 64, bits: 8)
+            let scales = weights["\(name).scales"]!
+            return dequantized(packed, scales: scales, biases: weights["\(name).biases"]!,
+                               groupSize: 64, bits: quantizedBits(packed, scales))
         }
         return weights[name]!
     }
@@ -293,4 +295,10 @@ struct ZImagePipeline {
         }
         return try RGBImage.make(planar: planar, width: width, height: height)
     }
+}
+
+/// The bit width of a matrix packed in groups of 64, read from its shapes:
+/// a row of `in` values packs into `in·bits/32` words and has `in/64` scales.
+func quantizedBits(_ packed: MLXArray, _ scales: MLXArray) -> Int {
+    packed.dim(-1) / (2 * scales.dim(-1))
 }

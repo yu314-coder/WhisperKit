@@ -260,21 +260,19 @@ enum ImageModel: String, CaseIterable, Identifiable {
         WeightFile(path: "qwenimage_NOTICE.txt", bytes: 1602, release: release),
     ]
 
-    /// Ming-Image 0.2 Design: the Ling-lite prompt reader (experts 4-bit,
-    /// the rest 8-bit), the connector and the transformer (8-bit), in parts
-    /// under 2 GB; the VAE decoder; Ling's tokenizer.
+    /// Ming-Image 0.2 Design: the Ling-lite prompt reader, the connector and
+    /// the transformer, all 4-bit, in parts under 2 GB; the VAE decoder;
+    /// Ling's tokenizer.
     static let mingFiles: [WeightFile] = [
-        WeightFile(path: "ming_condition.part1.safetensors", bytes: 1425078912, release: release),
+        WeightFile(path: "ming_condition_q4.part1.safetensors", bytes: 754644416, release: release),
         WeightFile(path: "ming_merges.txt", bytes: 1899265, release: release),
-        WeightFile(path: "ming_text.part1.safetensors", bytes: 1812786176, release: release),
-        WeightFile(path: "ming_text.part2.safetensors", bytes: 1886708544, release: release),
-        WeightFile(path: "ming_text.part3.safetensors", bytes: 1886708544, release: release),
-        WeightFile(path: "ming_text.part4.safetensors", bytes: 1886708416, release: release),
-        WeightFile(path: "ming_text.part5.safetensors", bytes: 1876614464, release: release),
-        WeightFile(path: "ming_transformer.part1.safetensors", bytes: 1884326528, release: release),
-        WeightFile(path: "ming_transformer.part2.safetensors", bytes: 1880718272, release: release),
-        WeightFile(path: "ming_transformer.part3.safetensors", bytes: 1880718144, release: release),
-        WeightFile(path: "ming_transformer.part4.safetensors", bytes: 894913920, release: release),
+        WeightFile(path: "ming_text_q4.part1.safetensors", bytes: 1756163392, release: release),
+        WeightFile(path: "ming_text_q4.part2.safetensors", bytes: 1859445568, release: release),
+        WeightFile(path: "ming_text_q4.part3.safetensors", bytes: 1859445568, release: release),
+        WeightFile(path: "ming_text_q4.part4.safetensors", bytes: 1859445440, release: release),
+        WeightFile(path: "ming_text_q4.part5.safetensors", bytes: 1703599104, release: release),
+        WeightFile(path: "ming_transformer_q4.part1.safetensors", bytes: 1892042240, release: release),
+        WeightFile(path: "ming_transformer_q4.part2.safetensors", bytes: 1571702912, release: release),
         WeightFile(path: "ming_vae.safetensors", bytes: 51780776, release: release),
         WeightFile(path: "ming_vocab.json", bytes: 3359005, release: release),
     ]

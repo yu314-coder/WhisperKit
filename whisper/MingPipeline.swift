@@ -64,7 +64,8 @@ struct MingTextReader {
         let isQuery = ids.map { $0 == Self.patchToken }
         let idArray = MLXArray(ids.map { Int32(min(Int($0), 157_183)) })
         var h = dequantized(weights["embed.wq"]![idArray], scales: weights["embed.scales"]![idArray],
-                            biases: weights["embed.biases"]![idArray], groupSize: 64, bits: 8).asType(.bfloat16)
+                            biases: weights["embed.biases"]![idArray], groupSize: 64,
+                            bits: quantizedBits(weights["embed.wq"]!, weights["embed.scales"]!)).asType(.bfloat16)
         if let first = isQuery.firstIndex(of: true) {
             h = concatenated([h[..<first], weights["query_tokens"]!.asType(.bfloat16),
                               h[(first + Self.queryCount)...]], axis: 0)
@@ -95,8 +96,9 @@ struct MingTextReader {
     // MARK: - Pieces
 
     private func linear(_ x: MLXArray, _ name: String) -> MLXArray {
-        quantizedMatmul(x, weights["\(name).wq"]!, scales: weights["\(name).scales"]!, biases: weights["\(name).biases"]!,
-                        transpose: true, groupSize: 64, bits: 8)
+        let packed = weights["\(name).wq"]!, scales = weights["\(name).scales"]!
+        return quantizedMatmul(x, packed, scales: scales, biases: weights["\(name).biases"]!,
+                               transpose: true, groupSize: 64, bits: quantizedBits(packed, scales))
     }
 
     private func norm(_ x: MLXArray, _ name: String) -> MLXArray {
@@ -185,9 +187,9 @@ struct MingTextReader {
 
         func expert(_ input: MLXArray, _ projection: String) -> MLXArray {
             let w = name + "experts." + projection
-            return gatherQuantizedMM(input, weights[w + ".wq"]!, scales: weights[w + ".scales"]!,
-                                     biases: weights[w + ".biases"]!, rhsIndices: picks,
-                                     transpose: true, groupSize: 64, bits: 4)
+            let packed = weights[w + ".wq"]!, scales = weights[w + ".scales"]!
+            return gatherQuantizedMM(input, packed, scales: scales, biases: weights[w + ".biases"]!, rhsIndices: picks,
+                                     transpose: true, groupSize: 64, bits: quantizedBits(packed, scales))
         }
         let input = x.expandedDimensions(axes: [-2, -3])            // (n, 1, 1, 2048)
         let hidden = silu(expert(input, "gate_proj")) * expert(input, "up_proj")   // (n, 8, 1, 512)
@@ -238,8 +240,9 @@ struct MingCondition {
     }
 
     private func linear(_ x: MLXArray, _ name: String) -> MLXArray {
-        var y = quantizedMatmul(x, weights["\(name).weight.wq"]!, scales: weights["\(name).weight.scales"]!,
-                                biases: weights["\(name).weight.biases"]!, transpose: true, groupSize: 64, bits: 8)
+        let packed = weights["\(name).weight.wq"]!, scales = weights["\(name).weight.scales"]!
+        var y = quantizedMatmul(x, packed, scales: scales, biases: weights["\(name).weight.biases"]!,
+                                transpose: true, groupSize: 64, bits: quantizedBits(packed, scales))
         if let bias = weights["\(name).bias"] { y = y + bias }
         return y
     }
@@ -389,9 +392,9 @@ struct MingPipeline {
     enum File {
         static let vocabulary = "ming_vocab.json"
         static let merges = "ming_merges.txt"
-        static let text = (1 ... 5).map { "ming_text.part\($0).safetensors" }
-        static let condition = ["ming_condition.part1.safetensors"]
-        static let transformer = (1 ... 4).map { "ming_transformer.part\($0).safetensors" }
+        static let text = (1 ... 5).map { "ming_text_q4.part\($0).safetensors" }
+        static let condition = ["ming_condition_q4.part1.safetensors"]
+        static let transformer = (1 ... 2).map { "ming_transformer_q4.part\($0).safetensors" }
         static let vae = "ming_vae.safetensors"
     }
 
